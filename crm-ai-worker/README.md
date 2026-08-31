@@ -93,6 +93,7 @@ npm run deploy
 ```text
 CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
+CLOUDFLARE_D1_DATABASE_ID
 GEMINI_API_KEY
 ```
 
@@ -164,7 +165,7 @@ npm run typecheck
 
 ## 部署
 
-本地部署时确认 `wrangler.toml` 中的 `database_id` 已填写真实 D1 ID 后再部署。GitHub Actions 会自动查询 `crm-ai-db` 并临时注入 ID；如果数据库不存在或 Token 没有 `D1 → Read` 权限，会在 `Resolve D1 database ID` 阶段停止：
+本地部署时确认 `wrangler.toml` 中的 `database_id` 已填写真实 D1 ID 后再部署。GitHub Actions 要求 Secret `CLOUDFLARE_D1_DATABASE_ID`，并仅在运行目录临时注入该 ID；如果未设置该 Secret，会在配置检查阶段停止。该 Secret 的值应为 Cloudflare 中 `crm-ai-db` 的真实 D1 ID。
 
 ```bash
 npm run deploy
