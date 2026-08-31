@@ -174,6 +174,14 @@ CLOUDFLARE_ACCOUNT_ID
 OPENROUTER_API_KEY
 ```
 
+仓库中的 workflow 文件为：
+
+```text
+.github/workflows/deploy-worker.yml
+```
+
+推送修改到 `main` 分支后，会自动执行 Worker 类型检查、同步 `OPENROUTER_API_KEY` Secret 并发布 Worker；也可以在 GitHub Actions 页面手动运行 `workflow_dispatch`。
+
 Cloudflare API Token 建议创建为 **Account API Token → Custom token**，并将账户资源限制为部署 Worker 的单个 Cloudflare Account。仅运行 `wrangler deploy` 时需要以下最小权限：
 
 ```text
