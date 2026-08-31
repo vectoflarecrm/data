@@ -233,7 +233,7 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
 }
 
 export default {
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const customers = await claimCustomers(env);
     if (!customers.length) return;
     const updates = await Promise.all(customers.map((customer) => processCustomer(customer, env)));
