@@ -67,6 +67,67 @@ npx wrangler secret put OPENROUTER_MODEL
 meta-llama/llama-3.1-8b-instruct:free
 ```
 
+### 参数归类
+
+Worker 运行时必须使用的 Secret：
+
+```text
+OPENROUTER_API_KEY
+```
+
+可选的 Worker Secret：
+
+```text
+OPENROUTER_MODEL
+```
+
+D1 的 `database_id` 不是 Secret，而是写入 `wrangler.toml` 的数据库绑定配置。使用本地 Wrangler 登录部署时，不需要额外填写 Cloudflare API Token：
+
+```bash
+npx wrangler login
+npm run deploy
+```
+
+如果使用 GitHub Actions 自动部署，则在 GitHub 仓库的 **Settings → Secrets and variables → Actions** 中配置：
+
+```text
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+OPENROUTER_API_KEY
+```
+
+Cloudflare API Token 建议创建为 **Account API Token → Custom token**，并限制到部署 Worker 的单个 Cloudflare Account。仅运行 `wrangler deploy` 时需要：
+
+```text
+Account → Workers Scripts → Edit
+```
+
+如果 CI 还运行以下远程 D1 命令：
+
+```bash
+wrangler d1 execute crm-ai-db --remote --file=./schema.sql
+```
+
+再增加：
+
+```text
+Account → D1 → Edit
+```
+
+只有 CI 需要查看实时日志时才需要：
+
+```text
+Account → Workers Tail → Read
+```
+
+不需要 DNS、Billing、Account Settings Edit 或 User API Tokens Edit 权限。需要覆盖默认模型时，再添加：
+
+```text
+OPENROUTER_MODEL
+```
+
+不要将任何 Secret 写入源码、`wrangler.toml`、README 或提交到 Git。Cloudflare API Token 应使用最小权限。
+
 ## 本地测试
 
 启动支持 Cron Trigger 的本地开发服务器：
