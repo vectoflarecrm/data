@@ -10,8 +10,8 @@ interface CustomerRow {
 
 interface Env {
   DB: D1Database;
-  OPENROUTER_API_KEY: string;
-  OPENROUTER_MODEL?: string;
+  GEMINI_API_KEY: string;
+  GEMINI_MODEL?: string;
 }
 
 interface CustomerAnalysis {
@@ -23,7 +23,7 @@ interface CustomerAnalysis {
 const BATCH_SIZE = 3;
 const FETCH_TIMEOUT_MS = 10_000;
 const AI_TIMEOUT_MS = 15_000;
-const DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct:free";
+const DEFAULT_MODEL = "gemini-2.5-flash-lite";
 const COMPANY_MARKER = (companyId: string) => `【合并数据公司ID: ${companyId}】`;
 
 function withCompanyMarker(remarks: string | null | undefined, companyId: string): string {
@@ -35,7 +35,7 @@ function withCompanyMarker(remarks: string | null | undefined, companyId: string
 function normalizeDomain(value: string): string {
   const candidate = value.trim();
   if (!candidate) throw new Error("domain is empty");
-  const url = new URL(/^https?:\\/\\//i.test(candidate) ? candidate : `https://${candidate}`);
+  const url = new URL(/^https?:\/\//i.test(candidate) ? candidate : `https://${candidate}`);
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("domain must use HTTP or HTTPS");
   }
@@ -108,39 +108,83 @@ async function analyzeCustomer(
   pageText: string,
   env: Env,
 ): Promise<CustomerAnalysis> {
-  if (!env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY is not configured");
+  if (!env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured");
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
   try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://crm-ai-worker.local",
-        "X-Title": "CRM AI Worker",
-      },
-      body: JSON.stringify({
-        model: env.OPENROUTER_MODEL || DEFAULT_MODEL,
-        temperature: 0.1,
-        messages: [
-          {
-            role: "system",
-            content: "你是 B2B CRM 分析助手。只能根据提供的网页文本作答，不得编造事实。必须只返回一个合法 JSON 对象，禁止 Markdown、代码围栏和额外说明。",
+    const model = env.GEMINI_MODEL || DEFAULT_MODEL;
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+      {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "x-goog-api-key": env.GEMINI_API_KEY,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{
+              text: "你是 B2B CRM 分析助手。只能根据提供的网页文本作答，不得编造事实。必须只返回一个合法 JSON 对象，禁止 Markdown、代码围栏和额外说明。",
+            }],
           },
-          {
+          contents: [{
             role: "user",
-            content: `请分析以下企业网页信息，并严格按客户细分群体组织客户画像和解决方案。\n\n要求返回格式：\n{"customer_segment":"客户细分群体","personas_and_solutions":{"personas":[{"name":"画像名称","needs":["需求"]}],"solutions":[{"name":"解决方案名称","value":"解决价值"}]},"remarks":"中文备注"}\n\n公司识别码：${customer.company_id}\n企业网址：${customer.domain}\n网页纯文本：\n${pageText || "（未提取到文本）"}`,
+            parts: [{
+              text: `请分析以下企业网页信息，并严格按客户细分群体组织客户画像和解决方案。\n\n公司识别码：${customer.company_id}\n企业网址：${customer.domain}\n网页纯文本：\n${pageText || "（未提取到文本）"}`,
+            }],
+          }],
+          generationConfig: {
+            temperature: 0.1,
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: "OBJECT",
+              properties: {
+                customer_segment: { type: "STRING" },
+                personas_and_solutions: {
+                  type: "OBJECT",
+                  properties: {
+                    personas: {
+                      type: "ARRAY",
+                      items: {
+                        type: "OBJECT",
+                        properties: {
+                          name: { type: "STRING" },
+                          needs: { type: "ARRAY", items: { type: "STRING" } },
+                        },
+                        required: ["name", "needs"],
+                      },
+                    },
+                    solutions: {
+                      type: "ARRAY",
+                      items: {
+                        type: "OBJECT",
+                        properties: {
+                          name: { type: "STRING" },
+                          value: { type: "STRING" },
+                        },
+                        required: ["name", "value"],
+                      },
+                    },
+                  },
+                  required: ["personas", "solutions"],
+                },
+                remarks: { type: "STRING" },
+              },
+              required: ["customer_segment", "personas_and_solutions", "remarks"],
+            },
           },
-        ],
-      }),
-    });
-    if (!response.ok) throw new Error(`OpenRouter HTTP ${response.status}`);
+        }),
+      },
+    );
+    if (!response.ok) throw new Error(`Gemini HTTP ${response.status}`);
     const payload: unknown = await response.json();
-    const content = (payload as { choices?: Array<{ message?: { content?: unknown } }> })
-      .choices?.[0]?.message?.content;
-    if (typeof content !== "string") throw new Error("OpenRouter response has no message content");
+    const content = (
+      payload as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }>;
+      }
+    ).candidates?.[0]?.content?.parts?.[0]?.text;
+    if (typeof content !== "string") throw new Error("Gemini response has no text content");
     return parseAnalysis(content);
   } finally {
     clearTimeout(timer);

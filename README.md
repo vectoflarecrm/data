@@ -3,7 +3,7 @@
 本项目包含两个部分：
 
 1. 本地优先的 FastAPI + PostgreSQL 客户情报系统；
-2. 独立的 Cloudflare Workers + D1 + OpenRouter AI 定时丰富任务。
+2. 独立的 Cloudflare Workers + D1 + Gemini AI 定时丰富任务。
 
 ## 本地控制面板
 
@@ -73,7 +73,7 @@ pending
   ↓ 原子认领
 processing
   ↓ 10 秒网页抓取 + HTMLRewriter
-OpenRouter AI 分析（15 秒超时）
+Gemini AI 分析（15 秒超时）
   ↓ D1 batch
 completed / failed
 ```
@@ -126,40 +126,40 @@ npx wrangler d1 execute crm-ai-db --local --file=./schema.sql
 必须填写的 Secret 只有：
 
 ```text
-OPENROUTER_API_KEY
+GEMINI_API_KEY
 ```
 
 设置命令：
 
 ```bash
 cd crm-ai-worker
-npx wrangler secret put OPENROUTER_API_KEY
+npx wrangler secret put GEMINI_API_KEY
 ```
 
 可选 Secret：
 
 ```text
-OPENROUTER_MODEL
+GEMINI_MODEL
 ```
 
 设置命令：
 
 ```bash
-npx wrangler secret put OPENROUTER_MODEL
+npx wrangler secret put GEMINI_MODEL
 ```
 
-如果不设置 `OPENROUTER_MODEL`，Worker 使用默认模型：
+如果不设置 `GEMINI_MODEL`，Worker 使用默认模型：
 
 ```text
-meta-llama/llama-3.1-8b-instruct:free
+gemini-2.5-flash-lite
 ```
 
 #### 参数归类
 
 | 参数 | 类型 | 用途 | 设置位置 |
 |---|---|---|---|
-| `OPENROUTER_API_KEY` | 必填 Secret | 调用 OpenRouter AI | Cloudflare Worker Secret |
-| `OPENROUTER_MODEL` | 可选 Secret | 覆盖默认 AI 模型 | Cloudflare Worker Secret |
+| `GEMINI_API_KEY` | 必填 Secret | 调用 Gemini AI | Cloudflare Worker Secret |
+| `GEMINI_MODEL` | 可选 Secret | 覆盖默认 AI 模型 | Cloudflare Worker Secret |
 | `database_id` | 必填配置，不是 Secret | 绑定 D1 数据库 | `crm-ai-worker/wrangler.toml` |
 | `CLOUDFLARE_API_TOKEN` | 仅 CI/CD 需要 | GitHub Actions 部署认证 | GitHub Repository Secret |
 | `CLOUDFLARE_ACCOUNT_ID` | 仅 CI/CD 需要 | GitHub Actions 指定 Cloudflare 账户 | GitHub Repository Secret |
@@ -171,7 +171,7 @@ meta-llama/llama-3.1-8b-instruct:free
 ```text
 CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
-OPENROUTER_API_KEY
+GEMINI_API_KEY
 ```
 
 仓库中的 workflow 文件为：
@@ -180,7 +180,7 @@ OPENROUTER_API_KEY
 .github/workflows/deploy-worker.yml
 ```
 
-推送修改到 `main` 分支后，会自动执行 Worker 类型检查、同步 `OPENROUTER_API_KEY` Secret 并发布 Worker；也可以在 GitHub Actions 页面手动运行 `workflow_dispatch`。
+推送修改到 `main` 分支后，会自动执行 Worker 类型检查、发布 Worker 并同步 `GEMINI_API_KEY` Secret；也可以在 GitHub Actions 页面手动运行 `workflow_dispatch`。
 
 Cloudflare API Token 建议创建为 **Account API Token → Custom token**，并将账户资源限制为部署 Worker 的单个 Cloudflare Account。仅运行 `wrangler deploy` 时需要以下最小权限：
 
@@ -200,7 +200,7 @@ Account → D1 → Edit
 Account → Workers Tail → Read
 ```
 
-本项目不需要 DNS、Billing、Account Settings Edit 或 User API Tokens Edit 权限。`OPENROUTER_MODEL` 仅在需要覆盖代码默认模型时添加。
+本项目不需要 DNS、Billing、Account Settings Edit 或 User API Tokens Edit 权限。`GEMINI_MODEL` 仅在需要覆盖代码默认模型时添加。
 
 不要把 API Key 或 API Token 写入以下文件或提交到 Git：
 
@@ -304,7 +304,7 @@ Worker 会在 `remarks` 末尾自动添加：
 - 使用 `UPDATE ... RETURNING` 原子认领，避免重复处理；
 - 使用 `env.DB.batch()` 批量写回；
 - 不执行 AI 生成的 SQL；
-- 不保存 OpenRouter API Key 到数据库。
+- 不保存 Gemini API Key 到数据库。
 
 ## GitHub 同步
 

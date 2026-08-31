@@ -10,7 +10,7 @@ binding = "DB"
 database_name = "crm-ai-db"
 database_id = "REPLACE_WITH_D1_DATABASE_ID"
 
-# OPENROUTER_API_KEY must be stored as a Wrangler secret:
-# npx wrangler secret put OPENROUTER_API_KEY
+# GEMINI_API_KEY must be stored as a Wrangler secret:
+# npx wrangler secret put GEMINI_API_KEY
 # Optional secret/configuration:
-# npx wrangler secret put OPENROUTER_MODEL
+# npx wrangler secret put GEMINI_MODEL

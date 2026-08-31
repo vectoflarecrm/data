@@ -8,7 +8,7 @@ D1 pending customers
 processing
   ↓ 10 秒网页抓取 + HTMLRewriter
 网页纯文本
-  ↓ 15 秒 OpenRouter AI 分析
+  ↓ 15 秒 Gemini AI 分析
 completed / failed
   ↓ D1 batch 一次性写回
 ```
@@ -49,22 +49,22 @@ npx wrangler d1 execute crm-ai-db --remote --file=./schema.sql
 npx wrangler d1 execute crm-ai-db --local --file=./schema.sql
 ```
 
-写入 OpenRouter API Key（不要写入源码或提交到 Git）：
+写入 Gemini API Key（不要写入源码或提交到 Git）：
 
 ```bash
-npx wrangler secret put OPENROUTER_API_KEY
+npx wrangler secret put GEMINI_API_KEY
 ```
 
 可选模型配置：
 
 ```bash
-npx wrangler secret put OPENROUTER_MODEL
+npx wrangler secret put GEMINI_MODEL
 ```
 
 默认模型为：
 
 ```text
-meta-llama/llama-3.1-8b-instruct:free
+gemini-2.5-flash-lite
 ```
 
 ### 参数归类
@@ -72,13 +72,13 @@ meta-llama/llama-3.1-8b-instruct:free
 Worker 运行时必须使用的 Secret：
 
 ```text
-OPENROUTER_API_KEY
+GEMINI_API_KEY
 ```
 
 可选的 Worker Secret：
 
 ```text
-OPENROUTER_MODEL
+GEMINI_MODEL
 ```
 
 D1 的 `database_id` 不是 Secret，而是写入 `wrangler.toml` 的数据库绑定配置。使用本地 Wrangler 登录部署时，不需要额外填写 Cloudflare API Token：
@@ -93,7 +93,7 @@ npm run deploy
 ```text
 CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
-OPENROUTER_API_KEY
+GEMINI_API_KEY
 ```
 
 仓库中的自动部署 workflow 为：
@@ -102,7 +102,7 @@ OPENROUTER_API_KEY
 .github/workflows/deploy-worker.yml
 ```
 
-推送到 `main` 分支或在 Actions 页面手动运行后，workflow 会先同步 `OPENROUTER_API_KEY`，再执行类型检查和 Worker 部署。
+推送到 `main` 分支或在 Actions 页面手动运行后，workflow 会先执行类型检查和 Worker 部署，再同步 `GEMINI_API_KEY`。
 
 Cloudflare API Token 建议创建为 **Account API Token → Custom token**，并限制到部署 Worker 的单个 Cloudflare Account。仅运行 `wrangler deploy` 时需要：
 
@@ -131,7 +131,7 @@ Account → Workers Tail → Read
 不需要 DNS、Billing、Account Settings Edit 或 User API Tokens Edit 权限。需要覆盖默认模型时，再添加：
 
 ```text
-OPENROUTER_MODEL
+GEMINI_MODEL
 ```
 
 不要将任何 Secret 写入源码、`wrangler.toml`、README 或提交到 Git。Cloudflare API Token 应使用最小权限。
@@ -193,7 +193,7 @@ pending → processing → completed
 
 - 使用单条 `UPDATE ... RETURNING` 原子认领 3 条 pending 记录，避免 Cron 并发重复处理；
 - 网页请求超时为 10 秒；
-- OpenRouter 请求超时为 15 秒；
+- Gemini 请求超时为 15 秒；
 - 单个客户失败不会影响同批其他客户；
 - 所有成功或失败结果通过一次 `env.DB.batch()` 批量写回；
 - `personas_and_solutions` 始终以 JSON 字符串写入；
@@ -203,7 +203,7 @@ pending → processing → completed
 【合并数据公司ID: 对应的company_id】
 ```
 
-- AI Key 只从 `OPENROUTER_API_KEY` Secret 读取；
+- AI Key 只从 `GEMINI_API_KEY` Secret 读取；
 - AI 只能处理网页文本并写入画像字段，不能执行任意 SQL；
 - D1 写回使用 `WHERE id = ? AND status = 'processing'`，避免过期任务覆盖新状态。
 
