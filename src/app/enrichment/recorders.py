@@ -58,6 +58,8 @@ class ContactRecorder:
         *,
         company_id: uuid.UUID,
         full_name: str,
+        first_name: str | None = None,
+        last_name: str | None = None,
         job_title: str | None = None,
         role: PurchasingRole = PurchasingRole.UNKNOWN,
         seniority: Seniority = Seniority.UNKNOWN,
@@ -71,6 +73,10 @@ class ContactRecorder:
         if existing is not None:
             if not apply_updates:
                 return existing
+            if not existing.first_name and first_name:
+                existing.first_name = first_name
+            if not existing.last_name and last_name:
+                existing.last_name = last_name
             if not existing.job_title and job_title:
                 existing.job_title = job_title
             if (
@@ -88,6 +94,8 @@ class ContactRecorder:
         contact = Contact(
             company_id=company_id,
             full_name=full_name,
+            first_name=first_name,
+            last_name=last_name,
             job_title=job_title,
             purchasing_role=role if role != PurchasingRole.UNKNOWN else None,
             seniority=seniority if seniority != Seniority.UNKNOWN else None,

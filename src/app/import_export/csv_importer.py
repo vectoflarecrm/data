@@ -15,7 +15,6 @@ from app.core.enums import (
     CompanyStatus,
     MethodType,
     Platform,
-    ProductCategory,
     ResearchLevel,
     ResearchStatus,
     SourceType,
@@ -31,6 +30,7 @@ from app.core.normalization import (
     normalize_name,
     normalize_phone,
 )
+from app.core.product_categories import map_product_category
 from app.db.models import (
     Brand,
     Company,
@@ -44,6 +44,7 @@ from app.db.models import (
     ResearchTask,
     SocialAccount,
 )
+from app.enrichment.discovery import is_direct_contact_email
 
 _TRUE_VALUES = {"1", "true", "yes", "y", "t"}
 _SPLIT_RE = re.compile(r"[;,.|/]+|\band\b|\b&\b")
@@ -472,7 +473,7 @@ class CsvImporter:
             return
         company.main_products_summary = "; ".join(tokens)
         for token in tokens:
-            category = self._map_product_category(token)
+            category = map_product_category(token)
             if category is None:
                 continue
             existing = (
@@ -545,14 +546,18 @@ class CsvImporter:
         email = row.get("email")
         email_n = None
         if email:
-            email_n = normalize_email(email) if is_valid_email(email) else email.strip().lower()
-            if not is_valid_email(email):
+            normalized_email = normalize_email(email)
+            if not is_valid_email(normalized_email) or not is_direct_contact_email(normalized_email):
                 self.report.invalid_emails.append(email)
+                email = None
+            else:
+                email_n = normalized_email
 
         phone = row.get("phone")
         phone_n = normalize_phone(phone) if phone else None
-        whatsapp = row.get("whatsapp")
-        whatsapp_n = normalize_phone(whatsapp) if whatsapp else None
+        # An imported WhatsApp value has no explicit public WhatsApp signal.
+        # Keep it out of contact methods until a wa.me/API link is verified.
+        whatsapp = None
 
         contact_fields = [
             full_name,
@@ -611,7 +616,6 @@ class CsvImporter:
         for key, method_type, raw_value, norm_value in [
             ("email", MethodType.EMAIL, email, email_n),
             ("phone", MethodType.PHONE, phone, phone_n),
-            ("whatsapp", MethodType.WHATSAPP, whatsapp, whatsapp_n),
         ]:
             if not raw_value or norm_value is None:
                 continue
@@ -736,27 +740,6 @@ class CsvImporter:
             if _parse_bool(row.get(flag)) and ctype not in types:
                 types.append(ctype)
         return types
-
-    @staticmethod
-    def _map_product_category(token: str) -> ProductCategory | None:
-        candidates = [token]
-        singular = token.rstrip("s")
-        if singular and singular != token:
-            candidates.append(singular)
-        for candidate in candidates:
-            key = (
-                candidate.upper()
-                .replace(" ", "_")
-                .replace("-", "_")
-                .replace("INFLATABLE_SUP", "SUP")
-            )
-            if key.endswith("_SUPS"):
-                key = key[:-1]
-            try:
-                return ProductCategory(key)
-            except ValueError:
-                continue
-        return None
 
     @staticmethod
     def _to_int(value: str | None) -> int | None:

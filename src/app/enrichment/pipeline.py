@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime
+from urllib.parse import urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +38,9 @@ from app.enrichment.discovery import (
     extract_phones,
     extract_social_links,
     extract_whatsapp_numbers,
+    is_contact_page,
+    is_direct_contact_email,
+    is_team_page,
 )
 from app.enrichment.evidence import EvidenceRecorder, verification_to_confidence
 from app.enrichment.recorders import (
@@ -166,11 +170,17 @@ class ResearchPipeline:
         method_recorder = ContactMethodRecorder(session)
         social_recorder = SocialRecorder(session)
         for item in contacts:
-            await evidence.record(
+            contact_source_url = item.source_url or company.website
+            if not contact_source_url:
+                # Do not persist an AI contact without a traceable source.
+                continue
+            contact_source_type = _source_type_for_url(contact_source_url)
+            contact_evidence = await evidence.record(
                 company_id=company.id,
                 field_name="contact.full_name",
                 value=item.name,
-                source_type=SourceType.OFFICIAL_TEAM_PAGE,
+                source_url=contact_source_url,
+                source_type=contact_source_type,
                 extraction_method="ai",
                 confidence=(
                     EvidenceConfidence.HIGH
@@ -180,9 +190,17 @@ class ResearchPipeline:
                     else EvidenceConfidence.LOW
                 ),
             )
+            if contact_evidence is None:
+                continue
             contact = await contact_recorder.upsert(
                 company_id=company.id,
                 full_name=item.name,
+                first_name=_first_name(item.name),
+                last_name=_last_name(item.name),
+                job_title=item.title,
+                role=item.role,
+                seniority=item.seniority,
+                linkedin_url=_linkedin_of(item),
                 confidence=item.confidence,
                 apply_updates=False,
             )
@@ -205,7 +223,8 @@ class ResearchPipeline:
                     contact_id=contact.id,
                     field_name=field_name,
                     value=str(candidate_value),
-                    source_type=SourceType.OFFICIAL_TEAM_PAGE,
+                    source_url=contact_source_url,
+                    source_type=contact_source_type,
                     extraction_method="ai",
                     confidence=(
                         EvidenceConfidence.HIGH
@@ -223,13 +242,12 @@ class ResearchPipeline:
                         evidence=candidate_evidence,
                     )
             verified = _verified_from_confidence(item.confidence)
-            source_type: SourceType = SourceType.OFFICIAL_TEAM_PAGE
-            if item.email is not None and await self._conflict_guard(
+            if item.email is not None and is_direct_contact_email(item.email.value) and await self._conflict_guard(
                 session,
                 company_id=company.id,
                 field_name="contact.email",
                 value=item.email.value,
-                source_type=source_type,
+                source_type=contact_source_type,
                 confidence=verification_to_confidence(item.email.verification),
             ):
                 result = await evidence.record(
@@ -237,7 +255,8 @@ class ResearchPipeline:
                     contact_id=contact.id,
                     field_name="contact.email",
                     value=item.email.value,
-                    source_type=source_type,
+                    source_url=item.email.source_url or contact_source_url,
+                    source_type=_source_type_for_url(item.email.source_url or contact_source_url),
                     extraction_method="ai",
                     confidence=verification_to_confidence(item.email.verification),
                 )
@@ -251,21 +270,26 @@ class ResearchPipeline:
                     evidence_id=result.id if result else None,
                 )
             for phone in item.phones:
+                if phone.method == MethodType.WHATSAPP and not _explicit_whatsapp_source(phone.source_url):
+                    continue
+                phone_source_url = phone.source_url or contact_source_url
+                phone_source_type = _source_type_for_url(phone_source_url)
                 if not await self._conflict_guard(
                     session,
                     company_id=company.id,
-                    field_name="contact.phone",
+                    field_name="contact.phone" if phone.method != MethodType.WHATSAPP else "contact.whatsapp",
                     value=phone.value,
-                    source_type=source_type,
+                    source_type=phone_source_type,
                     confidence=verification_to_confidence(phone.verification),
                 ):
                     continue
                 recovered = await evidence.record(
                     company_id=company.id,
                     contact_id=contact.id,
-                    field_name="contact.phone",
+                    field_name="contact.phone" if phone.method != MethodType.WHATSAPP else "contact.whatsapp",
                     value=phone.value,
-                    source_type=source_type,
+                    source_url=phone_source_url,
+                    source_type=phone_source_type,
                     extraction_method="ai",
                     confidence=verification_to_confidence(phone.verification),
                 )
@@ -295,7 +319,8 @@ class ResearchPipeline:
                     contact_id=contact.id,
                     field_name=f"contact.social.{social.platform.value}",
                     value=social.url,
-                    source_type=SourceType.OFFICIAL_SOCIAL,
+                    source_url=social.url,
+                    source_type=_source_type_for_url(social.url),
                     extraction_method="ai",
                     confidence=EvidenceConfidence.MEDIUM
                     if social.confidence >= 0.5
@@ -614,27 +639,27 @@ class ResearchPipeline:
         crawl = await self._site_crawl(company)
         if crawl.fetched == 0:
             return TaskOutcome("retry", error=f"crawl returned no pages: {_summary(crawl)}")
-        values: list[tuple[str, float]] = []
+        values: list[tuple[str, float, str]] = []
         for result_page in crawl.results:
             if not result_page.ok:
                 continue
             combined = result_page.text + "\n" + " ".join(result_page.links)
             if method == MethodType.EMAIL:
                 for email in extract_emails(result_page.text):
-                    values.append((email, _link_confidence(result_page.url)))
+                    values.append((email, _link_confidence(result_page.url), result_page.url))
             elif method == MethodType.PHONE:
                 for original, normalized in extract_phones(result_page.text):
-                    values.append((normalized or original, _link_confidence(result_page.url)))
+                    values.append((normalized or original, _link_confidence(result_page.url), result_page.url))
             elif method == MethodType.WHATSAPP:
                 for number in extract_whatsapp_numbers(combined, result_page.links):
-                    values.append((number, 0.85))
+                    values.append((number, 0.85, result_page.url))
         known = await _known_methods(session, company.id, method)
-        fresh = [(v, c) for v, c in values if v.lower() not in {k.lower() for k in known}]
+        fresh = [(v, c, u) for v, c, u in values if v.lower() not in {k.lower() for k in known}]
         contact = await _company_contact(session, company)
         evidence = EvidenceRecorder(session)
         methods = ContactMethodRecorder(session)
         recorded = 0
-        for value, confidence in fresh:
+        for value, confidence, source_url in fresh:
             if method == MethodType.EMAIL:
                 suppressed = (await session.execute(
                     select(EmailSuppression.id).where(EmailSuppression.normalized_email == value.lower())
@@ -665,6 +690,7 @@ class ResearchPipeline:
                 contact_id=contact.id if contact else None,
                 field_name=f"company.{method.value.lower()}",
                 value=value,
+                source_url=source_url,
                 source_type=page_type,
                 extraction_method="regex",
                 confidence=evidence_confidence,
@@ -879,13 +905,42 @@ def _linkedin_of(item: ContactResearchResult) -> str | None:
     return None
 
 
+def _source_type_for_url(url: str | None) -> SourceType:
+    """Map an actual source URL to the strongest applicable evidence type."""
+    host = (urlsplit(url or "").netloc or "").lower().removeprefix("www.")
+    if host in {"linkedin.com"} or host.endswith(".linkedin.com"):
+        return SourceType.LINKEDIN
+    if host in {"facebook.com", "instagram.com"} or host.endswith((".facebook.com", ".instagram.com")):
+        return SourceType.OFFICIAL_SOCIAL
+    path = (urlsplit(url or "").path or "").lower()
+    if "contact" in path:
+        return SourceType.OFFICIAL_CONTACT_PAGE
+    if "team" in path or "people" in path or "management" in path:
+        return SourceType.OFFICIAL_TEAM_PAGE
+    return SourceType.OFFICIAL_WEBSITE
+
+
+def _explicit_whatsapp_source(url: str | None) -> bool:
+    """AI WhatsApp claims require a source URL that explicitly identifies WhatsApp."""
+    host = (urlsplit(url or "").netloc or "").lower().removeprefix("www.")
+    return host in {"wa.me", "api.whatsapp.com"} or host.endswith(".wa.me")
+
+
+def _first_name(full_name: str) -> str | None:
+    parts = full_name.strip().split()
+    return parts[0] if parts else None
+
+
+def _last_name(full_name: str) -> str | None:
+    parts = full_name.strip().split()
+    return " ".join(parts[1:]) if len(parts) > 1 else None
+
+
 def _verified_from_confidence(confidence: float) -> VerificationStatus:
     return VerificationStatus.VERIFIED if confidence >= 0.8 else VerificationStatus.UNVERIFIED
 
 
 def _link_confidence(url: str) -> float:
-    from app.enrichment.discovery import is_contact_page, is_team_page
-
     if is_contact_page(url) or is_team_page(url):
         return 0.8
     return 0.5

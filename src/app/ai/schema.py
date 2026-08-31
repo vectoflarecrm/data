@@ -39,8 +39,10 @@ class ContactPointResult(BaseModel):
 
     method: MethodType = MethodType.EMAIL
     value: str
+    source_url: str | None = None
     verification: VerificationStatus = VerificationStatus.UNVERIFIED
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
 
 
 class SocialProfileResult(BaseModel):
@@ -68,7 +70,9 @@ class ContactResearchResult(BaseModel):
     model_config = STRICT
 
     name: str
+    source_url: str | None = None
     title: str | None = None
+
     role: PurchasingRole = PurchasingRole.UNKNOWN
     seniority: Seniority = Seniority.UNKNOWN
     company_name: str | None = None

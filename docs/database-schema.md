@@ -2,7 +2,7 @@
 
 **Engine:** PostgreSQL 16 (container `watersports_postgres`, port 5432)
 **Connection:** `postgresql+asyncpg://watersports:watersports@localhost:5432/watersports`
-**Migration head:** `92a389f336cf` (add ai contexts)
+**Migration head:** `f1a2b3c4d5e6` (canonical watersports product categories)
 
 This document is generated from live database introspection
 (`information_schema` / SQLAlchemy `inspect`). Source of truth for the schema is
@@ -201,7 +201,17 @@ PG-backed async worker queue. Claims via
 
 Flat normalized catalogs. `name` is **unique** (`uq_product_name`/`uq_brand_name`).
 
-products: name, category (SUP/KAYAK/WAKE…), subcategory, description, timestamps.
+Products use the `productcategory` enum. The canonical customer-search categories are:
+
+| Database value | Display label | Recognized input examples |
+|---|---|---|
+| `RIB_BOAT` | RIB boats | RIB, RIB boat, RIB boats, rigid inflatable boat |
+| `INFLATABLE_BOAT` | Inflatable boats | inflatable, inflatable boat, inflatable boats |
+| `SUP` | SUPs (standup paddleboards) | SUP, SUPs, standup paddleboard(s) |
+
+Legacy `RIB` values are normalized to `RIB_BOAT` by migration `f1a2b3c4d5e6`. New CSV imports and AI product research use the canonical values above. Existing more-specific categories such as `INFLATABLE_SUP` remain available when the source explicitly identifies them.
+
+products: name, category, subcategory, description, timestamps.
 brands: name, website, timestamps.
 
 ## 9. `company_brands`

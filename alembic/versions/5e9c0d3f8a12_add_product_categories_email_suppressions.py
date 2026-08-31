@@ -4,6 +4,7 @@ Revision ID: 5e9c0d3f8a12
 Revises: 4d8b9c2e7f10
 """
 from collections.abc import Sequence
+
 import sqlalchemy as sa
 from alembic import op
 

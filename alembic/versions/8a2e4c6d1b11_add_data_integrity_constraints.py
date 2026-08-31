@@ -39,7 +39,7 @@ def upgrade() -> None:
         ["company_id", "platform", "profile_url"], unique=True,
         postgresql_where=sa.text("profile_url IS NOT NULL"),
     )
-    for column, definition in {
+    for _column, definition in {
         "recipient_email": sa.Column("recipient_email", sa.String(500)),
         "normalized_recipient_email": sa.Column("normalized_recipient_email", sa.String(320)),
         "suppression_checked_at": sa.Column("suppression_checked_at", sa.DateTime(timezone=True)),

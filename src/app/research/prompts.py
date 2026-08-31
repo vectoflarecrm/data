@@ -4,11 +4,14 @@ from app.core.config import get_settings
 from app.db.models import Company
 
 _RULES = """Rules:
-- Base every claim strictly on the provided source text.
-- NEVER invent, derive, or guess email addresses, phone numbers, social handles,
-  product names, brands, founded years or people that are not in the text.
+- Data truth is more important than completeness: leave a field empty or UNKNOWN when the source does not state it.
+- Base every claim strictly on the provided source text and never invent, derive, or guess email addresses, phone numbers, social handles, product names, brands, founded years, addresses or people.
+- Never infer an email from a person's name, infer a mobile number from a landline, or infer WhatsApp from an ordinary mobile number.
+- Every person, email, phone, WhatsApp number and social account must have an exact source URL when one is present in the source text; otherwise leave the URL empty and keep the value unverified.
+- Do not include generic sales or invoice inboxes as personal/direct contact emails.
+- WhatsApp is valid only when the source contains an explicit wa.me/api.whatsapp.com link or explicitly labels the number as WhatsApp.
+- Do not claim Google Maps, LinkedIn, Facebook or Instagram verification unless the supplied source text contains that evidence.
 - When information is absent, use UNKNOWN, empty lists or null — never fabricate.
-- Do not infer personal contact details.
 - Output must be a single JSON object matching the requested schema exactly."""
 
 _CHAR_BUDGET_DEFAULT = 20000
@@ -44,8 +47,13 @@ def company_research_prompt(company: Company, crawl_text: str) -> tuple[str, str
         f"{truncate_to(crawl_text)}\n\n"
         "Produce CompanyResearchResult with description, company_type, main_products "
         "(ProductCategory enum values), brands, social_accounts, buying_signals and "
-        "evidence claims (evidence confidence is your best judgement, prefer HIGH only "
-        "when the page states it verbatim)."
+        "evidence claims. Products and services must be named in English. For the "
+        "requested core categories, use RIB_BOAT for RIB boats, INFLATABLE_BOAT for "
+        "inflatable boats, and SUP for SUPs (standup paddleboards); use a more specific "
+        "existing subcategory only when the source explicitly supports it. Add only "
+        "business tags supported by the source (MANUFACTURER, DISTRIBUTOR, DEALER/RETAILER, "
+        "RENTAL or UNKNOWN). Evidence confidence must be HIGH only when the page states "
+        "the fact verbatim; never mark an unverified external channel as confirmed."
     )
     return system, user
 
@@ -61,8 +69,13 @@ def contacts_prompt(company: Company, crawl_text: str) -> tuple[str, str]:
         "Source text:\n\n"
         f"{truncate_to(crawl_text)}\n\n"
         'Produce a JSON array under the key "contacts" of ContactResearchResult objects. '
-        "Only include people that appear in the text. Set role to UNKNOWN when the role "
-        "is not stated. Never guess email addresses."
+        "Only include people that appear verbatim in the source. If a person's first or "
+        "last name is not stated, leave that component empty; do not manufacture a full "
+        "name. Set role to UNKNOWN when the role is not stated. Never guess email addresses. "
+        "Exclude sales/invoice inboxes as direct contact emails. For every email, phone or "
+        "WhatsApp value, copy the exact source_url from the source text when available. "
+        "Only mark WhatsApp when an explicit wa.me/api.whatsapp.com link or explicit "
+        "WhatsApp label supports it."
     )
     return system, user
 

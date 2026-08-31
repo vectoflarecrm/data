@@ -43,7 +43,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    for table, name, ondelete in (
+    for table, name, _ondelete in (
         ("outreach", "fk_outreach_contact_company", "SET NULL"),
         ("ai_contexts", "fk_ai_context_contact_company", "SET NULL"),
         ("research_evidence", "fk_evidence_contact_company", "SET NULL"),

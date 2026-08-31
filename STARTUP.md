@@ -1,39 +1,37 @@
 # 控制面板启动步骤
 
-## 一键启动
+请在项目根目录按顺序执行以下命令。
 
-### Linux / macOS
-
-在项目根目录执行：
+## 1. 启动 PostgreSQL 数据库
 
 ```bash
-bash start_dashboard.sh
+docker compose up -d db
 ```
 
-脚本会：
+如果 PostgreSQL 已经运行，可以跳过此步骤。
 
-1. 启动 PostgreSQL Docker 容器；
-2. 执行数据库迁移；
-3. 启动 FastAPI 服务；
-4. 尝试自动打开浏览器控制面板。
+## 2. 执行数据库迁移
 
-### Windows
+```bash
+.venv/bin/alembic upgrade head
+```
 
-双击项目根目录的：
+## 3. 启动 FastAPI 服务
+
+```bash
+PYTHONPATH=src .venv/bin/uvicorn app.main:app \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --reload
+```
+
+看到以下提示表示服务启动成功：
 
 ```text
-start_dashboard.bat
+Uvicorn running on http://127.0.0.1:8000
 ```
 
-脚本会启动 Docker、执行迁移、打开服务窗口，并尝试打开浏览器。
-
-## 手动启动
-
-```bash
-docker-compose up -d postgres
-.venv/bin/alembic upgrade head
-PYTHONPATH=src .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
-```
+## 4. 打开控制面板
 
 浏览器访问：
 
@@ -47,22 +45,24 @@ API 文档：
 http://127.0.0.1:8000/docs
 ```
 
-## 停止服务
+## 5. 停止服务
 
-运行服务的终端按：
+在运行 Uvicorn 的终端按：
 
 ```text
 Ctrl+C
 ```
 
-如需停止 PostgreSQL 容器：
-
-```bash
-docker compose stop postgres
-```
-
-如果端口 8000 已被占用，可改用其他端口：
+如果端口 8000 已被占用，可以改用其他端口，例如：
 
 ```bash
 PYTHONPATH=src .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
 ```
+
+此时控制面板地址为：
+
+```text
+http://127.0.0.1:8001/dashboard
+```
+
+bash start_dashboard.sh

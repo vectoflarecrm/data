@@ -7,7 +7,14 @@ from app.core.enums import Platform
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+")
 _PHONE_RE = re.compile(r"(?:\+?\d[\d\s\-().]{6,25}\d)")
-_WHATSAPP_RE = re.compile(r"(?:wa\.me|api\.whatsapp\.com)/(?:send/)?\s*(\+?\d[\d\s\-()]{6,20})")
+_WHATSAPP_LINK_RE = re.compile(
+    r"(?:wa\.me|api\.whatsapp\.com)/(?:send/)?\s*(\+?\d[\d\s\-()]{6,20})",
+    re.IGNORECASE,
+)
+_WHATSAPP_TEXT_RE = re.compile(
+    r"\bwhatsapp\s*(?:number|phone|号码|电话)?\s*(?:is|:|-|：)?\s*(\+?\d[\d\s\-()]{6,20})",
+    re.IGNORECASE,
+)
 
 _PLACEHOLDER_DOMAINS = {
     "example.com",
@@ -18,8 +25,9 @@ _PLACEHOLDER_DOMAINS = {
     "domain.com",
     "yourcompany.com",
     "your-email.com",
-    "name@company.com",
+    "company.com",
 }
+_DISALLOWED_EMAIL_PREFIXES = {"sales", "invoice"}
 
 _SOCIAL_HOSTS: dict[str, Platform] = {
     "linkedin.com": Platform.LINKEDIN,
@@ -53,13 +61,25 @@ def normalize_email(email: str) -> str | None:
     return None
 
 
+def is_direct_contact_email(email: str) -> bool:
+    """Reject role inboxes excluded by the research policy."""
+    normalized = normalize_email(email)
+    if not normalized:
+        return False
+    local = normalized.rsplit("@", 1)[0]
+    return not any(
+        local == prefix or local.startswith((f"{prefix}.", f"{prefix}-", f"{prefix}_", f"{prefix}+"))
+        for prefix in _DISALLOWED_EMAIL_PREFIXES
+    )
+
+
 def extract_emails(text: str) -> list[str]:
-    """Deterministic email extraction; never infers or fabricates addresses."""
+    """Extract only verbatim, non-placeholder direct-contact email addresses."""
     found: list[str] = []
     seen: set[str] = set()
     for raw in _EMAIL_RE.findall(text or ""):
         email = normalize_email(raw)
-        if not email:
+        if not email or not is_direct_contact_email(email):
             continue
         domain = email.rsplit("@", 1)[1].lower()
         if domain in _PLACEHOLDER_DOMAINS or domain.endswith((".png", ".jpg", ".jpeg")):
@@ -121,11 +141,15 @@ def extract_social_links(links: list[str]) -> list[tuple[str, Platform]]:
 
 
 def extract_whatsapp_numbers(text: str, links: list[str] | None = None) -> list[str]:
-    """Return publicly stated business WhatsApp numbers only (explicit wa.me links)."""
+    """Return numbers only when an explicit public WhatsApp signal is present."""
     found: list[str] = []
     seen: set[str] = set()
-    sources = list(links or [])
-    for number in _WHATSAPP_RE.findall(" ".join(sources)):
+    for number in _WHATSAPP_LINK_RE.findall(" ".join(links or [])):
+        digits = re.sub(r"\D", "", number)
+        if digits and digits not in seen and len(digits) >= 8:
+            seen.add(digits)
+            found.append("+" + digits)
+    for number in _WHATSAPP_TEXT_RE.findall(text or ""):
         digits = re.sub(r"\D", "", number)
         if digits and digits not in seen and len(digits) >= 8:
             seen.add(digits)
@@ -160,7 +184,7 @@ _BUYING_PHRASES: dict[str, tuple[str, str]] = {
 
 
 def detect_buying_signals(text: str, source_url: str) -> list[tuple[str, str, str]]:
-    """Deterministic buying-signal detection in page text: [(event_type, description, source_url)]."""
+    """Deterministic buying-signal detection in page text."""
     lowered = (text or "").lower()
     signals: list[tuple[str, str, str]] = []
     for phrase, (event_type, template) in _BUYING_PHRASES.items():
@@ -181,7 +205,7 @@ def derive_domain(website: str | None) -> str | None:
 
 
 def guess_website(company_name: str) -> tuple[str, float]:
-    """Inference helper: builds a probable website from the name (LOW confidence, never verified)."""
+    """Inference helper: builds a probable website (LOW confidence, never verified)."""
     slug = re.sub(r"[^a-z0-9]+", "", company_name.lower()).strip()
     return f"https://{slug}.com", 0.2
 
