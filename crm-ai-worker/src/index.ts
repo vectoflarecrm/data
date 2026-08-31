@@ -27,6 +27,9 @@ const BATCH_SIZE = 3;
 const FETCH_TIMEOUT_MS = 10_000;
 const AI_TIMEOUT_MS = 15_000;
 const DEFAULT_MODEL = "gemini-2.5-flash-lite";
+const FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash"];
+const STALE_PROCESSING_MINUTES = 30;
+const RETRYABLE_WEBSITE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const COMPANY_MARKER = (companyId: string) => `【合并数据公司ID: ${companyId}】`;
 
 function withCompanyMarker(remarks: string | null | undefined, companyId: string): string {
@@ -56,6 +59,23 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function fetchWebsite(url: string): Promise<Response> {
+  let response = await fetchWithTimeout(url, FETCH_TIMEOUT_MS);
+  if (!RETRYABLE_WEBSITE_STATUSES.has(response.status)) return response;
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  response = await fetchWithTimeout(url, FETCH_TIMEOUT_MS);
+  return response;
+}
+
+function websiteError(response: Response): Error {
+  const detail = response.status === 526
+    ? " (origin SSL certificate invalid)"
+    : response.status === 530
+      ? " (origin/DNS unavailable)"
+      : "";
+  return new Error(`website HTTP ${response.status}${detail}`);
 }
 
 async function extractPageText(response: Response): Promise<string> {
@@ -115,86 +135,106 @@ async function analyzeCustomer(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
   try {
-    const model = env.GEMINI_MODEL || DEFAULT_MODEL;
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-      {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          "x-goog-api-key": env.GEMINI_API_KEY,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          systemInstruction: {
-            parts: [{
-              text: "你是 B2B CRM 分析助手。只能根据提供的网页文本作答，不得编造事实。必须只返回一个合法 JSON 对象，禁止 Markdown、代码围栏和额外说明。",
-            }],
-          },
-          contents: [{
-            role: "user",
-            parts: [{
-              text: `请分析以下企业网页信息，并严格按客户细分群体组织客户画像和解决方案。\n\n公司识别码：${customer.company_id}\n企业网址：${customer.domain}\n网页纯文本：\n${pageText || "（未提取到文本）"}`,
-            }],
-          }],
-          generationConfig: {
-            temperature: 0.1,
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: "OBJECT",
-              properties: {
-                customer_segment: { type: "STRING" },
-                personas_and_solutions: {
-                  type: "OBJECT",
-                  properties: {
-                    personas: {
-                      type: "ARRAY",
-                      items: {
-                        type: "OBJECT",
-                        properties: {
-                          name: { type: "STRING" },
-                          needs: { type: "ARRAY", items: { type: "STRING" } },
-                        },
-                        required: ["name", "needs"],
-                      },
-                    },
-                    solutions: {
-                      type: "ARRAY",
-                      items: {
-                        type: "OBJECT",
-                        properties: {
-                          name: { type: "STRING" },
-                          value: { type: "STRING" },
-                        },
-                        required: ["name", "value"],
-                      },
-                    },
-                  },
-                  required: ["personas", "solutions"],
-                },
-                remarks: { type: "STRING" },
-              },
-              required: ["customer_segment", "personas_and_solutions", "remarks"],
-            },
-          },
-        }),
-      },
+    const requestedModel = env.GEMINI_MODEL || DEFAULT_MODEL;
+    const models = [requestedModel, ...FALLBACK_MODELS].filter(
+      (model, index, all) => all.indexOf(model) === index,
     );
-    if (!response.ok) throw new Error(`Gemini HTTP ${response.status}`);
-    const payload: unknown = await response.json();
-    const content = (
-      payload as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }>;
+    let lastModelError = "Gemini model is unavailable";
+    for (const model of models) {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+        {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            "x-goog-api-key": env.GEMINI_API_KEY,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            systemInstruction: {
+              parts: [{
+                text: "你是 B2B CRM 分析助手。只能根据提供的网页文本作答，不得编造事实。必须只返回一个合法 JSON 对象，禁止 Markdown、代码围栏和额外说明。",
+              }],
+            },
+            contents: [{
+              role: "user",
+              parts: [{
+                text: `请分析以下企业网页信息，并严格按客户细分群体组织客户画像和解决方案。\n\n公司识别码：${customer.company_id}\n企业网址：${customer.domain}\n网页纯文本：\n${pageText || "（未提取到文本）"}`,
+              }],
+            }],
+            generationConfig: {
+              temperature: 0.1,
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: "OBJECT",
+                properties: {
+                  customer_segment: { type: "STRING" },
+                  personas_and_solutions: {
+                    type: "OBJECT",
+                    properties: {
+                      personas: {
+                        type: "ARRAY",
+                        items: {
+                          type: "OBJECT",
+                          properties: {
+                            name: { type: "STRING" },
+                            needs: { type: "ARRAY", items: { type: "STRING" } },
+                          },
+                          required: ["name", "needs"],
+                        },
+                      },
+                      solutions: {
+                        type: "ARRAY",
+                        items: {
+                          type: "OBJECT",
+                          properties: {
+                            name: { type: "STRING" },
+                            value: { type: "STRING" },
+                          },
+                          required: ["name", "value"],
+                        },
+                      },
+                    },
+                    required: ["personas", "solutions"],
+                  },
+                  remarks: { type: "STRING" },
+                },
+                required: ["customer_segment", "personas_and_solutions", "remarks"],
+              },
+            },
+          }),
+        },
+      );
+      if (response.ok) {
+        const payload: unknown = await response.json();
+        const content = (
+          payload as {
+            candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }>;
+          }
+        ).candidates?.[0]?.content?.parts?.[0]?.text;
+        if (typeof content !== "string") throw new Error("Gemini response has no text content");
+        return parseAnalysis(content);
       }
-    ).candidates?.[0]?.content?.parts?.[0]?.text;
-    if (typeof content !== "string") throw new Error("Gemini response has no text content");
-    return parseAnalysis(content);
+
+      const errorBody = (await response.text()).replace(/\s+/g, " ").trim().slice(0, 240);
+      lastModelError = `Gemini HTTP ${response.status}${errorBody ? `: ${errorBody}` : ""}`;
+      if (response.status !== 404) throw new Error(lastModelError);
+    }
+    throw new Error(lastModelError);
   } finally {
     clearTimeout(timer);
   }
 }
 
 async function claimCustomers(env: Env): Promise<CustomerRow[]> {
+  // Recover jobs abandoned by a timed-out invocation before claiming new work.
+  await env.DB.prepare(`
+    UPDATE customers
+    SET status = 'pending', updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'processing'
+      AND updated_at < datetime('now', '-${STALE_PROCESSING_MINUTES} minutes')
+  `).run();
+
   // One UPDATE atomically claims the first three pending rows. This avoids the
   // SELECT-then-UPDATE race between overlapping Cron invocations.
   const result = await env.DB.prepare(`
@@ -213,8 +253,8 @@ async function claimCustomers(env: Env): Promise<CustomerRow[]> {
 
 async function processCustomer(customer: CustomerRow, env: Env): Promise<D1PreparedStatement> {
   try {
-    const response = await fetchWithTimeout(normalizeDomain(customer.domain), FETCH_TIMEOUT_MS);
-    if (!response.ok) throw new Error(`website HTTP ${response.status}`);
+    const response = await fetchWebsite(normalizeDomain(customer.domain));
+    if (!response.ok) throw websiteError(response);
     const pageText = await extractPageText(response);
     const analysis = await analyzeCustomer(customer, pageText, env);
     const personas = JSON.stringify(analysis.personas_and_solutions);
