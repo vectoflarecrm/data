@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: deploy-crm-ai-worker
+  cancel-in-progress: false
+
 jobs:
   deploy:
     name: Typecheck and deploy Worker
@@ -95,6 +99,15 @@ jobs:
 
       - name: Initialize remote D1 schema
         run: npx wrangler d1 execute crm-ai-db --remote --file=./schema.sql
+
+      - name: Verify remote D1 schema
+        run: |
+          schema_output="$(npx wrangler d1 execute crm-ai-db --remote --command='SELECT name FROM sqlite_master WHERE type = "table" AND name = "customers";')"
+          printf '%s\n' "$schema_output"
+          printf '%s' "$schema_output" | grep -q 'customers' || {
+            echo "Remote D1 schema check failed: customers table is missing"
+            exit 1
+          }
 
       - name: Typecheck
         run: npm run typecheck

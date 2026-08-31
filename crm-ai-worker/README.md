@@ -189,6 +189,8 @@ GitHub Actions 手动部署步骤：
 npx wrangler d1 execute crm-ai-db --remote --file=./schema.sql
 ```
 
+workflow 会在部署前检查远程 D1 是否存在 `customers` 表，并通过并发锁避免 push 与手动部署同时修改同一个数据库。
+
 查看 Worker 日志：
 
 ```bash

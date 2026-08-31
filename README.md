@@ -93,7 +93,7 @@ D1 绑定配置位于：
 crm-ai-worker/wrangler.toml
 ```
 
-部署时 workflow 会按 `database_name = "crm-ai-db"` 自动查询 D1 ID，并仅在 Actions 运行目录中临时写入 `wrangler.toml`；不会把 D1 ID 或凭据提交到 Git。若本地部署，则需要手动将占位符替换为真实 D1 ID：
+部署时 workflow 会复用 GitHub Secret `CLOUDFLARE_D1_DATABASE_ID`；如果该 Secret 未设置，则自动创建名为 `crm-ai-db` 的 D1，并仅在 Actions 运行目录中临时写入 `wrangler.toml`。不会把 D1 ID 或凭据提交到 Git。若本地部署，则需要手动将占位符替换为真实 D1 ID：
 
 ```toml
 [[d1_databases]]
@@ -247,7 +247,7 @@ npx wrangler d1 execute crm-ai-db --local --command="INSERT INTO customers (comp
 npx wrangler login
 ```
 
-本地部署时确认 `wrangler.toml` 中已填写真实 `database_id`，并设置 API Key 后发布。GitHub Actions 会自动查询 `crm-ai-db` 的真实 D1 ID；如果找不到该数据库或 Token 没有 D1 读取权限，workflow 会停止并显示具体原因：
+本地部署时确认 `wrangler.toml` 中已填写真实 `database_id`，并设置 API Key 后发布。GitHub Actions 会复用已有的 `CLOUDFLARE_D1_DATABASE_ID`，没有该 Secret 时自动创建 `crm-ai-db`；创建、Schema 初始化和发布需要 Token 具备目标账户的 `D1 → Edit` 权限：
 
 ```bash
 cd crm-ai-worker
@@ -261,7 +261,7 @@ GitHub Actions 手动部署：
 3. 点击 **Run workflow**，选择 `main`；
 4. 查看 `Validate deployment configuration`、`Typecheck` 和 `Deploy Worker` 步骤日志。
 
-如果没有运行记录，通常是因为最近提交没有修改 `crm-ai-worker/**`；如果已有 `crm-ai-db`，可以在 GitHub Secrets 添加 `CLOUDFLARE_D1_DATABASE_ID`；如果没有设置，workflow 会使用 Cloudflare API Token 自动创建该 D1。创建和初始化远程 Schema 需要 Token 具备目标账户的 `D1 → Edit` 权限。
+如果没有运行记录，通常是因为最近提交没有修改 `crm-ai-worker/**`。workflow 使用并发锁避免 push 与手动部署同时操作 D1，并在发布前检查远程 `customers` 表是否存在；如果已有 `crm-ai-db`，可在 GitHub Secrets 添加 `CLOUDFLARE_D1_DATABASE_ID`，否则 workflow 会自动创建。
 
 查看日志：
 
