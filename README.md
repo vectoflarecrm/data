@@ -330,7 +330,7 @@ cd crm-ai-worker
 npx wrangler d1 execute crm-ai-db --remote --command="SELECT COUNT(*) AS total FROM customers;" --yes
 ```
 
-预计有官网或规范域名的公司约 `752` 条；没有官网的 `29` 条本地公司会被跳过，因为当前 `customers.domain` 是必填且 Worker 无法抓取空网址。
+预计有官网或规范域名的公司约 `752` 条；没有官网的 `29` 条本地公司会被跳过，因为当前 `customers.domain` 是必填且 Worker 无法抓取空网址。若本地存在被忽略的 `crm-ai-worker/wrangler.local.toml`，同步脚本会自动使用它；否则使用 `wrangler.toml`。
 
 ### D1 客户管理面板
 
