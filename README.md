@@ -163,7 +163,7 @@ gemini-2.5-flash-lite
 | `database_id` | 必填配置，不是 Secret | 绑定 D1 数据库 | `crm-ai-worker/wrangler.toml` |
 | `CLOUDFLARE_API_TOKEN` | 仅 CI/CD 需要 | GitHub Actions 部署认证 | GitHub Repository Secret |
 | `CLOUDFLARE_ACCOUNT_ID` | 仅 CI/CD 需要 | GitHub Actions 指定 Cloudflare 账户 | GitHub Repository Secret |
-| `CLOUDFLARE_D1_DATABASE_ID` | CI/CD 必填 | 指定 `crm-ai-db` 的真实 D1 ID | GitHub Repository Secret |
+| `CLOUDFLARE_D1_DATABASE_ID` | 可选 CI/CD 配置 | 指定已有 `crm-ai-db` 的 D1 ID；不设置时由 workflow 自动创建 | GitHub Repository Secret |
 
 使用本地 `npx wrangler deploy` 时，只需先执行 `npx wrangler login`，不需要设置 `CLOUDFLARE_API_TOKEN` 或 `CLOUDFLARE_ACCOUNT_ID`。
 
@@ -172,8 +172,13 @@ gemini-2.5-flash-lite
 ```text
 CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
-CLOUDFLARE_D1_DATABASE_ID
 GEMINI_API_KEY
+```
+
+可选：
+
+```text
+CLOUDFLARE_D1_DATABASE_ID
 ```
 
 仓库中的 workflow 文件为：
@@ -256,7 +261,7 @@ GitHub Actions 手动部署：
 3. 点击 **Run workflow**，选择 `main`；
 4. 查看 `Validate deployment configuration`、`Typecheck` 和 `Deploy Worker` 步骤日志。
 
-如果没有运行记录，通常是因为最近提交没有修改 `crm-ai-worker/**`；部署前请在 GitHub Secrets 添加 `CLOUDFLARE_D1_DATABASE_ID`，值为 Cloudflare 中 `crm-ai-db` 的真实 D1 ID。workflow 不再依赖 D1 列表查询；执行远程 Schema/SQL 时，Cloudflare API Token 仍需要 `D1 → Edit`。
+如果没有运行记录，通常是因为最近提交没有修改 `crm-ai-worker/**`；如果已有 `crm-ai-db`，可以在 GitHub Secrets 添加 `CLOUDFLARE_D1_DATABASE_ID`；如果没有设置，workflow 会使用 Cloudflare API Token 自动创建该 D1。创建和初始化远程 Schema 需要 Token 具备目标账户的 `D1 → Edit` 权限。
 
 查看日志：
 
