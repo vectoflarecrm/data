@@ -28,7 +28,7 @@ npm install
 npx wrangler d1 create crm-ai-db
 ```
 
-将命令输出的 `database_id` 填入 `wrangler.toml`：
+本地部署时将命令输出的 `database_id` 填入 `wrangler.toml`；GitHub Actions 会按 `crm-ai-db` 自动查询并临时注入该 ID，不会提交到 Git：
 
 ```toml
 [[d1_databases]]
@@ -102,7 +102,7 @@ GEMINI_API_KEY
 .github/workflows/deploy-worker.yml
 ```
 
-推送到 `main` 分支或在 Actions 页面手动运行后，workflow 会先执行类型检查和 Worker 部署，再同步 `GEMINI_API_KEY`。
+只有修改 `crm-ai-worker/**` 或 `.github/workflows/deploy-worker.yml` 并推送到 `main` 时，workflow 才会自动执行类型检查、Worker 部署并同步 `GEMINI_API_KEY`；修改 Python 主项目不会触发 Worker 部署。也可以在 GitHub Actions 页面选择 `Deploy CRM AI Worker`，点击 `Run workflow` 手动触发。
 
 Cloudflare API Token 建议创建为 **Account API Token → Custom token**，并限制到部署 Worker 的单个 Cloudflare Account。仅运行 `wrangler deploy` 时需要：
 
@@ -164,11 +164,18 @@ npm run typecheck
 
 ## 部署
 
-确认 `wrangler.toml` 中的 `database_id` 已填写后：
+本地部署时确认 `wrangler.toml` 中的 `database_id` 已填写真实 D1 ID 后再部署。GitHub Actions 会自动查询 `crm-ai-db` 并临时注入 ID；如果数据库不存在或 Token 没有 `D1 → Read` 权限，会在 `Resolve D1 database ID` 阶段停止：
 
 ```bash
 npm run deploy
 ```
+
+GitHub Actions 手动部署步骤：
+
+1. 打开仓库的 **Actions** 页面；
+2. 选择 `Deploy CRM AI Worker`；
+3. 点击 **Run workflow**，选择 `main`；
+4. 查看配置检查、类型检查和部署步骤日志。
 
 部署前如需再次同步远程 Schema：
 

@@ -93,7 +93,7 @@ D1 绑定配置位于：
 crm-ai-worker/wrangler.toml
 ```
 
-部署前需要将占位符替换为真实 D1 ID：
+部署时 workflow 会按 `database_name = "crm-ai-db"` 自动查询 D1 ID，并仅在 Actions 运行目录中临时写入 `wrangler.toml`；不会把 D1 ID 或凭据提交到 Git。若本地部署，则需要手动将占位符替换为真实 D1 ID：
 
 ```toml
 [[d1_databases]]
@@ -180,7 +180,7 @@ GEMINI_API_KEY
 .github/workflows/deploy-worker.yml
 ```
 
-推送修改到 `main` 分支后，会自动执行 Worker 类型检查、发布 Worker 并同步 `GEMINI_API_KEY` Secret；也可以在 GitHub Actions 页面手动运行 `workflow_dispatch`。
+只有修改 `crm-ai-worker/**` 或 `.github/workflows/deploy-worker.yml` 并推送到 `main` 时，才会自动执行 Worker 类型检查、发布 Worker 并同步 `GEMINI_API_KEY` Secret；修改 Python 主项目不会触发 Worker 部署。也可以在 GitHub Actions 页面选择 `Deploy CRM AI Worker`，点击 `Run workflow` 手动触发。
 
 Cloudflare API Token 建议创建为 **Account API Token → Custom token**，并将账户资源限制为部署 Worker 的单个 Cloudflare Account。仅运行 `wrangler deploy` 时需要以下最小权限：
 
@@ -240,12 +240,21 @@ npx wrangler d1 execute crm-ai-db --local --command="INSERT INTO customers (comp
 npx wrangler login
 ```
 
-确认 `wrangler.toml` 中已填写真实 `database_id`，并设置 API Key 后发布：
+本地部署时确认 `wrangler.toml` 中已填写真实 `database_id`，并设置 API Key 后发布。GitHub Actions 会自动查询 `crm-ai-db` 的真实 D1 ID；如果找不到该数据库或 Token 没有 D1 读取权限，workflow 会停止并显示具体原因：
 
 ```bash
 cd crm-ai-worker
 npx wrangler deploy
 ```
+
+GitHub Actions 手动部署：
+
+1. 打开仓库的 **Actions** 页面；
+2. 选择 `Deploy CRM AI Worker`；
+3. 点击 **Run workflow**，选择 `main`；
+4. 查看 `Validate deployment configuration`、`Typecheck` 和 `Deploy Worker` 步骤日志。
+
+如果没有运行记录，通常是因为最近提交没有修改 `crm-ai-worker/**`；如果 `Resolve D1 database ID` 失败，请确认 Cloudflare 中存在名为 `crm-ai-db` 的 D1，并为 API Token 增加目标账户的 `D1 → Read` 权限（执行远程 Schema/SQL 时使用 `D1 → Edit`）。
 
 查看日志：
 
