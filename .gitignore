@@ -16,3 +16,7 @@ data/exports/*
 !data/exports/.gitkeep
 *.db
 logs/
+
+# Private D1 backup repository and local spreadsheet data must never enter the public repo.
+crm-db-backup/
+*.et

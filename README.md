@@ -271,6 +271,42 @@ GitHub Actions 手动部署：
 npx wrangler tail crm-ai-worker
 ```
 
+### 将本地 PostgreSQL 公司同步到 D1
+
+D1 数据库和本地 PostgreSQL 是两个独立数据库；Worker 部署只创建表，不会自动复制本地公司的 781 条记录。使用以下命令生成并分批导入本地公司数据：
+
+```bash
+cd ~/global-watersports-intelligence
+bash scripts/sync_d1_customers.sh
+```
+
+脚本会：
+
+- 从本地 PostgreSQL 读取公司、联系人、产品和联系方式；
+- 使用小批次 SQL 写入远程 `crm-ai-db`；
+- 以本地公司的 UUID 作为 D1 `company_id`；
+- 保留已有 D1 的 AI 分析字段，不覆盖已完成的结果；
+- 没有官网或域名的公司不会进入待抓取队列，并在导出统计中列出；
+- 生成的客户数据只保存在被 Git 忽略的 `data/exports/`，不会提交到 GitHub。
+
+执行前需要先登录 Cloudflare：
+
+```bash
+cd ~/global-watersports-intelligence/crm-ai-worker
+npx wrangler login
+cd ..
+bash scripts/sync_d1_customers.sh
+```
+
+导入完成后验证数量：
+
+```bash
+cd crm-ai-worker
+npx wrangler d1 execute crm-ai-db --remote --command="SELECT COUNT(*) AS total FROM customers;" --yes
+```
+
+预计有官网或规范域名的公司约 `752` 条；没有官网的 `29` 条本地公司会被跳过，因为当前 `customers.domain` 是必填且 Worker 无法抓取空网址。
+
 ### D1 客户管理面板
 
 Worker 部署后访问：
