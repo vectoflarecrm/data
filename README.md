@@ -164,6 +164,7 @@ gemini-2.5-flash-lite
 | `CLOUDFLARE_API_TOKEN` | 仅 CI/CD 需要 | GitHub Actions 部署认证 | GitHub Repository Secret |
 | `CLOUDFLARE_ACCOUNT_ID` | 仅 CI/CD 需要 | GitHub Actions 指定 Cloudflare 账户 | GitHub Repository Secret |
 | `CLOUDFLARE_D1_DATABASE_ID` | 可选 CI/CD 配置 | 指定已有 `crm-ai-db` 的 D1 ID；不设置时由 workflow 自动创建 | GitHub Repository Secret |
+| `ADMIN_PANEL_TOKEN` | 可选管理 Secret | 登录 D1 客户管理面板 | GitHub Repository Secret，并同步到 Worker |
 
 使用本地 `npx wrangler deploy` 时，只需先执行 `npx wrangler login`，不需要设置 `CLOUDFLARE_API_TOKEN` 或 `CLOUDFLARE_ACCOUNT_ID`。
 
@@ -179,6 +180,7 @@ GEMINI_API_KEY
 
 ```text
 CLOUDFLARE_D1_DATABASE_ID
+ADMIN_PANEL_TOKEN
 ```
 
 仓库中的 workflow 文件为：
@@ -268,6 +270,30 @@ GitHub Actions 手动部署：
 ```bash
 npx wrangler tail crm-ai-worker
 ```
+
+### D1 客户管理面板
+
+Worker 部署后访问：
+
+```text
+https://crm-ai-worker.qdu.workers.dev/admin
+```
+
+登录前，在 GitHub 仓库的 **Settings → Secrets and variables → Actions** 添加：
+
+```text
+ADMIN_PANEL_TOKEN
+```
+
+Secret 值请使用随机长字符串，不要发送到聊天或提交到 Git。部署 workflow 会将它同步为 Cloudflare Worker Secret。未配置该 Secret 时，`/admin` 不允许登录。
+
+面板支持：
+
+- 搜索、分页查看 `customers` 表；
+- 查看单个客户详情；
+- 修改网址、状态、客户细分、画像 JSON 和中文备注；
+- 将客户设为 `pending`，等待下一次 Cron 重新处理；
+- `id` 和 `company_id` 只读，不能通过面板修改。
 
 ### D1 Schema
 

@@ -28,7 +28,7 @@ npm install
 npx wrangler d1 create crm-ai-db
 ```
 
-本地部署时将命令输出的 `database_id` 填入 `wrangler.toml`；GitHub Actions 会按 `crm-ai-db` 自动查询并临时注入该 ID，不会提交到 Git：
+本地部署时将命令输出的 `database_id` 填入 `wrangler.toml`；GitHub Actions 会复用 `CLOUDFLARE_D1_DATABASE_ID`，未设置时自动创建 `crm-ai-db` 并临时注入该 ID，不会提交到 Git：
 
 ```toml
 [[d1_databases]]
@@ -100,6 +100,7 @@ GEMINI_API_KEY
 
 ```text
 CLOUDFLARE_D1_DATABASE_ID
+ADMIN_PANEL_TOKEN
 ```
 
 仓库中的自动部署 workflow 为：
@@ -190,6 +191,24 @@ npx wrangler d1 execute crm-ai-db --remote --file=./schema.sql
 ```
 
 workflow 会在部署前检查远程 D1 是否存在 `customers` 表，并通过并发锁避免 push 与手动部署同时修改同一个数据库。
+
+### D1 客户管理面板
+
+访问已部署 Worker 的：
+
+```text
+https://crm-ai-worker.qdu.workers.dev/admin
+```
+
+在 GitHub 仓库 Secrets 添加：
+
+```text
+ADMIN_PANEL_TOKEN
+```
+
+请使用随机长字符串作为值，不要将其写入代码或发送到聊天。部署 workflow 会自动同步该 Secret；未设置时 `/admin` 会保持禁用。
+
+面板支持搜索、分页、查看详情、修改客户字段，以及将客户设为 `pending` 重新处理。`id` 和 `company_id` 始终只读。
 
 查看 Worker 日志：
 

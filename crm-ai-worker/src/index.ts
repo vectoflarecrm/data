@@ -1,3 +1,5 @@
+import { handleAdminRequest } from "./admin";
+
 interface CustomerRow {
   id: number;
   company_id: string;
@@ -12,6 +14,7 @@ interface Env {
   DB: D1Database;
   GEMINI_API_KEY: string;
   GEMINI_MODEL?: string;
+  ADMIN_PANEL_TOKEN?: string;
 }
 
 interface CustomerAnalysis {
@@ -233,6 +236,11 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
 }
 
 export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const adminResponse = await handleAdminRequest(request, env);
+    return adminResponse ?? new Response("Not Found", { status: 404 });
+  },
+
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const customers = await claimCustomers(env);
     if (!customers.length) return;
