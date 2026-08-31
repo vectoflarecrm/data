@@ -1,0 +1,16 @@
+name = "crm-ai-worker"
+main = "src/index.ts"
+compatibility_date = "2024-03-01"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "crm-ai-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+# OPENROUTER_API_KEY must be stored as a Wrangler secret:
+# npx wrangler secret put OPENROUTER_API_KEY
+# Optional secret/configuration:
+# npx wrangler secret put OPENROUTER_MODEL

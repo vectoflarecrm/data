@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: watersports_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: watersports
+      POSTGRES_PASSWORD: watersports
+      POSTGRES_DB: watersports
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U watersports -d watersports"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:
