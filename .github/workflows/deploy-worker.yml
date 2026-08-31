@@ -66,28 +66,12 @@ jobs:
           fi
           if [ -z "$d1_id" ]; then
             echo "D1 database $D1_NAME was not found; creating it now"
-            create_json="$(npx wrangler d1 create "$D1_NAME" --json 2>/tmp/d1-create-error)" || {
+            create_output="$(npx wrangler d1 create "$D1_NAME" --binding DB 2>/tmp/d1-create-error)" || {
               echo "Unable to create D1 database $D1_NAME"
               sed -n '1,20p' /tmp/d1-create-error
               exit 1
             }
-            d1_id="$(D1_JSON="$create_json" node - <<'NODE'
-          const raw = JSON.parse(process.env.D1_JSON || '{}');
-          const findId = (value) => {
-            if (!value || typeof value !== 'object') return '';
-            if (typeof value.uuid === 'string') return value.uuid;
-            if (typeof value.database_id === 'string') return value.database_id;
-            if (typeof value.databaseId === 'string') return value.databaseId;
-            if (typeof value.id === 'string') return value.id;
-            for (const child of Object.values(value)) {
-              const found = findId(child);
-              if (found) return found;
-            }
-            return '';
-          };
-          process.stdout.write(findId(raw));
-          NODE
-            )"
+            d1_id="$(printf '%s\n' "$create_output" | sed -nE 's/.*database_id[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' | head -1)"
           fi
           if ! printf '%s' "$d1_id" | grep -Eq '^[0-9a-fA-F-]{16,}$'; then
             echo "Could not resolve a valid D1 database ID for $D1_NAME"
