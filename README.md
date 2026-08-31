@@ -271,6 +271,31 @@ GitHub Actions 手动部署：
 npx wrangler tail crm-ai-worker
 ```
 
+### 双仓库数据隔离与 D1 备份
+
+本项目采用代码与真实数据分离的双仓库模式：
+
+- 公共代码仓库：`https://github.com/vectoflarecrm/data`，只存放代码、Schema、部署脚本和不含客户资料的文档；
+- 私有备份仓库：`https://github.com/vectoflarecrm/crm-db-backup`，只存放 Cloudflare D1 的 AES-256 加密快照。
+
+私有仓库中的 `.github/workflows/backup.yml` 每天自动导出 `crm-ai-db`，加密后只提交 `*.sql.enc`，并保留最近 30 个快照。明文 SQL 和加密密钥不会提交到任何仓库。
+
+在私有仓库的 **Settings → Secrets and variables → Actions** 中分别添加：
+
+```text
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+BACKUP_ENCRYPTION_KEY
+```
+
+其中 `BACKUP_ENCRYPTION_KEY` 在本机生成：
+
+```bash
+openssl rand -base64 48
+```
+
+不要把密钥发送到聊天或提交到 Git。配置完成后，在私有仓库的 **Actions → Encrypted D1 Database Backup → Run workflow** 手动运行一次，确认只生成加密的 `backups/*.sql.enc` 文件。
+
 ### 将本地 PostgreSQL 公司同步到 D1
 
 D1 数据库和本地 PostgreSQL 是两个独立数据库；Worker 部署只创建表，不会自动复制本地公司的 781 条记录。使用以下命令生成并分批导入本地公司数据：
