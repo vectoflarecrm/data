@@ -185,13 +185,37 @@ async function extractPageText(response: Response): Promise<string> {
   return parts.join("\n").slice(0, 15_000);
 }
 
+interface SocialMediaLink {
+  platform: string;
+  url: string;
+  verified: boolean;
+}
+
+const SOCIAL_PLATFORMS: Array<{ name: string; patterns: string[] }> = [
+  { name: "LinkedIn", patterns: ["linkedin.com/company/", "linkedin.com/in/"] },
+  { name: "Facebook", patterns: ["facebook.com/", "fb.com/"] },
+  { name: "Instagram", patterns: ["instagram.com/"] },
+  { name: "Twitter", patterns: ["twitter.com/", "x.com/"] },
+  { name: "YouTube", patterns: ["youtube.com/", "youtu.be/"] },
+  { name: "TikTok", patterns: ["tiktok.com/@"] },
+];
+
+function detectPlatform(url: string): string | null {
+  for (const platform of SOCIAL_PLATFORMS) {
+    for (const pattern of platform.patterns) {
+      if (url.includes(pattern)) return platform.name;
+    }
+  }
+  return null;
+}
+
 async function extractLinks(response: Response): Promise<string[]> {
   const links: string[] = [];
   const rewriter = new HTMLRewriter()
     .on("a", {
       element(element) {
         const href = element.getAttribute("href") ?? "";
-        if (href && (href.includes("linkedin.com") || href.includes("facebook.com") || href.includes("instagram.com") || href.includes("twitter.com") || href.includes("x.com") || href.includes("youtube.com") || href.includes("tiktok.com"))) {
+        if (href && detectPlatform(href)) {
           try {
             const url = new URL(href, response.url);
             links.push(url.toString());
@@ -203,6 +227,32 @@ async function extractLinks(response: Response): Promise<string[]> {
     await rewriter.transform(response.clone()).arrayBuffer();
   } catch { /* ignore */ }
   return [...new Set(links)].slice(0, MAX_SOURCE_PAGES);
+}
+
+async function verifySocialMedia(links: string[]): Promise<SocialMediaLink[]> {
+  const verified: SocialMediaLink[] = [];
+  const seen = new Set<string>();
+  for (const link of links) {
+    const platform = detectPlatform(link);
+    if (!platform) continue;
+    const key = `${platform}:${link}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      const resp = await fetchWithTimeout(link, FETCH_TIMEOUT_MS, {
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; CRM-ResearchBot/1.0)" },
+      });
+      verified.push({
+        platform,
+        url: link,
+        verified: resp.ok,
+      });
+      await sleep(INTER_SOURCE_DELAY_MS);
+    } catch {
+      verified.push({ platform, url: link, verified: false });
+    }
+  }
+  return verified;
 }
 
 function getGoogleKeys(env: Env): Array<{ key: string; cx: string }> {
@@ -529,6 +579,11 @@ const AI_SYSTEM_PROMPT = `你是一名高级B2B市场数据分析师和营销专
 - 从LinkedIn、Facebook等提取联系人姓名和职位
 - 所有联系方式必须有明确来源，不得猜测或编造
 
+核心任务二——社交媒体验证：
+- 从数据中找到的所有社交媒体链接已通过"已验证社交媒体"部分提供
+- 只使用已验证的社交媒体链接，不得自行猜测或编造社媒地址
+- 记录每个社交媒体平台的账号名称和URL
+
 核心任务二——个性化开发内容生成：
 - 基于公司的全文字信息（产品、服务、新闻、博客、社媒内容），为每个联系人生成个性化的开发邮件和WhatsApp消息
 - 邮件和消息必须引用该公司的具体内容（如他们销售的产品、最近的活动、市场定位等）
@@ -835,20 +890,28 @@ function isRetryableAiError(error: unknown): boolean {
 async function processCustomer(customer: CustomerRow, env: Env): Promise<D1PreparedStatement> {
   const retryCount = getRetryCount(customer.remarks);
   try {
-    // Step 1: Fetch main website
+    // Step 1: Fetch main website and extract social media links
     let pageText = "";
+    let socialLinks: string[] = [];
     try {
       const response = await fetchWebsite(normalizeDomain(customer.domain));
       if (!response.ok) throw websiteError(response);
       pageText = await extractPageText(response);
+      socialLinks = await extractLinks(response);
     } catch (e) {
-      // If main site fails, continue with empty text — additional sources may still work
       if (e instanceof Error && !e.message.includes("HTTP 404")) {
         // For non-404 errors, still try to gather info from other sources
       } else {
-        throw e; // 404 on main site is fatal
+        throw e;
       }
     }
+
+    // Step 1b: Verify social media links
+    const verifiedSocial = await verifySocialMedia(socialLinks);
+    const verifiedSocialJson = JSON.stringify(verifiedSocial);
+    await env.DB.prepare(
+      `UPDATE customers SET social_accounts_verified = ? WHERE id = ?`
+    ).bind(verifiedSocialJson, customer.id).run();
 
     // Step 2: Google search for company information
     const companyName = customer.company_name || customer.company_id;
@@ -859,9 +922,12 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
     const additionalText = await fetchAdditionalSources(companyName, customer.domain, env);
 
     // Step 4: Combine all research data
+    const socialInfo = verifiedSocial.length > 0
+      ? `\n\n=== 已验证社交媒体 ===\n${verifiedSocial.map((s) => `${s.platform}: ${s.url} (${s.verified ? "已验证" : "未验证"})`).join("\n")}`
+      : "";
     const researchContext = pageText
-      ? `=== 主网站内容 ===\n${pageText}${googleResults}${additionalText}`
-      : `=== 主网站无法访问 ===${googleResults}${additionalText}`;
+      ? `=== 主网站内容 ===\n${pageText}${socialInfo}${googleResults}${additionalText}`
+      : `=== 主网站无法访问 ===${socialInfo}${googleResults}${additionalText}`;
 
     if (researchContext.length < 50) {
       throw new Error("无法从任何来源获取有效信息");
