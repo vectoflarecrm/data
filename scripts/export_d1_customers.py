@@ -84,7 +84,10 @@ def extract_contact_fields(company: Company) -> dict[str, str | None]:
     result: dict[str, str | None] = {
         "first_name": None,
         "last_name": None,
+        "full_name": None,
         "title": None,
+        "department": None,
+        "linkedin_url": None,
         "tel": None,
         "email": None,
         "cellphone": None,
@@ -95,7 +98,10 @@ def extract_contact_fields(company: Company) -> dict[str, str | None]:
     contact = company.contacts[0]
     result["first_name"] = contact.first_name
     result["last_name"] = contact.last_name
+    result["full_name"] = contact.full_name
     result["title"] = contact.job_title
+    result["department"] = contact.department
+    result["linkedin_url"] = contact.linkedin_url
     for method in contact.methods:
         mtype = str(method.method_type).lower()
         value = method.value
@@ -109,6 +115,25 @@ def extract_contact_fields(company: Company) -> dict[str, str | None]:
             elif not result["tel"]:
                 result["tel"] = value
     return result
+
+
+def social_accounts_json(company: Company) -> str | None:
+    """Collect all social accounts for the company."""
+    accounts: list[dict[str, str | None]] = []
+    seen: set[str] = set()
+    for contact in company.contacts:
+        for acc in contact.social_accounts:
+            key = f"{acc.platform}:{acc.username or acc.profile_url}"
+            if key in seen:
+                continue
+            seen.add(key)
+            accounts.append({
+                "platform": str(acc.platform),
+                "url": acc.profile_url,
+                "username": acc.username,
+                "display_name": acc.display_name,
+            })
+    return json.dumps(accounts, ensure_ascii=False) if accounts else None
 
 
 def products_services_text(company: Company) -> str | None:
@@ -187,42 +212,87 @@ def customer_statement(company: Company) -> str:
     segment = company_segment(company)
     details = company_json(company)
     contact = extract_contact_fields(company)
-    addr_parts = [p for p in [company.address, company.postal_code, company.city] if p]
     street_address = company.address or None
     zip_city = " ".join([p for p in [company.postal_code, company.city] if p]) or None
     products = products_services_text(company)
     biz_tag = business_tag_text(company)
+    social = social_accounts_json(company)
+    company_type_str = ", ".join(company.company_type) if company.company_type else None
+    target_markets_str = ", ".join(company.target_markets) if company.target_markets else None
     remarks = "数据来源：本地 PostgreSQL 公司与联系人记录；等待 Worker 网页核验。"
     return (
         "INSERT INTO customers "
-        "(company_id, domain, status, company_name, first_name, last_name, title, "
-        "street_address, zip_city, country, tel, email, cellphone, whatsapp, "
-        "products_services, business_tag, customer_segment, personas_and_solutions, remarks) VALUES ("
+        "(company_id, domain, status, company_name, first_name, last_name, full_name, title, department, linkedin_url, "
+        "street_address, zip_city, country, country_code, region, city, postal_code, tel, email, cellphone, whatsapp, "
+        "products_services, business_tag, industry, company_type, business_model, founded_year, employee_range, "
+        "description, target_markets, legal_name, trading_name, normalized_domain, "
+        "is_manufacturer, is_importer, is_distributor, is_wholesaler, is_retailer, is_ecommerce, is_rental, is_oem, "
+        "social_accounts, customer_segment, personas_and_solutions, remarks) VALUES ("
         f"{sql_literal(company_id)}, {sql_literal(domain)}, 'pending', "
         f"{sql_literal(company.company_name)}, "
         f"{sql_literal(contact['first_name'])}, {sql_literal(contact['last_name'])}, "
-        f"{sql_literal(contact['title'])}, "
+        f"{sql_literal(contact['full_name'])}, {sql_literal(contact['title'])}, "
+        f"{sql_literal(contact['department'])}, {sql_literal(contact['linkedin_url'])}, "
         f"{sql_literal(street_address)}, {sql_literal(zip_city)}, "
-        f"{sql_literal(company.country)}, "
+        f"{sql_literal(company.country)}, {sql_literal(company.country_code)}, "
+        f"{sql_literal(company.region)}, {sql_literal(company.city)}, "
+        f"{sql_literal(company.postal_code)}, "
         f"{sql_literal(contact['tel'])}, {sql_literal(contact['email'])}, "
         f"{sql_literal(contact['cellphone'])}, {sql_literal(contact['whatsapp'])}, "
         f"{sql_literal(products)}, {sql_literal(biz_tag)}, "
+        f"{sql_literal(company.industry)}, {sql_literal(company_type_str)}, "
+        f"{sql_literal(company.business_model)}, {company.founded_year or 'NULL'}, "
+        f"{sql_literal(company.employee_range)}, "
+        f"{sql_literal(company.description)}, {sql_literal(target_markets_str)}, "
+        f"{sql_literal(company.legal_name)}, {sql_literal(company.trading_name)}, "
+        f"{sql_literal(company.normalized_domain)}, "
+        f"{int(bool(company.manufacturer))}, {int(bool(company.importer))}, "
+        f"{int(bool(company.distributor))}, {int(bool(company.wholesaler))}, "
+        f"{int(bool(company.retailer))}, {int(bool(company.ecommerce))}, "
+        f"{int(bool(company.rental))}, {int(bool(company.oem))}, "
+        f"{sql_literal(social)}, "
         f"{sql_literal(segment)}, {sql_literal(details)}, {sql_literal(remarks)}) "
         "ON CONFLICT(company_id) DO UPDATE SET "
         "domain=excluded.domain, "
         "company_name=COALESCE(customers.company_name, excluded.company_name), "
         "first_name=COALESCE(customers.first_name, excluded.first_name), "
         "last_name=COALESCE(customers.last_name, excluded.last_name), "
+        "full_name=COALESCE(customers.full_name, excluded.full_name), "
         "title=COALESCE(customers.title, excluded.title), "
+        "department=COALESCE(customers.department, excluded.department), "
+        "linkedin_url=COALESCE(customers.linkedin_url, excluded.linkedin_url), "
         "street_address=COALESCE(customers.street_address, excluded.street_address), "
         "zip_city=COALESCE(customers.zip_city, excluded.zip_city), "
         "country=COALESCE(customers.country, excluded.country), "
+        "country_code=COALESCE(customers.country_code, excluded.country_code), "
+        "region=COALESCE(customers.region, excluded.region), "
+        "city=COALESCE(customers.city, excluded.city), "
+        "postal_code=COALESCE(customers.postal_code, excluded.postal_code), "
         "tel=COALESCE(customers.tel, excluded.tel), "
         "email=COALESCE(customers.email, excluded.email), "
         "cellphone=COALESCE(customers.cellphone, excluded.cellphone), "
         "whatsapp=COALESCE(customers.whatsapp, excluded.whatsapp), "
         "products_services=COALESCE(customers.products_services, excluded.products_services), "
         "business_tag=COALESCE(customers.business_tag, excluded.business_tag), "
+        "industry=COALESCE(customers.industry, excluded.industry), "
+        "company_type=COALESCE(customers.company_type, excluded.company_type), "
+        "business_model=COALESCE(customers.business_model, excluded.business_model), "
+        "founded_year=COALESCE(customers.founded_year, excluded.founded_year), "
+        "employee_range=COALESCE(customers.employee_range, excluded.employee_range), "
+        "description=COALESCE(customers.description, excluded.description), "
+        "target_markets=COALESCE(customers.target_markets, excluded.target_markets), "
+        "legal_name=COALESCE(customers.legal_name, excluded.legal_name), "
+        "trading_name=COALESCE(customers.trading_name, excluded.trading_name), "
+        "normalized_domain=COALESCE(customers.normalized_domain, excluded.normalized_domain), "
+        "is_manufacturer=COALESCE(customers.is_manufacturer, excluded.is_manufacturer), "
+        "is_importer=COALESCE(customers.is_importer, excluded.is_importer), "
+        "is_distributor=COALESCE(customers.is_distributor, excluded.is_distributor), "
+        "is_wholesaler=COALESCE(customers.is_wholesaler, excluded.is_wholesaler), "
+        "is_retailer=COALESCE(customers.is_retailer, excluded.is_retailer), "
+        "is_ecommerce=COALESCE(customers.is_ecommerce, excluded.is_ecommerce), "
+        "is_rental=COALESCE(customers.is_rental, excluded.is_rental), "
+        "is_oem=COALESCE(customers.is_oem, excluded.is_oem), "
+        "social_accounts=COALESCE(customers.social_accounts, excluded.social_accounts), "
         "customer_segment=COALESCE(customers.customer_segment, excluded.customer_segment), "
         "personas_and_solutions=COALESCE(customers.personas_and_solutions, excluded.personas_and_solutions), "
         "remarks=COALESCE(customers.remarks, excluded.remarks), "

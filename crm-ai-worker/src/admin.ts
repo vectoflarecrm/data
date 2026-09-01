@@ -9,18 +9,44 @@ interface AdminCustomer {
   domain: string;
   status: string;
   company_name: string | null;
+  legal_name: string | null;
+  trading_name: string | null;
+  normalized_domain: string | null;
   first_name: string | null;
   last_name: string | null;
+  full_name: string | null;
   title: string | null;
+  department: string | null;
+  linkedin_url: string | null;
   street_address: string | null;
   zip_city: string | null;
   country: string | null;
+  country_code: string | null;
+  region: string | null;
+  city: string | null;
+  postal_code: string | null;
   tel: string | null;
   email: string | null;
   cellphone: string | null;
   whatsapp: string | null;
   products_services: string | null;
   business_tag: string | null;
+  industry: string | null;
+  company_type: string | null;
+  business_model: string | null;
+  founded_year: number | null;
+  employee_range: string | null;
+  description: string | null;
+  target_markets: string | null;
+  is_manufacturer: number | null;
+  is_importer: number | null;
+  is_distributor: number | null;
+  is_wholesaler: number | null;
+  is_retailer: number | null;
+  is_ecommerce: number | null;
+  is_rental: number | null;
+  is_oem: number | null;
+  social_accounts: string | null;
   customer_segment: string | null;
   personas_and_solutions: string | null;
   remarks: string | null;
@@ -28,11 +54,14 @@ interface AdminCustomer {
 }
 
 const CUSTOMER_COLUMNS = `
-  id, company_id, domain, status, company_name,
-  first_name, last_name, title, street_address, zip_city,
-  country, tel, email, cellphone, whatsapp,
-  products_services, business_tag, customer_segment,
-  personas_and_solutions, remarks, updated_at
+  id, company_id, domain, status, company_name, legal_name, trading_name, normalized_domain,
+  first_name, last_name, full_name, title, department, linkedin_url,
+  street_address, zip_city, country, country_code, region, city, postal_code,
+  tel, email, cellphone, whatsapp, products_services, business_tag,
+  industry, company_type, business_model, founded_year, employee_range,
+  description, target_markets, is_manufacturer, is_importer, is_distributor,
+  is_wholesaler, is_retailer, is_ecommerce, is_rental, is_oem, social_accounts,
+  customer_segment, personas_and_solutions, remarks, updated_at
 `;
 const CUSTOMER_STATUSES = new Set(["pending", "processing", "completed", "failed"]);
 const COOKIE_NAME = "crm_admin_token";
@@ -343,20 +372,46 @@ const ADMIN_PANEL_HTML = `<!doctype html>
     {key:'id',label:'数据库 ID',readonly:true},
     {key:'company_id',label:'公司 ID',readonly:true},
     {key:'company_name',label:'公司名称',type:'input'},
+    {key:'legal_name',label:'法人名称',type:'input'},
+    {key:'trading_name',label:'商号',type:'input'},
     {key:'domain',label:'企业网址',type:'input'},
+    {key:'normalized_domain',label:'标准化域名',type:'input'},
     {key:'status',label:'状态',type:'select',options:['pending','processing','completed','failed']},
     {key:'first_name',label:'First Name',type:'input'},
     {key:'last_name',label:'Last Name',type:'input'},
+    {key:'full_name',label:'全名 (Full Name)',type:'input'},
     {key:'title',label:'职位 (TITLE)',type:'input'},
+    {key:'department',label:'部门 (Department)',type:'input'},
+    {key:'linkedin_url',label:'LinkedIn URL',type:'input'},
     {key:'street_address',label:'街道地址',type:'input'},
     {key:'zip_city',label:'邮编 & 城市',type:'input'},
     {key:'country',label:'国家 (Country)',type:'input'},
+    {key:'country_code',label:'国家代码',type:'input'},
+    {key:'region',label:'地区 (Region)',type:'input'},
+    {key:'city',label:'城市 (City)',type:'input'},
+    {key:'postal_code',label:'邮编 (Postal Code)',type:'input'},
     {key:'tel',label:'电话 (TEL)',type:'input'},
     {key:'email',label:'邮箱 (EMAIL)',type:'input'},
     {key:'cellphone',label:'手机 (Cellphone)',type:'input'},
     {key:'whatsapp',label:'WhatsApp',type:'input'},
     {key:'products_services',label:'产品与服务',type:'textarea'},
     {key:'business_tag',label:'业务标签 (Business Tag)',type:'input'},
+    {key:'industry',label:'行业 (Industry)',type:'input'},
+    {key:'company_type',label:'公司类型',type:'input'},
+    {key:'business_model',label:'商业模式',type:'input'},
+    {key:'founded_year',label:'成立年份',type:'input'},
+    {key:'employee_range',label:'员工规模',type:'input'},
+    {key:'description',label:'公司描述',type:'textarea'},
+    {key:'target_markets',label:'目标市场',type:'input'},
+    {key:'is_manufacturer',label:'制造商',type:'select',options:['0','1']},
+    {key:'is_importer',label:'进口商',type:'select',options:['0','1']},
+    {key:'is_distributor',label:'分销商',type:'select',options:['0','1']},
+    {key:'is_wholesaler',label:'批发商',type:'select',options:['0','1']},
+    {key:'is_retailer',label:'零售商',type:'select',options:['0','1']},
+    {key:'is_ecommerce',label:'电商',type:'select',options:['0','1']},
+    {key:'is_rental',label:'租赁',type:'select',options:['0','1']},
+    {key:'is_oem',label:'OEM',type:'select',options:['0','1']},
+    {key:'social_accounts',label:'社交账号 JSON',type:'textarea'},
     {key:'customer_segment',label:'客户细分 (Customer Segment)',type:'input'},
     {key:'personas_and_solutions',label:'AI 分析结果 JSON',type:'textarea',parseJson:true},
     {key:'remarks',label:'中文备注 (Remarks)',type:'textarea'}
@@ -371,6 +426,10 @@ const ADMIN_PANEL_HTML = `<!doctype html>
       if(f.key==='id'||f.key==='company_id'){h+=esc(val)}
       else if(f.key==='domain'){h+='<a href="'+esc(val)+'" target="_blank">'+esc(val)+'</a>'}
       else if(f.key==='status'){h+=badge(val)}
+      else if(f.key==='linkedin_url'&&val){h+='<a href="'+esc(val)+'" target="_blank">'+esc(val)+'</a>'}
+      else if(f.key==='is_manufacturer'||f.key==='is_importer'||f.key==='is_distributor'||f.key==='is_wholesaler'||f.key==='is_retailer'||f.key==='is_ecommerce'||f.key==='is_rental'||f.key==='is_oem'){h+=(val==1||val==='1'?'✅ 是':'❌ 否')}
+      else if(f.key==='social_accounts'&&val){var sa=null;try{sa=JSON.parse(val)}catch(e){}
+        if(sa&&sa.length>0){sa.forEach(function(a){h+='<div style="margin-bottom:4px">🔗 '+esc(a.platform||'')+': '+(a.username?'@'+esc(a.username):'')+(a.url?' <a href="'+esc(a.url)+'" target="_blank">'+esc(a.url)+'</a>':'')+'</div>'})}else{h+='<em style="color:#94a3b8">暂无社交账号</em>'}}
       else if(f.key==='personas_and_solutions'&&val){var parsed=null;try{parsed=JSON.parse(val)}catch(e){}
         if(parsed){var pl=parsed.personas||[];var sl=parsed.solutions||[];
           if(pl.length>0){h+='<div class="section-title">👤 客户画像</div>';pl.forEach(function(p){h+='<div class="persona-card"><h4>'+esc(p.name||'未知角色')+'</h4><ul>';(p.needs||[]).forEach(function(n){h+='<li>'+esc(n)+'</li>'});h+='</ul></div>'})}
