@@ -30,6 +30,7 @@ jobs:
       GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
       GOOGLE_SEARCH_API_KEY: ${{ secrets.GOOGLE_SEARCH_API_KEY }}
       GOOGLE_SEARCH_ENGINE_ID: ${{ secrets.GOOGLE_SEARCH_ENGINE_ID }}
+      SEARLO_API_KEY: ${{ secrets.SEARLO_API_KEY }}
       CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
       ADMIN_PANEL_TOKEN: ${{ secrets.ADMIN_PANEL_TOKEN }}
 
@@ -138,4 +139,11 @@ jobs:
             echo "Google search not configured; Worker will skip Google search"
             npx wrangler secret delete GOOGLE_SEARCH_API_KEY --name crm-ai-worker || true
             npx wrangler secret delete GOOGLE_SEARCH_ENGINE_ID --name crm-ai-worker || true
+          fi
+          if [ -n "$SEARLO_API_KEY" ]; then
+            printf '%s' "$SEARLO_API_KEY" | npx wrangler secret put SEARLO_API_KEY
+            echo "Searlo search secret synced"
+          else
+            echo "Searlo not configured; Worker will skip Searlo search"
+            npx wrangler secret delete SEARLO_API_KEY --name crm-ai-worker || true
           fi

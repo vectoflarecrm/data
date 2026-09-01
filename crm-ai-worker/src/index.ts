@@ -18,6 +18,7 @@ interface Env {
   GEMINI_MODEL?: string;
   GOOGLE_SEARCH_API_KEY?: string;
   GOOGLE_SEARCH_ENGINE_ID?: string;
+  SEARLO_API_KEY?: string;
   ADMIN_PANEL_TOKEN?: string;
 }
 
@@ -197,13 +198,81 @@ async function googleSearch(query: string, env: Env): Promise<GoogleSearchResult
   }
 }
 
+async function searloSearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
+  if (!env.SEARLO_API_KEY) return [];
+  try {
+    const resp = await fetchWithTimeout(
+      `https://api.searlo.com/search?q=${encodeURIComponent(query)}&num=${MAX_SEARCH_RESULTS}`,
+      FETCH_TIMEOUT_MS,
+      { headers: { "Authorization": `Bearer ${env.SEARLO_API_KEY}` } },
+    );
+    if (!resp.ok) return [];
+    const data = await resp.json() as { results?: Array<{ title: string; url: string; snippet: string }> };
+    return (data.results ?? []).map((item) => ({
+      title: item.title,
+      link: item.url,
+      snippet: item.snippet,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function duckduckgoSearch(query: string): Promise<GoogleSearchResult[]> {
+  try {
+    const resp = await fetchWithTimeout(
+      `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
+      FETCH_TIMEOUT_MS,
+      { headers: { "User-Agent": "Mozilla/5.0 (compatible; CRM-ResearchBot/1.0)" } },
+    );
+    if (!resp.ok) return [];
+    const html = await resp.text();
+    const results: GoogleSearchResult[] = [];
+    // Extract search results from DuckDuckGo HTML
+    const resultRegex = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]+)<\/a>[\s\S]*?<a[^>]*class="result__snippet"[^>]*>([^<]+)<\/a>/g;
+    let match;
+    while ((match = resultRegex.exec(html)) !== null && results.length < MAX_SEARCH_RESULTS) {
+      results.push({
+        title: match[2].replace(/<[^>]+>/g, "").trim(),
+        link: match[1],
+        snippet: match[3].replace(/<[^>]+>/g, "").trim(),
+      });
+    }
+    // Fallback: simpler regex
+    if (results.length === 0) {
+      const simpleRegex = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+      while ((match = simpleRegex.exec(html)) !== null && results.length < MAX_SEARCH_RESULTS) {
+        const title = match[2].replace(/<[^>]+>/g, "").trim();
+        if (title && !title.startsWith("http")) {
+          results.push({ title, link: match[1], snippet: "" });
+        }
+      }
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+async function multiEngineSearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
+  // Try Google first, then Searlo, then DuckDuckGo
+  let results = await googleSearch(query, env);
+  if (results.length > 0) return results;
+
+  results = await searloSearch(query, env);
+  if (results.length > 0) return results;
+
+  results = await duckduckgoSearch(query);
+  return results;
+}
+
 async function searchCompanyInfo(companyName: string, country: string, env: Env): Promise<string> {
   const allResults: GoogleSearchResult[] = [];
   const seenUrls = new Set<string>();
 
   for (const queryFn of SEARCH_QUERIES) {
     const query = queryFn(companyName, country);
-    const results = await googleSearch(query, env);
+    const results = await multiEngineSearch(query, env);
     for (const r of results) {
       if (!seenUrls.has(r.link)) {
         seenUrls.add(r.link);
