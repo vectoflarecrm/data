@@ -313,8 +313,13 @@ async function callGeminiOutreach(
   });
 
   if (!response.ok) throw new Error(`Gemini ${response.status}`);
-  const data = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  const data: unknown = await response.json();
+  const obj = data as Record<string, unknown>;
+  const candidates = obj.candidates as Array<Record<string, unknown>> | undefined;
+  const candidate = candidates?.[0] as Record<string, unknown> | undefined;
+  const contentObj = candidate?.content as Record<string, unknown> | undefined;
+  const parts = contentObj?.parts as Array<Record<string, unknown>> | undefined;
+  const text = typeof parts?.[0]?.text === "string" ? parts[0].text : null;
   if (!text) throw new Error("Gemini empty response");
   return JSON.parse(text);
 }
@@ -341,8 +346,11 @@ async function callOpenAIOutreach(
   });
 
   if (!response.ok) throw new Error(`API ${response.status}`);
-  const data = await response.json() as { choices?: Array<{ message?: { content?: string }> }>;
-  const content = data.choices?.[0]?.message?.content;
+  const data: unknown = await response.json();
+  const obj = data as Record<string, unknown>;
+  const choices = obj.choices as Array<Record<string, unknown>> | undefined;
+  const msg = choices?.[0]?.message as Record<string, unknown> | undefined;
+  const content = typeof msg?.content === "string" ? msg.content : null;
   if (!content) throw new Error("API empty response");
   return JSON.parse(content);
 }
