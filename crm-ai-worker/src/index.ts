@@ -23,19 +23,37 @@ interface CustomerAnalysis {
   remarks: string;
 }
 
-const BATCH_SIZE = 3;
+const BATCH_SIZE = 1;
 const FETCH_TIMEOUT_MS = 10_000;
 const AI_TIMEOUT_MS = 15_000;
 const DEFAULT_MODEL = "gemini-2.5-flash-lite";
 const FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash"];
 const STALE_PROCESSING_MINUTES = 30;
 const RETRYABLE_WEBSITE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const AI_RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+const INTER_CUSTOMER_DELAY_MS = 5_000;
+const RATE_LIMIT_BASE_DELAY_MS = 30_000;
+const MAX_RETRIES = 3;
 const COMPANY_MARKER = (companyId: string) => `【合并数据公司ID: ${companyId}】`;
 
 function withCompanyMarker(remarks: string | null | undefined, companyId: string): string {
   const marker = COMPANY_MARKER(companyId);
   const base = (remarks ?? "").trimEnd();
   return base.endsWith(marker) ? base : `${base}${base ? "\n" : ""}${marker}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getRetryCount(remarks: string | null | undefined): number {
+  if (!remarks) return 0;
+  const match = remarks.match(/\[retry:(\d+)\]/);
+  return match ? parseInt(match[1], 10) : 0;
+}
+
+function stripRetryTag(remarks: string): string {
+  return remarks.replace(/\n?\[retry:\d+\]/g, "").trimEnd();
 }
 
 function normalizeDomain(value: string): string {
@@ -218,6 +236,8 @@ async function analyzeCustomer(
 
       const errorBody = (await response.text()).replace(/\s+/g, " ").trim().slice(0, 240);
       lastModelError = `Gemini HTTP ${response.status}${errorBody ? `: ${errorBody}` : ""}`;
+
+      // 429 = rate limit, 503 = model overloaded: try next model
       if (response.status !== 404) throw new Error(lastModelError);
     }
     throw new Error(lastModelError);
@@ -251,7 +271,18 @@ async function claimCustomers(env: Env): Promise<CustomerRow[]> {
   return result.results;
 }
 
+function isRetryableAiError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const msg = error.message;
+  // Gemini429 (rate limit),500/502/503/504 (server errors) are retryable
+  for (const code of AI_RETRYABLE_STATUSES) {
+    if (msg.includes(`HTTP ${code}`)) return true;
+  }
+  return false;
+}
+
 async function processCustomer(customer: CustomerRow, env: Env): Promise<D1PreparedStatement> {
+  const retryCount = getRetryCount(customer.remarks);
   try {
     const response = await fetchWebsite(normalizeDomain(customer.domain));
     if (!response.ok) throw websiteError(response);
@@ -266,6 +297,20 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
     `).bind(analysis.customer_segment, personas, remarks, customer.id);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    const shouldRetry = isRetryableAiError(error) && retryCount < MAX_RETRIES;
+
+    if (shouldRetry) {
+      // Put back in pending with retry count tag for next Cron cycle
+      const cleanRemarks = stripRetryTag(customer.remarks ?? "");
+      const nextRetryTag = `\n[retry:${retryCount + 1}]`;
+      const remarks = withCompanyMarker(`${cleanRemarks}${nextRetryTag}处理失败（第${retryCount + 1}次重试）：${reason}`, customer.company_id);
+      return env.DB.prepare(`
+        UPDATE customers
+        SET status = 'pending', remarks = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status = 'processing'
+      `).bind(remarks, customer.id);
+    }
+
     const remarks = withCompanyMarker(`处理失败：${reason}`, customer.company_id);
     return env.DB.prepare(`
       UPDATE customers
@@ -284,7 +329,12 @@ export default {
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const customers = await claimCustomers(env);
     if (!customers.length) return;
-    const updates = await Promise.all(customers.map((customer) => processCustomer(customer, env)));
+    // Process sequentially with delays to respect Gemini rate limits
+    const updates: D1PreparedStatement[] = [];
+    for (let i = 0; i < customers.length; i++) {
+      if (i > 0) await sleep(INTER_CUSTOMER_DELAY_MS);
+      updates.push(await processCustomer(customers[i], env));
+    }
     await env.DB.batch(updates);
     ctx.waitUntil(Promise.resolve());
   },
