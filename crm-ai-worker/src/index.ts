@@ -5,6 +5,8 @@ interface CustomerRow {
   company_id: string;
   domain: string;
   status: string;
+  company_name: string | null;
+  country: string | null;
   customer_segment: string | null;
   personas_and_solutions: string | null;
   remarks: string | null;
@@ -14,7 +16,23 @@ interface Env {
   DB: D1Database;
   GEMINI_API_KEY: string;
   GEMINI_MODEL?: string;
+  GOOGLE_SEARCH_API_KEY?: string;
+  GOOGLE_SEARCH_ENGINE_ID?: string;
   ADMIN_PANEL_TOKEN?: string;
+}
+
+interface GoogleSearchResult {
+  title: string;
+  link: string;
+  snippet: string;
+}
+
+interface GoogleSearchResponse {
+  items?: Array<{
+    title: string;
+    link: string;
+    snippet: string;
+  }>;
 }
 
 interface CustomerAnalysis {
@@ -27,7 +45,13 @@ const BATCH_SIZE = 1;
 const FETCH_TIMEOUT_MS = 15_000;
 const AI_TIMEOUT_MS = 30_000;
 const MAX_SOURCE_PAGES = 5;
+const MAX_SEARCH_RESULTS = 5;
 const INTER_SOURCE_DELAY_MS = 2_000;
+const SEARCH_QUERIES = [
+  (name: string, country: string) => `"${name}" ${country} water sports company`,
+  (name: string) => `"${name}" distributor dealer inflatable boat SUP kayak`,
+  (name: string) => `"${name}" about team contact email phone`,
+];
 const DEFAULT_MODEL = "gemini-2.5-flash-lite";
 const FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash"];
 const STALE_PROCESSING_MINUTES = 30;
@@ -146,6 +170,70 @@ async function extractLinks(response: Response): Promise<string[]> {
     await rewriter.transform(response.clone()).arrayBuffer();
   } catch { /* ignore */ }
   return [...new Set(links)].slice(0, MAX_SOURCE_PAGES);
+}
+
+async function googleSearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
+  if (!env.GOOGLE_SEARCH_API_KEY || !env.GOOGLE_SEARCH_ENGINE_ID) return [];
+  try {
+    const params = new URLSearchParams({
+      key: env.GOOGLE_SEARCH_API_KEY,
+      cx: env.GOOGLE_SEARCH_ENGINE_ID,
+      q: query,
+      num: String(MAX_SEARCH_RESULTS),
+    });
+    const resp = await fetchWithTimeout(
+      `https://www.googleapis.com/customsearch/v1?${params.toString()}`,
+      FETCH_TIMEOUT_MS,
+    );
+    if (!resp.ok) return [];
+    const data: GoogleSearchResponse = await resp.json();
+    return (data.items ?? []).map((item) => ({
+      title: item.title,
+      link: item.link,
+      snippet: item.snippet,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function searchCompanyInfo(companyName: string, country: string, env: Env): Promise<string> {
+  const allResults: GoogleSearchResult[] = [];
+  const seenUrls = new Set<string>();
+
+  for (const queryFn of SEARCH_QUERIES) {
+    const query = queryFn(companyName, country);
+    const results = await googleSearch(query, env);
+    for (const r of results) {
+      if (!seenUrls.has(r.link)) {
+        seenUrls.add(r.link);
+        allResults.push(r);
+      }
+    }
+    await sleep(INTER_SOURCE_DELAY_MS);
+  }
+
+  if (allResults.length === 0) return "";
+
+  // Fetch content from top search results
+  const pages: string[] = [];
+  for (const result of allResults.slice(0, MAX_SEARCH_RESULTS)) {
+    try {
+      // Skip the company's own website (already fetched)
+      const resp = await fetchWithTimeout(result.link, FETCH_TIMEOUT_MS);
+      if (resp.ok) {
+        const text = await extractPageText(resp);
+        if (text.length > 100) {
+          pages.push(`\n=== 搜索结果: ${result.title} ===\nURL: ${result.link}\n摘要: ${result.snippet}\n内容: ${text.slice(0, 2_000)}`);
+        }
+      }
+      await sleep(INTER_SOURCE_DELAY_MS);
+    } catch { /* skip failed pages */ }
+  }
+
+  return pages.length > 0
+    ? `\n\n--- Google 搜索结果 (${allResults.length}条) ---\n${pages.join("\n")}`
+    : `\n\n--- Google 搜索摘要 (${allResults.length}条) ---\n${allResults.map((r) => `${r.title}: ${r.snippet}`).join("\n")}`;
 }
 
 async function fetchAdditionalSources(companyName: string, domain: string, env: Env): Promise<string> {
@@ -375,7 +463,7 @@ async function claimCustomers(env: Env): Promise<CustomerRow[]> {
       ORDER BY id
       LIMIT ?
     )
-    RETURNING id, company_id, domain, status, customer_segment, personas_and_solutions, remarks
+    RETURNING id, company_id, domain, status, company_name, country, customer_segment, personas_and_solutions, remarks
   `).bind(BATCH_SIZE).all<CustomerRow>();
   return result.results;
 }
@@ -408,13 +496,18 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
       }
     }
 
-    // Step 2: Fetch additional sources (sub-pages, social media)
-    const additionalText = await fetchAdditionalSources(customer.company_id, customer.domain, env);
+    // Step 2: Google search for company information
+    const companyName = customer.company_name || customer.company_id;
+    const country = customer.country || "";
+    const googleResults = await searchCompanyInfo(companyName, country, env);
 
-    // Step 3: Combine all research data
+    // Step 3: Fetch additional sources (sub-pages, social media)
+    const additionalText = await fetchAdditionalSources(companyName, customer.domain, env);
+
+    // Step 4: Combine all research data
     const researchContext = pageText
-      ? `=== 主网站内容 ===\n${pageText}${additionalText}`
-      : `=== 主网站无法访问 ===${additionalText}`;
+      ? `=== 主网站内容 ===\n${pageText}${googleResults}${additionalText}`
+      : `=== 主网站无法访问 ===${googleResults}${additionalText}`;
 
     if (researchContext.length < 50) {
       throw new Error("无法从任何来源获取有效信息");
