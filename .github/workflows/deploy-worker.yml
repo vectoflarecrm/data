@@ -28,6 +28,8 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+      GOOGLE_SEARCH_API_KEY: ${{ secrets.GOOGLE_SEARCH_API_KEY }}
+      GOOGLE_SEARCH_ENGINE_ID: ${{ secrets.GOOGLE_SEARCH_ENGINE_ID }}
       CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
       ADMIN_PANEL_TOKEN: ${{ secrets.ADMIN_PANEL_TOKEN }}
 
@@ -127,4 +129,13 @@ jobs:
           else
             echo "ADMIN_PANEL_TOKEN is not configured; /admin remains disabled"
             npx wrangler secret delete ADMIN_PANEL_TOKEN --name crm-ai-worker || true
+          fi
+          if [ -n "$GOOGLE_SEARCH_API_KEY" ] && [ -n "$GOOGLE_SEARCH_ENGINE_ID" ]; then
+            printf '%s' "$GOOGLE_SEARCH_API_KEY" | npx wrangler secret put GOOGLE_SEARCH_API_KEY
+            printf '%s' "$GOOGLE_SEARCH_ENGINE_ID" | npx wrangler secret put GOOGLE_SEARCH_ENGINE_ID
+            echo "Google Custom Search secrets synced"
+          else
+            echo "Google search not configured; Worker will skip Google search"
+            npx wrangler secret delete GOOGLE_SEARCH_API_KEY --name crm-ai-worker || true
+            npx wrangler secret delete GOOGLE_SEARCH_ENGINE_ID --name crm-ai-worker || true
           fi
