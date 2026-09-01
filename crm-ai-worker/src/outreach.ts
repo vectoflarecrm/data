@@ -103,6 +103,7 @@ function buildOutreachPrompt(
   brand: BrandConfig,
   company: {
     company_name: string | null;
+    company_id: string;
     display_id: string | null;
     domain: string | null;
     first_name: string | null;
@@ -312,7 +313,7 @@ async function callGeminiOutreach(
   });
 
   if (!response.ok) throw new Error(`Gemini ${response.status}`);
-  const data = await response.json();
+  const data = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error("Gemini empty response");
   return JSON.parse(text);
@@ -340,7 +341,7 @@ async function callOpenAIOutreach(
   });
 
   if (!response.ok) throw new Error(`API ${response.status}`);
-  const data = await response.json();
+  const data = await response.json() as { choices?: Array<{ message?: { content?: string }> }>;
   const content = data.choices?.[0]?.message?.content;
   if (!content) throw new Error("API empty response");
   return JSON.parse(content);
