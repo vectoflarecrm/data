@@ -93,13 +93,14 @@ function normalizeDomain(value: string): string {
   return url.toString();
 }
 
-async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+async function fetchWithTimeout(url: string, timeoutMs: number, options?: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, {
+      ...options,
       signal: controller.signal,
-      headers: { "User-Agent": "crm-ai-worker/0.1" },
+      headers: { "User-Agent": "crm-ai-worker/0.1", ...options?.headers },
     });
   } finally {
     clearTimeout(timer);
