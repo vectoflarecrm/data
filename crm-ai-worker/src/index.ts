@@ -23,9 +23,11 @@ interface CustomerAnalysis {
   remarks: string;
 }
 
-const BATCH_SIZE = 3;
-const FETCH_TIMEOUT_MS = 10_000;
-const AI_TIMEOUT_MS = 15_000;
+const BATCH_SIZE = 1;
+const FETCH_TIMEOUT_MS = 15_000;
+const AI_TIMEOUT_MS = 30_000;
+const MAX_SOURCE_PAGES = 5;
+const INTER_SOURCE_DELAY_MS = 2_000;
 const DEFAULT_MODEL = "gemini-2.5-flash-lite";
 const FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash"];
 const STALE_PROCESSING_MINUTES = 30;
@@ -107,15 +109,92 @@ async function extractPageText(response: Response): Promise<string> {
     .on("title", { text(text) { addText(text.text); } })
     .on("meta", {
       element(element) {
-        if ((element.getAttribute("name") ?? "").toLowerCase() === "description") {
+        const name = (element.getAttribute("name") ?? "").toLowerCase();
+        const prop = (element.getAttribute("property") ?? "").toLowerCase();
+        if (name === "description" || prop === "og:description") {
           addText(element.getAttribute("content") ?? "");
+        }
+        if (name === "keywords") {
+          addText("关键词: " + (element.getAttribute("content") ?? ""));
         }
       },
     })
-    .on("p", { text(text) { addText(text.text); } });
+    .on("p", { text(text) { addText(text.text); } })
+    .on("h1", { text(text) { addText("[标题] " + text.text); } })
+    .on("h2", { text(text) { addText("[小标题] " + text.text); } })
+    .on("li", { text(text) { addText("• " + text.text); } });
 
   await rewriter.transform(response).arrayBuffer();
-  return parts.join("\n").slice(0, 12_000);
+  return parts.join("\n").slice(0, 15_000);
+}
+
+async function extractLinks(response: Response): Promise<string[]> {
+  const links: string[] = [];
+  const rewriter = new HTMLRewriter()
+    .on("a", {
+      element(element) {
+        const href = element.getAttribute("href") ?? "";
+        if (href && (href.includes("linkedin.com") || href.includes("facebook.com") || href.includes("instagram.com") || href.includes("twitter.com") || href.includes("x.com") || href.includes("youtube.com") || href.includes("tiktok.com"))) {
+          try {
+            const url = new URL(href, response.url);
+            links.push(url.toString());
+          } catch { /* ignore invalid URLs */ }
+        }
+      },
+    });
+  try {
+    await rewriter.transform(response.clone()).arrayBuffer();
+  } catch { /* ignore */ }
+  return [...new Set(links)].slice(0, MAX_SOURCE_PAGES);
+}
+
+async function fetchAdditionalSources(companyName: string, domain: string, env: Env): Promise<string> {
+  const sources: string[] = [];
+  const sourceLabels: string[] = [];
+
+  // 1. Try fetching About/Contact/Team pages from the same domain
+  const subPages = ["/about", "/about-us", "/contact", "/team", "/company", "/products", "/services"];
+  for (const path of subPages) {
+    if (sources.length >= 3) break;
+    try {
+      const url = normalizeDomain(domain.replace(/\/$/, "") + path);
+      const resp = await fetchWithTimeout(url, FETCH_TIMEOUT_MS);
+      if (resp.ok) {
+        const text = await extractPageText(resp);
+        if (text.length > 100) {
+          sources.push(`\n=== ${path} 页面内容 ===\n${text.slice(0, 3_000)}`);
+          sourceLabels.push(path);
+        }
+      }
+      await sleep(INTER_SOURCE_DELAY_MS);
+    } catch { /* skip failed sub-pages */ }
+  }
+
+  // 2. Try fetching social media links found on the main website
+  try {
+    const mainResp = await fetchWithTimeout(normalizeDomain(domain), FETCH_TIMEOUT_MS);
+    if (mainResp.ok) {
+      const socialLinks = await extractLinks(mainResp);
+      for (const link of socialLinks.slice(0, 3)) {
+        try {
+          const resp = await fetchWithTimeout(link, FETCH_TIMEOUT_MS);
+          if (resp.ok) {
+            const text = await extractPageText(resp);
+            if (text.length > 100) {
+              const platform = link.includes("linkedin") ? "LinkedIn" : link.includes("facebook") ? "Facebook" : link.includes("instagram") ? "Instagram" : "社交媒体";
+              sources.push(`\n=== ${platform} 页面内容 ===\n${text.slice(0, 3_000)}`);
+              sourceLabels.push(platform);
+            }
+          }
+          await sleep(INTER_SOURCE_DELAY_MS);
+        } catch { /* skip failed social pages */ }
+      }
+    }
+  } catch { /* skip if main site fails */ }
+
+  return sources.length > 0
+    ? `\n\n--- 额外信息来源 (${sourceLabels.join(", ")}) ---\n${sources.join("\n")}`
+    : "";
 }
 
 function parseAnalysis(content: string): CustomerAnalysis {
@@ -146,7 +225,7 @@ function parseAnalysis(content: string): CustomerAnalysis {
 
 async function analyzeCustomer(
   customer: CustomerRow,
-  pageText: string,
+  researchContext: string,
   env: Env,
 ): Promise<CustomerAnalysis> {
   if (!env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured");
@@ -171,13 +250,40 @@ async function analyzeCustomer(
           body: JSON.stringify({
             systemInstruction: {
               parts: [{
-                text: "你是 B2B CRM 分析助手。只能根据提供的网页文本作答，不得编造事实。必须只返回一个合法 JSON 对象，禁止 Markdown、代码围栏和额外说明。",
+                text: `你是一名高级B2B市场数据分析师，专注于水上运动行业（inflatable boats, RIB boats, SUPs, kayaks, yachts, kitesurfing, windsurfing等）。
+
+你的核心原则：
+1. 数据真实性高于一切——宁可留空，绝不编造
+2. 只根据提供的多源信息作答，不得编造任何事实
+3. 如果信息不足，明确标注"信息不足，需进一步验证"
+4. 必须只返回一个合法JSON对象，禁止Markdown、代码围栏和额外说明
+
+分析要求：
+- 交叉验证多个信息来源，确保数据准确
+- 识别公司的核心业务模式（制造商/分销商/零售商/租赁/培训等）
+- 分析其在水上运动行业的具体定位
+- 识别关键决策者和采购负责人
+- 评估其作为潜在客户的价值`,
               }],
             },
             contents: [{
               role: "user",
               parts: [{
-                text: `请分析以下企业网页信息，并严格按客户细分群体组织客户画像和解决方案。\n\n公司识别码：${customer.company_id}\n企业网址：${customer.domain}\n网页纯文本：\n${pageText || "（未提取到文本）"}`,
+                text: `请深度分析以下企业信息，交叉验证多个来源的数据，提供详细的客户画像。
+
+## 基本信息
+- 公司识别码：${customer.company_id}
+- 企业网址：${customer.domain}
+
+## 多源研究数据
+${researchContext || "（未获取到有效信息）"}
+
+## 分析要求
+1. 客户细分：该公司的核心业务是什么？在水上运动行业中扮演什么角色？
+2. 客户画像：识别2-5个关键角色（如采购经理、产品总监、创始人等），分析每个角色的需求和痛点
+3. 解决方案：针对每个角色，提供具体的解决方案建议
+4. 备注：总结公司的关键信息、潜在合作机会和风险点
+5. 信息来源标注：注明分析结论来自哪个信息来源`,
               }],
             }],
             generationConfig: {
@@ -196,7 +302,9 @@ async function analyzeCustomer(
                           type: "OBJECT",
                           properties: {
                             name: { type: "STRING" },
+                            role: { type: "STRING" },
                             needs: { type: "ARRAY", items: { type: "STRING" } },
+                            pain_points: { type: "ARRAY", items: { type: "STRING" } },
                           },
                           required: ["name", "needs"],
                         },
@@ -208,6 +316,7 @@ async function analyzeCustomer(
                           properties: {
                             name: { type: "STRING" },
                             value: { type: "STRING" },
+                            target_persona: { type: "STRING" },
                           },
                           required: ["name", "value"],
                         },
@@ -284,10 +393,35 @@ function isRetryableAiError(error: unknown): boolean {
 async function processCustomer(customer: CustomerRow, env: Env): Promise<D1PreparedStatement> {
   const retryCount = getRetryCount(customer.remarks);
   try {
-    const response = await fetchWebsite(normalizeDomain(customer.domain));
-    if (!response.ok) throw websiteError(response);
-    const pageText = await extractPageText(response);
-    const analysis = await analyzeCustomer(customer, pageText, env);
+    // Step 1: Fetch main website
+    let pageText = "";
+    try {
+      const response = await fetchWebsite(normalizeDomain(customer.domain));
+      if (!response.ok) throw websiteError(response);
+      pageText = await extractPageText(response);
+    } catch (e) {
+      // If main site fails, continue with empty text — additional sources may still work
+      if (e instanceof Error && !e.message.includes("HTTP 404")) {
+        // For non-404 errors, still try to gather info from other sources
+      } else {
+        throw e; // 404 on main site is fatal
+      }
+    }
+
+    // Step 2: Fetch additional sources (sub-pages, social media)
+    const additionalText = await fetchAdditionalSources(customer.company_id, customer.domain, env);
+
+    // Step 3: Combine all research data
+    const researchContext = pageText
+      ? `=== 主网站内容 ===\n${pageText}${additionalText}`
+      : `=== 主网站无法访问 ===${additionalText}`;
+
+    if (researchContext.length < 50) {
+      throw new Error("无法从任何来源获取有效信息");
+    }
+
+    // Step 4: AI deep analysis
+    const analysis = await analyzeCustomer(customer, researchContext, env);
     const personas = JSON.stringify(analysis.personas_and_solutions);
     const remarks = withCompanyMarker(analysis.remarks, customer.company_id);
     return env.DB.prepare(`
@@ -300,7 +434,6 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
     const shouldRetry = isRetryableAiError(error) && retryCount < MAX_RETRIES;
 
     if (shouldRetry) {
-      // Put back in pending with retry count tag for next Cron cycle
       const cleanRemarks = stripRetryTag(customer.remarks ?? "");
       const nextRetryTag = `\n[retry:${retryCount + 1}]`;
       const remarks = withCompanyMarker(`${cleanRemarks}${nextRetryTag}处理失败（第${retryCount + 1}次重试）：${reason}`, customer.company_id);
