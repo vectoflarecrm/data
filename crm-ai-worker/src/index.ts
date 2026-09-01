@@ -23,7 +23,7 @@ interface CustomerAnalysis {
   remarks: string;
 }
 
-const BATCH_SIZE = 1;
+const BATCH_SIZE = 3;
 const FETCH_TIMEOUT_MS = 10_000;
 const AI_TIMEOUT_MS = 15_000;
 const DEFAULT_MODEL = "gemini-2.5-flash-lite";
