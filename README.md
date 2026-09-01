@@ -470,7 +470,10 @@ country          国家
 city             城市
 street_address   街道地址
 products_services 产品与服务
-customer_segment 客户细分
+customer_segment 客户细分（Distributor/Dealer/Manufacturer/User/OEM/Service Provider/E-commerce/不相关）
+product_categories 产品类别（Inflatable Boats/Paddle Boards/Kayaks/Yachts/Kitesurfing/Windsurfing/Accessories/Apparel）
+company_size     公司规模（Small/Medium/Large/Enterprise）
+geographic_coverage 地理覆盖（Local/National/International）
 personas_and_solutions  AI分析结果JSON
 remarks          中文备注
 is_manufacturer  制造商
@@ -479,6 +482,39 @@ is_retailer      零售商
 is_rental        租赁
 social_accounts  社交账号JSON
 updated_at       更新时间
+
+### 分类体系说明
+
+#### 客户细分 (Customer Segment)
+- **Distributor**：批发/分销商，主营批发、分销inflatable boat, RIB boat, SUP, paddle board, kayak, Yacht
+- **Dealer**：多品牌零售商，多品牌零售inflatable boat, SUP, paddle board, kayak, Yacht，提供维修服务
+- **Manufacturer**：制造商，自主生产inflatable boat, RIB boat, SUP, paddle board, kayak, Yacht产品
+- **User**：终端用户，租赁或使用inflatable boat, SUP, paddle board, kayak, Yacht，开设水上运动课程培训
+- **OEM**：代工厂，为其他品牌代工生产水上运动产品
+- **Service Provider**：服务提供商，提供水上运动相关服务（培训、维修、租赁等）
+- **E-commerce**：电商，在线销售水上运动产品
+- **不相关**：该公司不销售、使用水上运动产品
+
+#### 产品类别 (Product Categories)
+- **Inflatable Boats**：充气船（RIB boats, inflatable dinghy, inflatable tender）
+- **Paddle Boards**：桨板（SUP, standup paddle board, inflatable SUP）
+- **Kayaks**：皮划艇（inflatable kayak, hard shell kayak, sit-on-top kayak）
+- **Yachts**：游艇（motor yacht, sailing yacht, luxury yacht）
+- **Kitesurfing**：风筝冲浪装备（kite, board, harness, wetsuit）
+- **Windsurfing**：帆板装备（sail, board, rig）
+- **Accessories**：配件（paddle, pump, fin, repair kit, life jacket）
+- **Apparel**：水上运动服装（wetsuit, rash guard, swimwear）
+
+#### 公司规模 (Company Size)
+- **Small**：1-10人
+- **Medium**：11-50人
+- **Large**：51-200人
+- **Enterprise**：200+人
+
+#### 地理覆盖 (Geographic Coverage)
+- **Local**：仅在本国/本地区经营
+- **National**：在多个国家经营
+- **International**：在全球多个国家经营
 ```
 
 contacts 联系人字段：
