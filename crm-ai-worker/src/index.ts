@@ -3,6 +3,7 @@ import { handleAdminRequest } from "./admin";
 interface CustomerRow {
   id: number;
   company_id: string;
+  display_id: string | null;
   domain: string;
   status: string;
   company_name: string | null;
@@ -809,7 +810,7 @@ async function claimCustomers(env: Env): Promise<CustomerRow[]> {
       ORDER BY id
       LIMIT ?
     )
-    RETURNING id, company_id, domain, status, company_name, country, customer_segment, personas_and_solutions, remarks
+    RETURNING id, company_id, display_id, domain, status, company_name, country, customer_segment, personas_and_solutions, remarks
   `).bind(BATCH_SIZE).all<CustomerRow>();
   return result.results;
 }
