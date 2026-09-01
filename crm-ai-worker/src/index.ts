@@ -823,7 +823,6 @@ async function analyzeWithGemini(
                     },
                     business_type: { type: "STRING" },
                     product_category: { type: "STRING" },
-                    company_size: { type: "STRING" },
                     target_market: { type: "STRING" },
                     remarks: { type: "STRING" },
                   },
