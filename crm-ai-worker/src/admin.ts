@@ -54,7 +54,7 @@ interface AdminCustomer {
 }
 
 const CUSTOMER_COLUMNS = `
-  id, company_id, domain, status, company_name, legal_name, trading_name, normalized_domain,
+  id, company_id, display_id, domain, status, company_name, legal_name, trading_name, normalized_domain,
   first_name, last_name, full_name, title, department, linkedin_url,
   street_address, zip_city, country, country_code, region, city, postal_code,
   tel, email, cellphone, whatsapp, products_services, business_tag,
@@ -171,6 +171,24 @@ function parseCustomerId(pathname: string): number | null {
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
+interface ContactRow {
+  id: number;
+  contact_id: string;
+  company_id: string;
+  seq: number;
+  first_name: string | null;
+  last_name: string | null;
+  full_name: string | null;
+  title: string | null;
+  department: string | null;
+  email: string | null;
+  cellphone: string | null;
+  tel: string | null;
+  whatsapp: string | null;
+  linkedin_url: string | null;
+  social_accounts: string | null;
+}
+
 async function getCustomer(env: AdminEnv, id: number): Promise<AdminCustomer | null> {
   const result = await env.DB.prepare(
     `SELECT ${CUSTOMER_COLUMNS} FROM customers WHERE id = ? LIMIT 1`,
@@ -178,6 +196,15 @@ async function getCustomer(env: AdminEnv, id: number): Promise<AdminCustomer | n
     .bind(id)
     .first<AdminCustomer>();
   return result ?? null;
+}
+
+async function getCustomerContacts(env: AdminEnv, companyId: string): Promise<ContactRow[]> {
+  const result = await env.DB.prepare(
+    `SELECT id, contact_id, company_id, seq, first_name, last_name, full_name, title, department, email, cellphone, tel, whatsapp, linkedin_url, social_accounts FROM contacts WHERE company_id = ? ORDER BY seq`,
+  )
+    .bind(companyId)
+    .all<ContactRow>();
+  return result.results;
 }
 
 async function listCustomers(request: Request, env: AdminEnv): Promise<Response> {
@@ -284,7 +311,9 @@ async function handleAdminApi(request: Request, env: AdminEnv): Promise<Response
   if (id !== null) {
     if (request.method === "GET") {
       const customer = await getCustomer(env, id);
-      return customer ? jsonResponse(customer) : jsonResponse({ detail: "Customer not found" }, 404);
+      if (!customer) return jsonResponse({ detail: "Customer not found" }, 404);
+      const contacts = await getCustomerContacts(env, customer.company_id);
+      return jsonResponse({ ...customer, contacts });
     }
     if (request.method === "PATCH") return updateCustomer(request, env, id);
   }
@@ -356,7 +385,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 .persona-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin-bottom:10px}.persona-card h4{margin:0 0 8px;font-size:14px;color:#1e293b}.persona-card ul{margin:0;padding-left:18px;font-size:13px;color:#475569}.solution-card{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px;margin-bottom:10px}.solution-card h4{margin:0 0 6px;font-size:14px;color:#1e40af}.solution-card p{margin:0;font-size:13px;color:#1e3a5f}.section-title{font-size:15px;font-weight:600;color:#123b68;margin:18px 0 10px;padding-bottom:6px;border-bottom:2px solid #123b68}
 @media(max-width:700px){.top{align-items:flex-start;flex-direction:column}table{display:block;overflow-x:auto;white-space:nowrap}.field-row{flex-direction:column}.field-label{width:100%;min-width:0;border-right:none;border-bottom:1px solid #e2e8f0}.modal-body{padding:16px}}
 </style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></header><main class="wrap">
-<section class="panel"><h2>客户列表</h2><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
+<section class="panel"><h2>客户列表</h2><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
 </main>
 <div class="modal-overlay" id="modal"><div class="modal"><div class="modal-header"><h2 id="modalTitle">客户详情</h2><button class="button secondary small" id="closeModal">✕ 关闭</button></div><div class="modal-body" id="modalBody"></div><div class="modal-footer"><span id="modalMsg" class="notice hidden" style="margin-right:auto"></span><button class="button danger small" id="requeueBtn">设为 pending 重新处理</button><button class="button" id="submitBtn">提交修改</button></div></div></div>
 <script>
@@ -367,10 +396,11 @@ const ADMIN_PANEL_HTML = `<!doctype html>
   var api=function(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin';throw new Error('登录已过期')}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败');return d})})};
   var showMsg=function(id,t,g){var e=$(id);e.textContent=t;e.className='notice '+(g?'success':'error');e.classList.remove('hidden')};
   var badge=function(s){return'<span class="badge badge-'+esc(s)+'">'+esc(s)+'</span>'};
-  var load=function(){var p=new URLSearchParams({q:$('search').value,status:$('status').value,limit:String(state.limit),offset:String(state.offset)});api('/admin/api/customers?'+p.toString()).then(function(d){state.total=d.total;$('summary').textContent='共 '+d.total+' 条（显示公司名称、网址、状态、客户细分、国家、联系方式）';$('rows').innerHTML=d.items.map(function(c){return'<tr><td>'+esc(c.id)+'</td><td>'+esc(c.company_name||'-')+'</td><td><a href="'+esc(c.domain)+'" target="_blank">'+esc((c.domain||'').slice(0,40))+'</a></td><td>'+badge(c.status)+'</td><td>'+esc((c.customer_segment||'-').slice(0,40))+'</td><td>'+esc((c.country||'-'))+'</td><td>'+esc((c.email||c.cellphone||'-').slice(0,30))+'</td><td>'+esc(c.updated_at||'-')+'</td><td><button class="button" onclick="window.openDetail('+c.id+')">查看详情</button></td></tr>'}).join('')||'<tr><td colspan="9">暂无数据</td></tr>';$('pageInfo').textContent=(state.total?state.offset+1:0)+'-'+Math.min(state.offset+state.limit,state.total)+' / '+state.total;$('prev').disabled=state.offset===0;$('next').disabled=state.offset+state.limit>=state.total}).catch(function(e){showMsg('listMessage',e.message,false)})};
+  var load=function(){var p=new URLSearchParams({q:$('search').value,status:$('status').value,limit:String(state.limit),offset:String(state.offset)});api('/admin/api/customers?'+p.toString()).then(function(d){state.total=d.total;$('summary').textContent='共 '+d.total+' 条（显示公司名称、网址、状态、客户细分、国家、联系方式）';$('rows').innerHTML=d.items.map(function(c){var did=c.display_id||'N/A';return'<tr><td>'+esc(did)+'</td><td>'+esc(c.company_name||'-')+'</td><td><a href="'+esc(c.domain)+'" target="_blank">'+esc((c.domain||'').slice(0,35))+'</a></td><td>'+badge(c.status)+'</td><td>'+esc((c.customer_segment||'-').slice(0,35))+'</td><td>'+esc((c.country||'-'))+'</td><td>'+esc((c.email||c.cellphone||'-').slice(0,25))+'</td><td><button class="button" onclick="window.openDetail('+c.id+')">查看详情</button></td></tr>'}).join('')||'<tr><td colspan="8">暂无数据</td></tr>';$('pageInfo').textContent=(state.total?state.offset+1:0)+'-'+Math.min(state.offset+state.limit,state.total)+' / '+state.total;$('prev').disabled=state.offset===0;$('next').disabled=state.offset+state.limit>=state.total}).catch(function(e){showMsg('listMessage',e.message,false)})};
   var fields=[
     {key:'id',label:'数据库 ID',readonly:true},
-    {key:'company_id',label:'公司 ID',readonly:true},
+    {key:'display_id',label:'客户 ID',readonly:true},
+    {key:'company_id',label:'内部 UUID',readonly:true},
     {key:'company_name',label:'公司名称',type:'input'},
     {key:'legal_name',label:'法人名称',type:'input'},
     {key:'trading_name',label:'商号',type:'input'},
@@ -446,7 +476,13 @@ const ADMIN_PANEL_HTML = `<!doctype html>
         h+='<button class="button secondary small edit-btn" data-key="'+f.key+'">修改</button>'}
       h+='</div></div>'});
     return h};
-  window.openDetail=function(id){api('/admin/api/customers/'+id).then(function(c){state.selected=id;state.dirty={};$('modalTitle').textContent='客户详情 — '+esc(c.domain||'');$('modalBody').innerHTML=buildModal(c);$('modalMsg').classList.add('hidden');$('modal').classList.add('active');document.body.style.overflow='hidden';
+  var renderContacts=function(contacts){if(!contacts||contacts.length===0)return'<div style="color:#94a3b8;padding:12px">暂无联系人数据</div>';var h='<div class="section-title">👥 联系人列表 ('+contacts.length+'人)</div>';contacts.forEach(function(ct,idx){h+='<div class="persona-card" style="border-left:3px solid #1677d2">';h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';h+='<h4 style="margin:0">'+esc(ct.contact_id||'')+' — '+esc((ct.first_name||'')+' '+(ct.last_name||''))+'</h4>';h+='<span class="badge">#'+esc(String(ct.seq))+'</span></div>';
+      h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:13px">';
+      var pairs=[['职位',ct.title],['全名',ct.full_name],['部门',ct.department],['邮箱',ct.email],['手机',ct.cellphone],['电话',ct.tel],['WhatsApp',ct.whatsapp],['LinkedIn',ct.linkedin_url]];
+      pairs.forEach(function(p){if(p[1])h+='<div><strong>'+esc(p[0])+':</strong> '+esc(p[1])+'</div>'});
+      if(ct.social_accounts){try{var sa=JSON.parse(ct.social_accounts);if(sa.length>0){h+='<div style="grid-column:1/-1"><strong>社交账号:</strong> ';sa.forEach(function(a){h+=esc(a.platform)+': '+(a.username?'@'+esc(a.username):'')+' '});h+='</div>'}}catch(e){}}
+      h+='</div></div>'});return h};
+  window.openDetail=function(id){api('/admin/api/customers/'+id).then(function(c){state.selected=id;state.dirty={};$('modalTitle').textContent='客户详情 — '+esc(c.company_name||c.domain||'');var body=buildModal(c);body+='<div class="section-title">👥 联系人列表</div>';body+='<div id="contactsArea"></div>';$('modalBody').innerHTML=body;var ca=document.getElementById('contactsArea');if(ca)ca.innerHTML=renderContacts(c.contacts);$('modalMsg').classList.add('hidden');$('modal').classList.add('active');document.body.style.overflow='hidden';
       document.querySelectorAll('.edit-btn').forEach(function(btn){btn.onclick=function(){var key=btn.getAttribute('data-key');var row=btn.closest('.field-row');row.classList.add('editing');state.dirty[key]=true;var inp=document.getElementById('inp_'+key);if(inp&&inp.focus)inp.focus()}})}).catch(function(e){showMsg('listMessage',e.message,false)})};
   var closeModal=function(){$('modal').classList.remove('active');document.body.style.overflow='';state.selected=null;state.dirty={}};
   $('closeModal').onclick=closeModal;
