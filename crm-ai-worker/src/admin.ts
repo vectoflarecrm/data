@@ -1,6 +1,21 @@
+import {
+  getBrandSettings,
+  updateBrandSetting,
+  generateOutreachEmails,
+  getOutreachEmails,
+  updateOutreachEmail,
+  deleteOutreachEmail,
+  getOutreachStats,
+} from "./outreach";
+
 export interface AdminEnv {
   DB: D1Database;
   ADMIN_PANEL_TOKEN?: string;
+  GEMINI_API_KEY?: string;
+  GEMINI_MODEL?: string;
+  GROQ_API_KEY?: string;
+  MISTRAL_API_KEY?: string;
+  DEEPSEEK_API_KEY?: string;
 }
 
 interface AdminCustomer {
@@ -304,6 +319,81 @@ async function updateCustomer(request: Request, env: AdminEnv, id: number): Prom
   }
 }
 
+async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Response> {
+  try {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // GET /admin/api/outreach/settings - Get brand settings
+    if (path === "/admin/api/outreach/settings" && request.method === "GET") {
+      const settings = await getBrandSettings(env);
+      return jsonResponse({ settings });
+    }
+
+    // PATCH /admin/api/outreach/settings/:brand - Update brand setting
+    if (path.startsWith("/admin/api/outreach/settings/") && request.method === "PATCH") {
+      const brandName = decodeURIComponent(path.split("/").pop() || "");
+      const body = (await request.json()) as Record<string, unknown>;
+      const updates: { company_intro?: string; enabled?: boolean } = {};
+      if (typeof body.company_intro === "string") updates.company_intro = body.company_intro;
+      if (typeof body.enabled === "boolean") updates.enabled = body.enabled;
+      await updateBrandSetting(env, brandName, updates);
+      return jsonResponse({ ok: true });
+    }
+
+    // POST /admin/api/outreach/generate - Generate outreach emails
+    if (path === "/admin/api/outreach/generate" && request.method === "POST") {
+      const body = (await request.json()) as { brand?: string; limit?: number };
+      if (!body.brand) return jsonResponse({ detail: "brand is required" }, 400);
+      const result = await generateOutreachEmails(env, body.brand, body.limit || 10);
+      return jsonResponse(result);
+    }
+
+    // GET /admin/api/outreach/emails - List outreach emails
+    if (path === "/admin/api/outreach/emails" && request.method === "GET") {
+      const result = await getOutreachEmails(env, {
+        brand: url.searchParams.get("brand") || undefined,
+        status: url.searchParams.get("status") || undefined,
+        limit: Number(url.searchParams.get("limit") || 50),
+        offset: Number(url.searchParams.get("offset") || 0),
+      });
+      return jsonResponse(result);
+    }
+
+    // GET /admin/api/outreach/stats - Get outreach statistics
+    if (path === "/admin/api/outreach/stats" && request.method === "GET") {
+      const stats = await getOutreachStats(env);
+      return jsonResponse(stats);
+    }
+
+    // PATCH /admin/api/outreach/emails/:id - Update email
+    if (path.startsWith("/admin/api/outreach/emails/") && request.method === "PATCH") {
+      const id = Number(path.split("/").pop());
+      if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
+      const body = (await request.json()) as Record<string, unknown>;
+      const updates: { status?: string; subject?: string; body?: string } = {};
+      if (typeof body.status === "string") updates.status = body.status;
+      if (typeof body.subject === "string") updates.subject = body.subject;
+      if (typeof body.body === "string") updates.body = body.body;
+      await updateOutreachEmail(env, id, updates);
+      return jsonResponse({ ok: true });
+    }
+
+    // DELETE /admin/api/outreach/emails/:id - Delete email
+    if (path.startsWith("/admin/api/outreach/emails/") && request.method === "DELETE") {
+      const id = Number(path.split("/").pop());
+      if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
+      await deleteOutreachEmail(env, id);
+      return jsonResponse({ ok: true });
+    }
+
+    return jsonResponse({ detail: "Not Found" }, 404);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return jsonResponse({ detail: `Outreach API Error: ${msg}` }, 500);
+  }
+}
+
 async function handleAdminApi(request: Request, env: AdminEnv): Promise<Response> {
   try {
     const url = new URL(request.url);
@@ -371,6 +461,18 @@ export async function handleAdminRequest(
     });
   }
 
+  if (url.pathname === "/admin/outreach") {
+    if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
+    return (await isAuthenticated(request, env))
+      ? htmlResponse(OUTREACH_PANEL_HTML)
+      : htmlResponse(ADMIN_LOGIN_HTML);
+  }
+
+  if (url.pathname.startsWith("/admin/api/outreach")) {
+    if (!(await isAuthenticated(request, env))) return authFailure(request);
+    return handleOutreachApi(request, env);
+  }
+
   if (url.pathname.startsWith("/admin/api/")) {
     if (!(await isAuthenticated(request, env))) return authFailure(request);
     return handleAdminApi(request, env);
@@ -396,7 +498,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 .field-row{display:flex;align-items:stretch;border-bottom:1px solid #e2e8f0;min-height:48px}.field-row:last-child{border-bottom:none}.field-label{width:180px;min-width:180px;padding:12px 16px;background:#f8fafc;font-weight:600;font-size:13px;color:#475569;display:flex;align-items:center;border-right:1px solid #e2e8f0}.field-content{flex:1;padding:12px 16px;display:flex;align-items:center;gap:8px;min-height:48px}.field-value{flex:1;font-size:14px;word-break:break-word;line-height:1.5}.field-value a{color:#1677d2;text-decoration:none}.field-value a:hover{text-decoration:underline}.field-input{flex:1;display:none;gap:8px;align-items:center}.field-input input,.field-input select,.field-input textarea{font:inherit;padding:8px 12px;border:1px solid #cbd5e1;border-radius:6px;width:100%}.field-input textarea{min-height:80px;resize:vertical}.field-input input,.field-input select{max-width:100%}.field-row.editing .field-value{display:none}.field-row.editing .field-input{display:flex}.field-row.readonly .field-label{color:#94a3b8}
 .persona-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin-bottom:10px}.persona-card h4{margin:0 0 8px;font-size:14px;color:#1e293b}.persona-card ul{margin:0;padding-left:18px;font-size:13px;color:#475569}.solution-card{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px;margin-bottom:10px}.solution-card h4{margin:0 0 6px;font-size:14px;color:#1e40af}.solution-card p{margin:0;font-size:13px;color:#1e3a5f}.section-title{font-size:15px;font-weight:600;color:#123b68;margin:18px 0 10px;padding-bottom:6px;border-bottom:2px solid #123b68}
 @media(max-width:700px){.top{align-items:flex-start;flex-direction:column}table{display:block;overflow-x:auto;white-space:nowrap}.field-row{flex-direction:column}.field-label{width:100%;min-width:0;border-right:none;border-bottom:1px solid #e2e8f0}.modal-body{padding:16px}}
-</style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></header><main class="wrap">
+</style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div style="display:flex;gap:12px;align-items:center"><a href="/admin/outreach" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">📧 开发信管理</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
 <section class="panel"><h2>客户列表</h2><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
 </main>
 <div class="modal-overlay" id="modal"><div class="modal"><div class="modal-header"><h2 id="modalTitle">客户详情</h2><button class="button secondary small" id="closeModal">✕ 关闭</button></div><div class="modal-body" id="modalBody"></div><div class="modal-footer"><span id="modalMsg" class="notice hidden" style="margin-right:auto"></span><button class="button danger small" id="requeueBtn">设为 pending 重新处理</button><button class="button" id="submitBtn">提交修改</button></div></div></div>
@@ -510,5 +612,86 @@ const ADMIN_PANEL_HTML = `<!doctype html>
   $('requeueBtn').onclick=function(){if(state.selected===null)return;api('/admin/api/customers/'+state.selected,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'pending'})}).then(function(){showMsg('modalMsg','已设为 pending',true);load()}).catch(function(e){showMsg('modalMsg',e.message,false)})};
   $('load').onclick=function(){state.offset=0;load()};$('search').onkeydown=function(e){if(e.key==='Enter'){state.offset=0;load()}};$('status').onchange=function(){state.offset=0;load()};$('prev').onclick=function(){if(state.offset>0){state.offset=Math.max(0,state.offset-state.limit);load()}};$('next').onclick=function(){if(state.offset+state.limit<state.total){state.offset+=state.limit;load()}};
   load();
+})();
+</script></body></html>`;
+
+const OUTREACH_PANEL_HTML = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>开发信管理 - Outreach</title><style>
+:root{font-family:system-ui,-apple-system,sans-serif;color:#172033;background:#f4f7fb}*{box-sizing:border-box}body{margin:0}.top{background:#0f766e;color:#fff;padding:18px 26px;display:flex;justify-content:space-between;align-items:center;gap:12px}.top h1{font-size:22px;margin:0}.wrap{max-width:1400px;margin:22px auto;padding:0 18px}.tabs{display:flex;gap:0;margin-bottom:18px;border-bottom:2px solid #d1d5db}.tab{padding:12px 24px;cursor:pointer;font-weight:600;color:#6b7280;border-bottom:3px solid transparent;transition:.2s}.tab.active{color:#0f766e;border-bottom-color:#0f766e}.tab:hover{color:#0f766e}.panel{background:#fff;border:1px solid #d1d5db;border-radius:12px;padding:20px;margin-bottom:18px}.section-title{font-size:17px;font-weight:700;color:#0f766e;margin:0 0 14px;padding-bottom:8px;border-bottom:2px solid #0f766e}
+.brand-card{background:#f0fdfa;border:1px solid #99f6e4;border-radius:12px;padding:20px;margin-bottom:16px}.brand-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.brand-name{font-size:20px;font-weight:700;color:#0f766e}.brand-category{font-size:13px;color:#6b7280;background:#e0f2fe;padding:4px 10px;border-radius:20px}
+.toggle{position:relative;display:inline-block;width:50px;height:26px}.toggle input{opacity:0;width:0;height:0}.slider{position:absolute;cursor:pointer;inset:0;background:#cbd5e1;border-radius:26px;transition:.3s}.slider:before{content:'';position:absolute;height:20px;width:20px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s}input:checked+.slider{background:#0f766e}input:checked+.slider:before{transform:translateX(24px)}
+.intro-textarea{width:100%;min-height:120px;padding:12px;border:1px solid #cbd5e1;border-radius:8px;font:inherit;resize:vertical;margin-top:8px}
+.btn{padding:10px 20px;border:0;border-radius:8px;cursor:pointer;font:inherit;font-weight:600;transition:.2s}.btn-primary{background:#0f766e;color:#fff}.btn-primary:hover{background:#115e59}.btn-secondary{background:#6b7280;color:#fff}.btn-secondary:hover{background:#4b5563}.btn-danger{background:#dc2626;color:#fff}.btn-danger:hover{background:#b91c1c}.btn-sm{padding:6px 14px;font-size:13px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:18px}.stat-card{background:#f0fdfa;border:1px solid #99f6e4;border-radius:10px;padding:16px;text-align:center}.stat-value{font-size:28px;font-weight:700;color:#0f766e}.stat-label{font-size:13px;color:#6b7280;margin-top:4px}
+.email-card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin-bottom:12px}.email-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.email-subject{font-weight:700;font-size:15px;color:#111827}.email-meta{font-size:12px;color:#6b7280;margin-bottom:8px}.email-body{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px;white-space:pre-wrap;font-size:13px;line-height:1.6;color:#374151}
+.badge{display:inline-block;border-radius:20px;padding:3px 10px;font-size:12px;font-weight:600}.badge-draft{background:#fef3c7;color:#92400e}.badge-sent{background:#d1fae5;color:#065f46}
+.toast{position:fixed;top:20px;right:20px;padding:14px 20px;border-radius:10px;color:#fff;font-weight:600;z-index:9999;display:none}.toast.success{background:#059669}.toast.error{background:#dc2626}
+@media(max-width:700px){.top{flex-direction:column}.stats{grid-template-columns:1fr 1fr}.email-header{flex-direction:column;align-items:flex-start;gap:6px}}
+</style></head><body>
+<header class="top"><h1>📧 开发信管理</h1><div style="display:flex;gap:10px;align-items:center"><a href="/admin" style="color:#fff;text-decoration:none;font-weight:600">← 返回客户管理</a><form method="post" action="/admin/logout"><button class="btn btn-sm" style="background:rgba(255,255,255,.2);color:#fff" type="submit">退出</button></form></div></header>
+<main class="wrap">
+<div class="tabs"><div class="tab active" data-tab="settings">⚙️ 品牌设置</div><div class="tab" data-tab="generate">🤖 生成开发信</div><div class="tab" data-tab="emails">📬 开发信列表</div></div>
+<div id="tab-settings" class="tab-content">
+<div class="section-title">品牌配置</div><div id="brandsArea"></div>
+</div>
+<div id="tab-generate" class="tab-content" style="display:none">
+<div class="section-title">生成开发信</div>
+<div class="panel"><p>选择品牌，AI将根据数据库中匹配的客户信息自动生成个性化开发信。</p>
+<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px">
+<select id="genBrand" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit;min-width:200px"></select>
+<select id="genLimit" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit"><option value="5">5封</option><option value="10" selected>10封</option><option value="20">20封</option><option value="50">50封</option></select>
+<button class="btn btn-primary" id="genBtn">🚀 开始生成</button>
+</div><div id="genMsg" style="margin-top:12px"></div></div>
+</div>
+<div id="tab-emails" class="tab-content" style="display:none">
+<div class="stats" id="statsArea"></div>
+<div class="panel"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
+<select id="filterBrand" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit"><option value="">全部品牌</option><option value="Afarer">Afarer (SUPs)</option><option value="Aquafarer">Aquafarer (Inflatable)</option><option value="Neptunor">Neptunor (RIB)</option></select>
+<select id="filterStatus" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit"><option value="">全部状态</option><option value="draft">草稿</option><option value="sent">已发送</option></select>
+<button class="btn btn-secondary btn-sm" id="refreshEmails">刷新</button>
+</div><div id="emailsArea"></div>
+<div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px"><button class="btn btn-secondary btn-sm" id="emailPrev">上一页</button><span id="emailPageInfo"></span><button class="btn btn-secondary btn-sm" id="emailNext">下一页</button></div>
+</div>
+</div>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+(function(){
+var toastTimeout;
+function showToast(msg,isOk){var t=document.getElementById('toast');t.textContent=msg;t.className='toast '+(isOk?'success':'error');t.style.display='block';clearTimeout(toastTimeout);toastTimeout=setTimeout(function(){t.style.display='none'},4000)}
+function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+function api(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin/outreach';throw new Error('登录过期')}var ct=r.headers.get('content-type')||'';if(ct.indexOf('json')===-1){return r.text().then(function(t){throw new Error('非JSON响应: '+t.slice(0,100))})}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败');return d})})}
+
+// Tab switching
+document.querySelectorAll('.tab').forEach(function(tab){tab.onclick=function(){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tab-content').forEach(function(c){c.style.display='none'});tab.classList.add('active');document.getElementById('tab-'+tab.dataset.tab).style.display='block';if(tab.dataset.tab==='settings')loadBrands();if(tab.dataset.tab==='emails'){loadStats();loadEmails()}}});
+
+// Brand settings
+function loadBrands(){api('/admin/api/outreach/settings').then(function(d){var h='';d.settings.forEach(function(b){h+='<div class="brand-card"><div class="brand-header"><div><span class="brand-name">'+esc(b.brand_name)+'</span> <span class="brand-category">'+esc(b.product_category)+'</span></div><label class="toggle"><input type="checkbox" '+(b.enabled?'checked':'')+' data-brand="'+esc(b.brand_name)+'" class="enable-toggle"><span class="slider"></span></label></div><label style="font-weight:600;font-size:13px;color:#475569">公司简介</label><textarea class="intro-textarea" data-brand="'+esc(b.brand_name)+'">'+esc(b.company_intro)+'</textarea><div style="margin-top:10px;text-align:right"><button class="btn btn-primary btn-sm save-intro" data-brand="'+esc(b.brand_name)+'">💾 保存简介</button></div></div>'});document.getElementById('brandsArea').innerHTML=h||'<p>暂无品牌配置</p>';document.querySelectorAll('.enable-toggle').forEach(function(el){el.onchange=function(){var brand=el.dataset.brand;var enabled=el.checked;api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enabled})}).then(function(){showToast(brand+(enabled?' 已启用':' 已禁用'),true)}).catch(function(e){showToast(e.message,false);el.checked=!enabled)}});document.querySelectorAll('.save-intro').forEach(function(el){el.onclick=function(){var brand=el.dataset.brand;var ta=document.querySelector('.intro-textarea[data-brand="'+brand+'"]');api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({company_intro:ta.value})}).then(function(){showToast(brand+' 简介已保存',true)}).catch(function(e){showToast(e.message,false)}}})}).catch(function(e){document.getElementById('brandsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>'})}
+
+// Generate
+api('/admin/api/outreach/settings').then(function(d){var sel=document.getElementById('genBrand');sel.innerHTML='';d.settings.forEach(function(b){if(b.enabled){var opt=document.createElement('option');opt.value=b.brand_name;opt.textContent=b.brand_name+' ('+b.product_category+')';sel.appendChild(opt)}});if(!sel.options.length){sel.innerHTML='<option value="">-- 请先启用品牌 --</option>'}});
+document.getElementById('genBtn').onclick=function(){var brand=document.getElementById('genBrand').value;var limit=Number(document.getElementById('genLimit').value);if(!brand){showToast('请选择品牌',false);return}var btn=document.getElementById('genBtn');btn.disabled=true;btn.textContent='⏳ 生成中...';showMsg('genMsg','正在为 '+brand+' 生成开发信，请稍候...',false);
+api('/admin/api/outreach/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:brand,limit:limit})}).then(function(r){showMsg('genMsg','✅ 成功生成 '+r.generated+' 封开发信'+(r.errors.length?'，'+r.errors.length+' 条失败':''),true);showToast('生成完成: '+r.generated+'封',true)}).catch(function(e){showMsg('genMsg','❌ '+e.message,false);showToast(e.message,false)}).finally(function(){btn.disabled=false;btn.textContent='🚀 开始生成'})};
+function showMsg(id,t,g){var e=document.getElementById(id);if(!e)return;e.textContent=t;e.className='notice '+(g?'success':'error');e.style.display='block'}
+
+// Email list
+var emailState={offset:0,limit:20,total:0};
+function loadStats(){api('/admin/api/outreach/stats').then(function(s){var h='<div class="stat-card"><div class="stat-value">'+s.total+'</div><div class="stat-label">总计</div></div><div class="stat-card"><div class="stat-value">'+s.draft+'</div><div class="stat-label">草稿</div></div><div class="stat-card"><div class="stat-value">'+s.sent+'</div><div class="stat-label">已发送</div></div>';s.by_brand.forEach(function(b){h+='<div class="stat-card"><div class="stat-value">'+b.count+'</div><div class="stat-label">'+esc(b.brand_name)+'</div></div>'});document.getElementById('statsArea').innerHTML=h}).catch(function(){})}
+function loadEmails(){var brand=document.getElementById('filterBrand').value;var status=document.getElementById('filterStatus').value;var p=new URLSearchParams({limit:String(emailState.limit),offset:String(emailState.offset)});if(brand)p.set('brand',brand);if(status)p.set('status',status);
+api('/admin/api/outreach/emails?'+p.toString()).then(function(d){emailState.total=d.total;var h='';d.items.forEach(function(e){h+='<div class="email-card"><div class="email-header"><span class="email-subject">'+esc(e.subject||'(无主题)')+'</span><div><span class="badge badge-'+esc(e.status)+'">'+(e.status==='sent'?'已发送':'草稿')+'</span> <button class="btn btn-sm btn-danger del-email" data-id="'+e.id+'">删除</button>'+(e.status==='draft'?' <button class="btn btn-sm btn-primary mark-sent" data-id="'+e.id+'">标记已发送</button>':'')+'</div></div><div class="email-meta">'+esc(e.brand_name||'')+' → '+esc(e.company_name||'')+' ('+esc(e.display_id||'')+') | 收件人: '+esc(e.email_to||'未知')+' | '+esc(e.created_at||'')+'</div><div class="email-body">'+esc(e.body||'')+'</div></div>'});if(!d.items.length)h='<p style="color:#6b7280;text-align:center;padding:20px">暂无开发信</p>';
+emailState.total=d.total;document.getElementById('emailsArea').innerHTML=h;document.getElementById('emailPageInfo').textContent=(d.total?emailState.offset+1:0)+'-'+Math.min(emailState.offset+emailState.limit,d.total)+' / '+d.total;
+document.getElementById('emailPrev').disabled=emailState.offset===0;document.getElementById('emailNext').disabled=emailState.offset+emailState.limit>=d.total;
+document.querySelectorAll('.del-email').forEach(function(b){b.onclick=function(){if(!confirm('确定删除？'))return;api('/admin/api/outreach/emails/'+b.dataset.id,{method:'DELETE'}).then(function(){showToast('已删除',true);loadEmails();loadStats()}).catch(function(e){showToast(e.message,false)}}});
+document.querySelectorAll('.mark-sent').forEach(function(b){b.onclick=function(){api('/admin/api/outreach/emails/'+b.dataset.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'sent'})}).then(function(){showToast('已标记为已发送',true);loadEmails();loadStats()}).catch(function(e){showToast(e.message,false)}}})}).catch(function(e){document.getElementById('emailsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>'})}
+
+document.getElementById('refreshEmails').onclick=function(){emailState.offset=0;loadEmails()};
+document.getElementById('filterBrand').onchange=function(){emailState.offset=0;loadEmails()};
+document.getElementById('filterStatus').onchange=function(){emailState.offset=0;loadEmails()};
+document.getElementById('emailPrev').onclick=function(){if(emailState.offset>0){emailState.offset=Math.max(0,emailState.offset-emailState.limit);loadEmails()}};
+document.getElementById('emailNext').onclick=function(){if(emailState.offset+emailState.limit<emailState.total){emailState.offset+=emailState.limit;loadEmails()}};
+
+// Init
+loadBrands();
 })();
 </script></body></html>`;

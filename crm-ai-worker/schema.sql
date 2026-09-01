@@ -55,3 +55,35 @@ CREATE TABLE IF NOT EXISTS customers (
 
 CREATE INDEX IF NOT EXISTS idx_customers_status ON customers(status);
 CREATE INDEX IF NOT EXISTS idx_customers_company_id ON customers(company_id);
+
+-- Outreach email settings
+CREATE TABLE IF NOT EXISTS outreach_settings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  brand_name TEXT NOT NULL UNIQUE,
+  product_category TEXT NOT NULL,
+  company_intro TEXT,
+  enabled INTEGER DEFAULT 0,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Generated outreach emails
+CREATE TABLE IF NOT EXISTS outreach_emails (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER,
+  company_id TEXT,
+  display_id TEXT,
+  company_name TEXT,
+  email_to TEXT,
+  product_category TEXT,
+  brand_name TEXT,
+  subject TEXT,
+  body TEXT,
+  status TEXT DEFAULT 'draft',
+  sent_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (customer_id) REFERENCES customers(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_customer_id ON outreach_emails(customer_id);
+CREATE INDEX IF NOT EXISTS idx_outreach_status ON outreach_emails(status);
+CREATE INDEX IF NOT EXISTS idx_outreach_product ON outreach_emails(product_category);

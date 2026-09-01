@@ -1090,7 +1090,8 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const adminResponse = await handleAdminRequest(request, env);
+    const adminEnv = { ...env } as import("./admin").AdminEnv;
+    const adminResponse = await handleAdminRequest(request, adminEnv);
     return adminResponse ?? new Response("Not Found", { status: 404 });
   },
 
