@@ -57,6 +57,16 @@ interface GoogleSearchResponse {
 interface CustomerAnalysis {
   customer_segment: string;
   personas_and_solutions: unknown;
+  found_contacts: Array<{
+    first_name?: string;
+    last_name?: string;
+    title?: string;
+    email?: string;
+    cellphone?: string;
+    whatsapp?: string;
+    linkedin_url?: string;
+    source?: string;
+  }>;
   remarks: string;
 }
 
@@ -67,9 +77,11 @@ const MAX_SOURCE_PAGES = 5;
 const MAX_SEARCH_RESULTS = 5;
 const INTER_SOURCE_DELAY_MS = 2_000;
 const SEARCH_QUERIES = [
-  (name: string, country: string) => `"${name}" ${country} water sports company`,
-  (name: string) => `"${name}" distributor dealer inflatable boat SUP kayak`,
-  (name: string) => `"${name}" about team contact email phone`,
+  (name: string, country: string) => `"${name}" ${country} water sports company email phone contact`,
+  (name: string) => `"${name}" email whatsapp cellphone contact person`,
+  (name: string) => `"${name}" team staff manager owner linkedin`,
+  (name: string) => `"${name}" about products services inflatable boat SUP`,
+  (name: string) => `site:linkedin.com "${name}"`,
 ];
 const DEFAULT_MODEL = "gemini-2.5-flash-lite";
 const FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash"];
@@ -477,9 +489,24 @@ function parseAnalysis(content: string): CustomerAnalysis {
   if (!("personas_and_solutions" in object)) {
     throw new Error("AI response has no personas_and_solutions");
   }
+  const foundContacts = Array.isArray(object.found_contacts)
+    ? (object.found_contacts as Array<Record<string, unknown>>)
+        .filter((c) => c && typeof c === "object")
+        .map((c) => ({
+          first_name: typeof c.first_name === "string" ? c.first_name : undefined,
+          last_name: typeof c.last_name === "string" ? c.last_name : undefined,
+          title: typeof c.title === "string" ? c.title : undefined,
+          email: typeof c.email === "string" ? c.email : undefined,
+          cellphone: typeof c.cellphone === "string" ? c.cellphone : undefined,
+          whatsapp: typeof c.whatsapp === "string" ? c.whatsapp : undefined,
+          linkedin_url: typeof c.linkedin_url === "string" ? c.linkedin_url : undefined,
+          source: typeof c.source === "string" ? c.source : undefined,
+        }))
+    : [];
   return {
     customer_segment: object.customer_segment.trim(),
     personas_and_solutions: object.personas_and_solutions,
+    found_contacts: foundContacts,
     remarks: object.remarks.trim(),
   };
 }
@@ -491,12 +518,21 @@ const AI_SYSTEM_PROMPT = `你是一名高级B2B市场数据分析师，专注于
 2. 只根据提供的多源信息作答，不得编造任何事实
 3. 如果信息不足，明确标注"信息不足，需进一步验证"
 4. 必须只返回一个合法JSON对象，禁止Markdown、代码围栏和额外说明
+5. 严禁根据姓名猜测邮箱格式（如禁止从 John Doe 生成 john.doe@company.com）
+6. 严禁编造手机号码、WhatsApp号码或任何联系方式
+
+核心任务——联系方式挖掘（最高优先级）：
+- 从网页、搜索结果、社交媒体中提取真实的email地址
+- 从网页、搜索结果中提取真实的手机号码（Cellphone/Mobile）
+- 只有在官网包含 wa.me 链接、WhatsApp图标或社媒明确标注时才填写WhatsApp
+- 从LinkedIn、Facebook等提取联系人姓名和职位
+- 所有联系方式必须有明确来源，不得猜测或编造
 
 分析要求：
 - 交叉验证多个信息来源，确保数据准确
 - 识别公司的核心业务模式（制造商/分销商/零售商/租赁/培训等）
 - 分析其在水上运动行业的具体定位
-- 识别关键决策者和采购负责人
+- 识别关键决策者和采购负责人（姓名、职位、联系方式）
 - 评估其作为潜在客户的价值`;
 
 function buildUserPrompt(customer: CustomerRow, researchContext: string): string {
@@ -510,11 +546,25 @@ function buildUserPrompt(customer: CustomerRow, researchContext: string): string
 ${researchContext || "（未获取到有效信息）"}
 
 ## 分析要求
+
+### 第一优先级：联系方式挖掘
+请从上述数据中仔细提取以下联系信息，每条都必须有明确来源：
+- Email地址：从网页、联系页面、搜索结果中找到的真实邮箱
+- 手机号码（Cellphone/Mobile）：从网页、社媒中找到的真实手机号
+- WhatsApp：仅当官网有wa.me链接或社媒明确标注时才填写
+- 联系人姓名和职位：从Team/About/LinkedIn等页面找到的真实人员
+
+### 第二优先级：业务分析
 1. 客户细分：该公司的核心业务是什么？在水上运动行业中扮演什么角色？
 2. 客户画像：识别2-5个关键角色（如采购经理、产品总监、创始人等），分析每个角色的需求和痛点
 3. 解决方案：针对每个角色，提供具体的解决方案建议
 4. 备注：总结公司的关键信息、潜在合作机会和风险点
-5. 信息来源标注：注明分析结论来自哪个信息来源`;
+5. 信息来源标注：注明分析结论来自哪个信息来源
+
+### 重要提醒
+- 严禁编造任何联系方式！如果找不到就留空
+- 严禁根据姓名猜测邮箱格式
+- 每个找到的联系方式必须注明来源URL或页面`;
 }
 
 interface OpenAIResponse {
@@ -529,6 +579,8 @@ async function openaiCompatibleAnalyze(
   researchContext: string,
   controller: AbortController,
 ): Promise<CustomerAnalysis> {
+  const jsonFormatHint = `\n\n你必须返回一个合法的JSON对象，格式如下：\n{\n  "customer_segment": "客户细分描述",\n  "personas_and_solutions": {"personas": [{"name": "角色名", "role": "职位", "needs": ["需求1"], "pain_points": ["痛点1"]}], "solutions": [{"name": "方案名", "value": "方案描述", "target_persona": "目标角色"}]},\n  "found_contacts": [{"first_name": "名", "last_name": "姓", "title": "职位", "email": "真实邮箱", "cellphone": "真实手机号", "whatsapp": "仅当有wa.me链接时填写", "linkedin_url": "LinkedIn链接", "source": "信息来源URL"}],\n  "remarks": "备注"\n}\n\n重要：found_contacts中的所有联系方式必须是从提供的数据中真实找到的，严禁编造！`;
+
   const response = await fetch(apiUrl, {
     method: "POST",
     signal: controller.signal,
@@ -540,7 +592,7 @@ async function openaiCompatibleAnalyze(
       model,
       messages: [
         { role: "system", content: AI_SYSTEM_PROMPT },
-        { role: "user", content: buildUserPrompt(customer, researchContext) },
+        { role: "user", content: buildUserPrompt(customer, researchContext) + jsonFormatHint },
       ],
       temperature: 0.1,
       response_format: { type: "json_object" },
@@ -618,6 +670,22 @@ async function analyzeWithGemini(
                         },
                       },
                       required: ["personas", "solutions"],
+                    },
+                    found_contacts: {
+                      type: "ARRAY",
+                      items: {
+                        type: "OBJECT",
+                        properties: {
+                          first_name: { type: "STRING" },
+                          last_name: { type: "STRING" },
+                          title: { type: "STRING" },
+                          email: { type: "STRING" },
+                          cellphone: { type: "STRING" },
+                          whatsapp: { type: "STRING" },
+                          linkedin_url: { type: "STRING" },
+                          source: { type: "STRING" },
+                        },
+                      },
                     },
                     remarks: { type: "STRING" },
                   },
@@ -795,6 +863,48 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
     const analysis = await analyzeCustomer(customer, researchContext, env);
     const personas = JSON.stringify(analysis.personas_and_solutions);
     const remarks = withCompanyMarker(analysis.remarks, customer.company_id);
+
+    // Step 5: Save found contacts to contacts table
+    if (analysis.found_contacts && analysis.found_contacts.length > 0) {
+      // Get current max seq for this company
+      const maxSeqResult = await env.DB.prepare(
+        `SELECT COALESCE(MAX(seq), 0) AS max_seq FROM contacts WHERE company_id = ?`
+      ).bind(customer.company_id).first<{ max_seq: number }>();
+      let nextSeq = (maxSeqResult?.max_seq ?? 0) + 1;
+
+      const contactStmts: D1PreparedStatement[] = [];
+      for (const ct of analysis.found_contacts) {
+        // Only save contacts with at least a name or email
+        const hasName = ct.first_name || ct.last_name;
+        const hasContact = ct.email || ct.cellphone || ct.whatsapp;
+        if (!hasName && !hasContact) continue;
+
+        const contactId = `${customer.display_id || customer.company_id}_${String(nextSeq).padStart(3, "0")}`;
+        contactStmts.push(
+          env.DB.prepare(
+            `INSERT OR IGNORE INTO contacts (contact_id, company_id, seq, first_name, last_name, title, email, cellphone, whatsapp, linkedin_url, department)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(
+            contactId,
+            customer.company_id,
+            nextSeq,
+            ct.first_name || null,
+            ct.last_name || null,
+            ct.title || null,
+            ct.email || null,
+            ct.cellphone || null,
+            ct.whatsapp || null,
+            ct.linkedin_url || null,
+            ct.source || null,
+          )
+        );
+        nextSeq++;
+      }
+      if (contactStmts.length > 0) {
+        await env.DB.batch(contactStmts);
+      }
+    }
+
     return env.DB.prepare(`
       UPDATE customers
       SET status = 'completed', customer_segment = ?, personas_and_solutions = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
