@@ -79,6 +79,72 @@ def contact_payload(company: Company) -> list[dict[str, object]]:
     return contacts
 
 
+def extract_contact_fields(company: Company) -> dict[str, str | None]:
+    """Extract primary contact info from the first contact record."""
+    result: dict[str, str | None] = {
+        "first_name": None,
+        "last_name": None,
+        "title": None,
+        "tel": None,
+        "email": None,
+        "cellphone": None,
+        "whatsapp": None,
+    }
+    if not company.contacts:
+        return result
+    contact = company.contacts[0]
+    result["first_name"] = contact.first_name
+    result["last_name"] = contact.last_name
+    result["title"] = contact.job_title
+    for method in contact.methods:
+        mtype = str(method.method_type).lower()
+        value = method.value
+        if "email" in mtype and not result["email"]:
+            result["email"] = value
+        elif "phone" in mtype or "tel" in mtype or "cell" in mtype or "mobile" in mtype:
+            if "whatsapp" in mtype or "wa.me" in (value or ""):
+                result["whatsapp"] = value
+            elif not result["cellphone"]:
+                result["cellphone"] = value
+            elif not result["tel"]:
+                result["tel"] = value
+    return result
+
+
+def products_services_text(company: Company) -> str | None:
+    """Build a products & services summary text."""
+    parts: list[str] = []
+    if company.main_products_summary:
+        parts.append(company.main_products_summary)
+    product_names = [
+        link.product.name
+        for link in company.products
+        if link.product is not None
+    ]
+    if product_names:
+        parts.append(", ".join(dict.fromkeys(product_names)))
+    return " | ".join(parts) if parts else None
+
+
+def business_tag_text(company: Company) -> str | None:
+    """Build business tag from company type flags."""
+    tags: list[str] = []
+    flag_map = [
+        (company.distributor, "Distributor"),
+        (company.wholesaler, "Wholesaler"),
+        (company.retailer, "Dealer"),
+        (company.ecommerce, "E-commerce"),
+        (company.rental, "Rental/User"),
+        (company.manufacturer, "Manufacturer"),
+        (company.oem, "OEM"),
+        (company.importer, "Importer"),
+    ]
+    for flag, tag in flag_map:
+        if flag and tag not in tags:
+            tags.append(tag)
+    return ", ".join(tags) if tags else None
+
+
 def company_json(company: Company) -> str:
     products = [
         {
@@ -120,14 +186,43 @@ def customer_statement(company: Company) -> str:
     )
     segment = company_segment(company)
     details = company_json(company)
+    contact = extract_contact_fields(company)
+    addr_parts = [p for p in [company.address, company.postal_code, company.city] if p]
+    street_address = company.address or None
+    zip_city = " ".join([p for p in [company.postal_code, company.city] if p]) or None
+    products = products_services_text(company)
+    biz_tag = business_tag_text(company)
     remarks = "数据来源：本地 PostgreSQL 公司与联系人记录；等待 Worker 网页核验。"
     return (
         "INSERT INTO customers "
-        "(company_id, domain, status, customer_segment, personas_and_solutions, remarks) VALUES ("
+        "(company_id, domain, status, company_name, first_name, last_name, title, "
+        "street_address, zip_city, country, tel, email, cellphone, whatsapp, "
+        "products_services, business_tag, customer_segment, personas_and_solutions, remarks) VALUES ("
         f"{sql_literal(company_id)}, {sql_literal(domain)}, 'pending', "
+        f"{sql_literal(company.company_name)}, "
+        f"{sql_literal(contact['first_name'])}, {sql_literal(contact['last_name'])}, "
+        f"{sql_literal(contact['title'])}, "
+        f"{sql_literal(street_address)}, {sql_literal(zip_city)}, "
+        f"{sql_literal(company.country)}, "
+        f"{sql_literal(contact['tel'])}, {sql_literal(contact['email'])}, "
+        f"{sql_literal(contact['cellphone'])}, {sql_literal(contact['whatsapp'])}, "
+        f"{sql_literal(products)}, {sql_literal(biz_tag)}, "
         f"{sql_literal(segment)}, {sql_literal(details)}, {sql_literal(remarks)}) "
         "ON CONFLICT(company_id) DO UPDATE SET "
         "domain=excluded.domain, "
+        "company_name=COALESCE(customers.company_name, excluded.company_name), "
+        "first_name=COALESCE(customers.first_name, excluded.first_name), "
+        "last_name=COALESCE(customers.last_name, excluded.last_name), "
+        "title=COALESCE(customers.title, excluded.title), "
+        "street_address=COALESCE(customers.street_address, excluded.street_address), "
+        "zip_city=COALESCE(customers.zip_city, excluded.zip_city), "
+        "country=COALESCE(customers.country, excluded.country), "
+        "tel=COALESCE(customers.tel, excluded.tel), "
+        "email=COALESCE(customers.email, excluded.email), "
+        "cellphone=COALESCE(customers.cellphone, excluded.cellphone), "
+        "whatsapp=COALESCE(customers.whatsapp, excluded.whatsapp), "
+        "products_services=COALESCE(customers.products_services, excluded.products_services), "
+        "business_tag=COALESCE(customers.business_tag, excluded.business_tag), "
         "customer_segment=COALESCE(customers.customer_segment, excluded.customer_segment), "
         "personas_and_solutions=COALESCE(customers.personas_and_solutions, excluded.personas_and_solutions), "
         "remarks=COALESCE(customers.remarks, excluded.remarks), "

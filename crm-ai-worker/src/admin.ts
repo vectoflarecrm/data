@@ -8,6 +8,19 @@ interface AdminCustomer {
   company_id: string;
   domain: string;
   status: string;
+  company_name: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  title: string | null;
+  street_address: string | null;
+  zip_city: string | null;
+  country: string | null;
+  tel: string | null;
+  email: string | null;
+  cellphone: string | null;
+  whatsapp: string | null;
+  products_services: string | null;
+  business_tag: string | null;
   customer_segment: string | null;
   personas_and_solutions: string | null;
   remarks: string | null;
@@ -15,7 +28,10 @@ interface AdminCustomer {
 }
 
 const CUSTOMER_COLUMNS = `
-  id, company_id, domain, status, customer_segment,
+  id, company_id, domain, status, company_name,
+  first_name, last_name, title, street_address, zip_city,
+  country, tel, email, cellphone, whatsapp,
+  products_services, business_tag, customer_segment,
   personas_and_solutions, remarks, updated_at
 `;
 const CUSTOMER_STATUSES = new Set(["pending", "processing", "completed", "failed"]);
@@ -311,7 +327,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 .persona-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin-bottom:10px}.persona-card h4{margin:0 0 8px;font-size:14px;color:#1e293b}.persona-card ul{margin:0;padding-left:18px;font-size:13px;color:#475569}.solution-card{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px;margin-bottom:10px}.solution-card h4{margin:0 0 6px;font-size:14px;color:#1e40af}.solution-card p{margin:0;font-size:13px;color:#1e3a5f}.section-title{font-size:15px;font-weight:600;color:#123b68;margin:18px 0 10px;padding-bottom:6px;border-bottom:2px solid #123b68}
 @media(max-width:700px){.top{align-items:flex-start;flex-direction:column}table{display:block;overflow-x:auto;white-space:nowrap}.field-row{flex-direction:column}.field-label{width:100%;min-width:0;border-right:none;border-bottom:1px solid #e2e8f0}.modal-body{padding:16px}}
 </style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></header><main class="wrap">
-<section class="panel"><h2>客户列表</h2><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>ID</th><th>公司 ID</th><th>网址</th><th>状态</th><th>客户细分</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
+<section class="panel"><h2>客户列表</h2><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
 </main>
 <div class="modal-overlay" id="modal"><div class="modal"><div class="modal-header"><h2 id="modalTitle">客户详情</h2><button class="button secondary small" id="closeModal">✕ 关闭</button></div><div class="modal-body" id="modalBody"></div><div class="modal-footer"><span id="modalMsg" class="notice hidden" style="margin-right:auto"></span><button class="button danger small" id="requeueBtn">设为 pending 重新处理</button><button class="button" id="submitBtn">提交修改</button></div></div></div>
 <script>
@@ -322,14 +338,27 @@ const ADMIN_PANEL_HTML = `<!doctype html>
   var api=function(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin';throw new Error('登录已过期')}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败');return d})})};
   var showMsg=function(id,t,g){var e=$(id);e.textContent=t;e.className='notice '+(g?'success':'error');e.classList.remove('hidden')};
   var badge=function(s){return'<span class="badge badge-'+esc(s)+'">'+esc(s)+'</span>'};
-  var load=function(){var p=new URLSearchParams({q:$('search').value,status:$('status').value,limit:String(state.limit),offset:String(state.offset)});api('/admin/api/customers?'+p.toString()).then(function(d){state.total=d.total;$('summary').textContent='共 '+d.total+' 条';$('rows').innerHTML=d.items.map(function(c){return'<tr><td>'+esc(c.id)+'</td><td style="font-size:12px">'+esc(c.company_id)+'</td><td><a href="'+esc(c.domain)+'" target="_blank">'+esc(c.domain)+'</a></td><td>'+badge(c.status)+'</td><td>'+esc((c.customer_segment||'-').slice(0,60))+'</td><td>'+esc(c.updated_at||'-')+'</td><td><button class="button" onclick="window.openDetail('+c.id+')">查看详情</button></td></tr>'}).join('')||'<tr><td colspan="7">暂无数据</td></tr>';$('pageInfo').textContent=(state.total?state.offset+1:0)+'-'+Math.min(state.offset+state.limit,state.total)+' / '+state.total;$('prev').disabled=state.offset===0;$('next').disabled=state.offset+state.limit>=state.total}).catch(function(e){showMsg('listMessage',e.message,false)})};
+  var load=function(){var p=new URLSearchParams({q:$('search').value,status:$('status').value,limit:String(state.limit),offset:String(state.offset)});api('/admin/api/customers?'+p.toString()).then(function(d){state.total=d.total;$('summary').textContent='共 '+d.total+' 条（显示公司名称、网址、状态、客户细分、国家、联系方式）';$('rows').innerHTML=d.items.map(function(c){return'<tr><td>'+esc(c.id)+'</td><td>'+esc(c.company_name||'-')+'</td><td><a href="'+esc(c.domain)+'" target="_blank">'+esc((c.domain||'').slice(0,40))+'</a></td><td>'+badge(c.status)+'</td><td>'+esc((c.customer_segment||'-').slice(0,40))+'</td><td>'+esc((c.country||'-'))+'</td><td>'+esc((c.email||c.cellphone||'-').slice(0,30))+'</td><td>'+esc(c.updated_at||'-')+'</td><td><button class="button" onclick="window.openDetail('+c.id+')">查看详情</button></td></tr>'}).join('')||'<tr><td colspan="9">暂无数据</td></tr>';$('pageInfo').textContent=(state.total?state.offset+1:0)+'-'+Math.min(state.offset+state.limit,state.total)+' / '+state.total;$('prev').disabled=state.offset===0;$('next').disabled=state.offset+state.limit>=state.total}).catch(function(e){showMsg('listMessage',e.message,false)})};
   var fields=[
     {key:'id',label:'数据库 ID',readonly:true},
     {key:'company_id',label:'公司 ID',readonly:true},
+    {key:'company_name',label:'公司名称',type:'input'},
     {key:'domain',label:'企业网址',type:'input'},
     {key:'status',label:'状态',type:'select',options:['pending','processing','completed','failed']},
+    {key:'first_name',label:'First Name',type:'input'},
+    {key:'last_name',label:'Last Name',type:'input'},
+    {key:'title',label:'职位 (TITLE)',type:'input'},
+    {key:'street_address',label:'街道地址',type:'input'},
+    {key:'zip_city',label:'邮编 & 城市',type:'input'},
+    {key:'country',label:'国家 (Country)',type:'input'},
+    {key:'tel',label:'电话 (TEL)',type:'input'},
+    {key:'email',label:'邮箱 (EMAIL)',type:'input'},
+    {key:'cellphone',label:'手机 (Cellphone)',type:'input'},
+    {key:'whatsapp',label:'WhatsApp',type:'input'},
+    {key:'products_services',label:'产品与服务',type:'textarea'},
+    {key:'business_tag',label:'业务标签 (Business Tag)',type:'input'},
     {key:'customer_segment',label:'客户细分 (Customer Segment)',type:'input'},
-    {key:'personas_and_solutions',label:'画像与解决方案 JSON',type:'textarea',parseJson:true},
+    {key:'personas_and_solutions',label:'AI 分析结果 JSON',type:'textarea',parseJson:true},
     {key:'remarks',label:'中文备注 (Remarks)',type:'textarea'}
   ];
   var buildModal=function(c){state.dirty={};var h='';
