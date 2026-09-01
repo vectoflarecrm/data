@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS customers (
   full_research_text TEXT,
   social_accounts_verified TEXT,
   customer_segment TEXT,
+  product_categories TEXT,
+  company_size TEXT,
+  geographic_coverage TEXT,
   personas_and_solutions TEXT CHECK (personas_and_solutions IS NULL OR json_valid(personas_and_solutions)),
   remarks TEXT,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP

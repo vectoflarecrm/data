@@ -57,6 +57,12 @@ interface GoogleSearchResponse {
 
 interface CustomerAnalysis {
   customer_segment: string;
+  product_categories: string | null;
+  company_size: string | null;
+  geographic_coverage: string | null;
+  business_type: string | null;
+  product_category: string | null;
+  target_market: string | null;
   personas_and_solutions: unknown;
   found_contacts: Array<{
     first_name?: string;
@@ -557,6 +563,12 @@ function parseAnalysis(content: string): CustomerAnalysis {
     : [];
   return {
     customer_segment: object.customer_segment.trim(),
+    product_categories: typeof object.product_categories === "string" ? object.product_categories.trim() : null,
+    company_size: typeof object.company_size === "string" ? object.company_size.trim() : null,
+    geographic_coverage: typeof object.geographic_coverage === "string" ? object.geographic_coverage.trim() : null,
+    business_type: typeof object.business_type === "string" ? object.business_type.trim() : null,
+    product_category: typeof object.product_category === "string" ? object.product_category.trim() : null,
+    target_market: typeof object.target_market === "string" ? object.target_market.trim() : null,
     personas_and_solutions: object.personas_and_solutions,
     found_contacts: foundContacts,
     remarks: object.remarks.trim(),
@@ -601,8 +613,12 @@ const AI_SYSTEM_PROMPT = `你是一名高级B2B市场数据分析师和营销专
 分析要求：
 - 充分利用公司的所有文字信息（产品描述、公司介绍、新闻、博客、社媒帖子等）
 - 交叉验证多个信息来源，确保数据准确
-- 识别公司的核心业务模式（制造商/分销商/零售商/租赁/培训等）
-- 分析其在水上运动行业的具体定位
+- 使用标准分类体系：
+  * 客户细分：Distributor/Dealer/Manufacturer/User/OEM/Service Provider/E-commerce/不相关
+  * 产品类别：Inflatable Boats/Paddle Boards/Kayaks/Yachts/Kitesurfing/Windsurfing/Accessories/Apparel
+  * 公司规模：Small(1-10)/Medium(11-50)/Large(51-200)/Enterprise(200+)
+  * 地理覆盖：Local/National/International
+- 识别公司的核心业务模式和行业定位
 - 识别关键决策者和采购负责人（姓名、职位、联系方式）
 - 评估其作为潜在客户的价值`;
 
@@ -640,11 +656,41 @@ ${researchContext || "（未获取到有效信息）"}
 - 运营负责人（Operations、General Manager）
 
 ### 第二优先级：业务分析
-1. 客户细分：该公司的核心业务是什么？在水上运动行业中扮演什么角色？
-2. 客户画像：识别2-5个关键角色（如采购经理、产品总监、创始人等），分析每个角色的需求和痛点
-3. 解决方案：针对每个角色，提供具体的解决方案建议
-4. 备注：总结公司的关键信息、潜在合作机会和风险点
-5. 信息来源标注：注明分析结论来自哪个信息来源
+1. 客户细分（Customer Segment）：使用以下标准分类：
+   - Distributor（批发/分销商）：主营批发、分销inflatable boat, RIB boat, SUP, paddle board, kayak, Yacht
+   - Dealer（多品牌零售商）：多品牌零售inflatable boat, SUP, paddle board, kayak, Yacht，提供维修服务
+   - Manufacturer（制造商）：自主生产inflatable boat, RIB boat, SUP, paddle board, kayak, Yacht产品
+   - User（终端用户）：租赁或使用inflatable boat, SUP, paddle board, kayak, Yacht，开设水上运动课程培训
+   - OEM（代工厂）：为其他品牌代工生产水上运动产品
+   - Service Provider（服务提供商）：提供水上运动相关服务（培训、维修、租赁等）
+   - E-commerce（电商）：在线销售水上运动产品
+   - 不相关：该公司不销售、使用inflatable boat, RIB boat, SUP, paddle board, kayak, Yacht产品
+
+2. 产品类别细分（Product Categories）：
+   - Inflatable Boats（充气船）：RIB boats, inflatable dinghy, inflatable tender
+   - Paddle Boards（桨板）：SUP, standup paddle board, inflatable SUP
+   - Kayaks（皮划艇）：inflatable kayak, hard shell kayak, sit-on-top kayak
+   - Yachts（游艇）：motor yacht, sailing yacht, luxury yacht
+   - Kitesurfing Equipment（风筝冲浪装备）：kite, board, harness, wetsuit
+   - Windsurfing Equipment（帆板装备）：sail, board, rig
+   - Accessories（配件）：paddle, pump, fin, repair kit, life jacket
+   - Water Sports Apparel（水上运动服装）：wetsuit, rash guard, swimwear
+
+3. 公司规模（Company Size）：
+   - Small（小型）：1-10人
+   - Medium（中型）：11-50人
+   - Large（大型）：51-200人
+   - Enterprise（企业级）：200+人
+
+4. 地理覆盖（Geographic Coverage）：
+   - Local（本地）：仅在本国/本地区经营
+   - National（全国）：在多个国家经营
+   - International（国际）：在全球多个国家经营
+
+5. 客户画像：识别2-5个关键角色（如采购经理、产品总监、创始人等），分析每个角色的需求和痛点
+6. 解决方案：针对每个角色，提供具体的解决方案建议
+7. 备注：总结公司的关键信息、潜在合作机会和风险点
+8. 信息来源标注：注明分析结论来自哪个信息来源
 
 ### 重要提醒
 - 严禁编造任何联系方式！如果找不到就留空
@@ -664,7 +710,7 @@ async function openaiCompatibleAnalyze(
   researchContext: string,
   controller: AbortController,
 ): Promise<CustomerAnalysis> {
-  const jsonFormatHint = `\n\n你必须返回一个合法的JSON对象，格式如下：\n{\n  "customer_segment": "客户细分描述",\n  "personas_and_solutions": {"personas": [{"name": "角色名", "role": "职位", "needs": ["需求1"], "pain_points": ["痛点1"]}], "solutions": [{"name": "方案名", "value": "方案描述", "target_persona": "目标角色"}]},\n  "found_contacts": [{"first_name": "名", "last_name": "姓", "title": "职位", "email": "真实邮箱", "cellphone": "真实手机号", "whatsapp": "仅当有wa.me链接时填写", "linkedin_url": "LinkedIn链接", "source": "信息来源URL"}],\n  "remarks": "备注"\n}\n\n重要：found_contacts中的所有联系方式必须是从提供的数据中真实找到的，严禁编造！`;
+  const jsonFormatHint = `\n\n你必须返回一个合法的JSON对象，格式如下：\n{\n  "customer_segment": "客户细分（Distributor/Dealer/Manufacturer/User/OEM/Service Provider/E-commerce/不相关）",\n  "product_categories": "产品类别（Inflatable Boats/Paddle Boards/Kayaks/Yachts/Kitesurfing/Windsurfing/Accessories/Apparel）",\n  "company_size": "公司规模（Small/Medium/Large/Enterprise）",\n  "geographic_coverage": "地理覆盖（Local/National/International）",\n  "personas_and_solutions": {"personas": [{"name": "角色名", "role": "职位", "needs": ["需求1"], "pain_points": ["痛点1"]}], "solutions": [{"name": "方案名", "value": "方案描述", "target_persona": "目标角色"}]},\n  "found_contacts": [{"first_name": "名", "last_name": "姓", "title": "职位", "email": "真实邮箱", "cellphone": "真实手机号", "whatsapp": "仅当有wa.me链接时填写", "linkedin_url": "LinkedIn链接", "source": "信息来源URL"}],\n  "remarks": "备注"\n}\n\n重要：found_contacts中的所有联系方式必须是从提供的数据中真实找到的，严禁编造！`;
 
   const response = await fetch(apiUrl, {
     method: "POST",
@@ -725,6 +771,9 @@ async function analyzeWithGemini(
                   type: "OBJECT",
                   properties: {
                     customer_segment: { type: "STRING" },
+                    product_categories: { type: "STRING" },
+                    company_size: { type: "STRING" },
+                    geographic_coverage: { type: "STRING" },
                     personas_and_solutions: {
                       type: "OBJECT",
                       properties: {
@@ -772,6 +821,10 @@ async function analyzeWithGemini(
                         },
                       },
                     },
+                    business_type: { type: "STRING" },
+                    product_category: { type: "STRING" },
+                    company_size: { type: "STRING" },
+                    target_market: { type: "STRING" },
                     remarks: { type: "STRING" },
                   },
                   required: ["customer_segment", "personas_and_solutions", "remarks"],
@@ -1009,9 +1062,9 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
 
     return env.DB.prepare(`
       UPDATE customers
-      SET status = 'completed', customer_segment = ?, personas_and_solutions = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
+      SET status = 'completed', customer_segment = ?, product_categories = ?, company_size = ?, geographic_coverage = ?, personas_and_solutions = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND status = 'processing'
-    `).bind(analysis.customer_segment, personas, remarks, customer.id);
+    `).bind(analysis.customer_segment, analysis.product_categories, analysis.company_size, analysis.geographic_coverage, personas, remarks, customer.id);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     const shouldRetry = isRetryableAiError(error) && retryCount < MAX_RETRIES;

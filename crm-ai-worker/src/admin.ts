@@ -61,7 +61,9 @@ const CUSTOMER_COLUMNS = `
   industry, company_type, business_model, founded_year, employee_range,
   description, target_markets, is_manufacturer, is_importer, is_distributor,
   is_wholesaler, is_retailer, is_ecommerce, is_rental, is_oem, social_accounts,
-  full_research_text, social_accounts_verified, customer_segment, personas_and_solutions, remarks, updated_at
+  full_research_text, social_accounts_verified, customer_segment,
+  product_categories, company_size, geographic_coverage,
+  personas_and_solutions, remarks, updated_at
 `;
 const CUSTOMER_STATUSES = new Set(["pending", "processing", "completed", "failed"]);
 const COOKIE_NAME = "crm_admin_token";
@@ -443,6 +445,9 @@ const ADMIN_PANEL_HTML = `<!doctype html>
     {key:'is_oem',label:'OEM',type:'select',options:['0','1']},
     {key:'social_accounts',label:'社交账号 JSON',type:'textarea'},
     {key:'customer_segment',label:'客户细分 (Customer Segment)',type:'input'},
+    {key:'product_categories',label:'产品类别 (Product Categories)',type:'input'},
+    {key:'company_size',label:'公司规模 (Company Size)',type:'select',options:['Small','Medium','Large','Enterprise']},
+    {key:'geographic_coverage',label:'地理覆盖 (Geographic Coverage)',type:'select',options:['Local','National','International']},
     {key:'full_research_text',label:'完整研究文本',type:'textarea'},
     {key:'social_accounts_verified',label:'已验证社交媒体',type:'textarea'},
     {key:'personas_and_solutions',label:'AI 分析结果 JSON',type:'textarea',parseJson:true},
