@@ -98,6 +98,116 @@ export async function updateBrandSetting(
     .run();
 }
 
+/* ── Country → Primary Language mapping ── */
+const COUNTRY_LANGUAGES: Record<string, string> = {
+  // 西班牙语
+  ES: "Spanish (Español)", MX: "Spanish", AR: "Spanish", CO: "Spanish", CL: "Spanish",
+  PE: "Spanish", VE: "Spanish", EC: "Spanish", GT: "Spanish", CU: "Spanish",
+  BO: "Spanish", DO: "Spanish", HN: "Spanish", PY: "Spanish", SV: "Spanish",
+  NI: "Spanish", CR: "Spanish", PA: "Spanish", UY: "Spanish", GQ: "Spanish",
+  // 葡萄牙语
+  PT: "Portuguese (Português)", BR: "Portuguese (Português)", AO: "Portuguese",
+  MZ: "Portuguese", CV: "Portuguese", GW: "Portuguese", ST: "Portuguese",
+  TL: "Portuguese", MO: "Portuguese",
+  // 法语
+  FR: "French (Français)", BE: "French (Français)", CH: "French (Français)",
+  CA: "French (Français) / English", SN: "French", CM: "French",
+  CI: "French", ML: "French", BF: "French", NE: "French", TG: "French",
+  BJ: "French", GA: "French", CD: "French", MG: "French", RW: "French",
+  // 德语
+  DE: "German (Deutsch)", AT: "German (Deutsch)", CH: "German (Deutsch) / French / Italian",
+  LI: "German",
+  // 意大利语
+  IT: "Italian (Italiano)", SM: "Italian", VA: "Italian",
+  // 荷兰语
+  NL: "Dutch (Nederlands)", BE: "Dutch / French",
+  // 英语
+  US: "English", GB: "English", AU: "English", NZ: "English",
+  IE: "English", ZA: "English", SG: "English", HK: "English",
+  PH: "English", IN: "English / Hindi", MY: "English / Malay",
+  // 希腊语
+  GR: "Greek (Ελληνικά)", CY: "Greek / English",
+  // 土耳其语
+  TR: "Turkish (Türkçe)",
+  // 阿拉伯语
+  SA: "Arabic (العربية)", AE: "Arabic / English", EG: "Arabic",
+  MA: "Arabic / French", TN: "Arabic / French", DZ: "Arabic / French",
+  JO: "Arabic", LB: "Arabic / French", QA: "Arabic / English",
+  KW: "Arabic / English", BH: "Arabic / English", OM: "Arabic / English",
+  // 日语
+  JP: "Japanese (日本語)",
+  // 韩语
+  KR: "Korean (한국어)",
+  // 中文
+  CN: "Chinese (中文)", TW: "Chinese (中文)",
+  // 波兰语
+  PL: "Polish (Polski)",
+  // 捷克语
+  CZ: "Czech (Čeština)",
+  // 罗马尼亚语
+  RO: "Romanian (Română)",
+  // 匈牙利语
+  HU: "Hungarian (Magyar)",
+  // 瑞典语
+  SE: "Swedish (Svenska)",
+  // 丹麦语
+  DK: "Danish (Dansk)",
+  // 挪威语
+  NO: "Norwegian (Norsk)",
+  // 芬兰语
+  FI: "Finnish (Suomi)",
+  // 俄语
+  RU: "Russian (Русский)",
+  // 克罗地亚语
+  HR: "Croatian (Hrvatski)",
+  // 保加利亚语
+  BG: "Bulgarian (Български)",
+  // 塞尔维亚语
+  RS: "Serbian (Српски)",
+  // 斯洛文尼亚语
+  SI: "Slovenian (Slovenščina)",
+  // 斯洛伐克语
+  SK: "Slovak (Slovenčina)",
+  // 立陶宛语
+  LT: "Lithuanian (Lietuvių)",
+  // 拉脱维亚语
+  LV: "Latvian (Latviešu)",
+  // 爱沙尼亚语
+  EE: "Estonian (Eesti)",
+  // 乌克兰语
+  UA: "Ukrainian (Українська)",
+  // 印尼语
+  ID: "Indonesian (Bahasa Indonesia)",
+  // 泰语
+  TH: "Thai (ไทย)",
+  // 越南语
+  VN: "Vietnamese (Tiếng Việt)",
+};
+
+function getCountryLanguage(country: string | null): string {
+  if (!country) return "English";
+  const code = country.trim().toUpperCase();
+  // Try direct match
+  if (COUNTRY_LANGUAGES[code]) return COUNTRY_LANGUAGES[code];
+  // Try partial match (e.g., "Spain" → "ES")
+  const countryLower = country.toLowerCase();
+  for (const [k, v] of Object.entries(COUNTRY_LANGUAGES)) {
+    if (countryLower.includes(k.toLowerCase())) return v;
+  }
+  // Fallback: check common country names
+  if (countryLower.includes("spain") || countryLower.includes("españa")) return "Spanish (Español)";
+  if (countryLower.includes("france") || countryLower.includes("francia")) return "French (Français)";
+  if (countryLower.includes("germany") || countryLower.includes("deutschland")) return "German (Deutsch)";
+  if (countryLower.includes("italy") || countryLower.includes("italia")) return "Italian (Italiano)";
+  if (countryLower.includes("portugal")) return "Portuguese (Português)";
+  if (countryLower.includes("netherlands") || countryLower.includes("holland")) return "Dutch (Nederlands)";
+  if (countryLower.includes("greece") || countryLower.includes("ελλάδα")) return "Greek (Ελληνικά)";
+  if (countryLower.includes("turkey") || countryLower.includes("türkiye")) return "Turkish (Türkçe)";
+  if (countryLower.includes("brazil") || countryLower.includes("brasil")) return "Portuguese (Português)";
+  if (countryLower.includes("mexico") || countryLower.includes("méxico")) return "Spanish (Español)";
+  return "English";
+}
+
 /* ── Build AI prompt for outreach email generation ── */
 function buildOutreachPrompt(
   brand: BrandConfig,
@@ -120,6 +230,8 @@ function buildOutreachPrompt(
 ): string {
   const contactName = [company.first_name, company.last_name].filter(Boolean).join(" ") || "Sir/Madam";
   const firstName = company.first_name || "there";
+  const language = getCountryLanguage(company.country);
+  const isEnglish = language.startsWith("English");
 
   return `你是一名专业的B2B营销专家，擅长撰写针对水上运动行业的个性化开发信。
 
@@ -137,6 +249,7 @@ ${brand.company_intro}
 - 联系人：${contactName}（${company.title || "职位未知"}）
 - 邮箱：${company.email || "未知"}
 - 国家：${company.country || "未知"}
+- 客户所在国家官方语言：**${language}**
 - 经营产品：${company.products_services || "未知"}
 - 业务标签：${company.business_tag || "未知"}
 - 客户细分：${company.customer_segment || "未知"}
@@ -145,12 +258,16 @@ ${brand.company_intro}
 
 ## 写作要求
 
-1. **邮件主题（Subject）**：简洁有力，不超过60字符，突出合作价值
-2. **邮件正文（Body）**：
+⚠️ **最重要：语言要求**
+邮件必须使用客户所在国家的第一官方语言撰写：**${language}**
+${isEnglish ? "使用英文。" : `如果客户在西班牙，请用西班牙语写。如果在法国，请用法语写。如果在德国，请用德语写。以此类推。\n当前客户所在国家的语言是：**${language}**，请务必使用该语言撰写整封邮件。`}
+
+1. **邮件主题（Subject）**：用${language}撰写，简洁有力，不超过60字符，突出合作价值
+2. **邮件正文（Body）**：用${language}撰写
    - 开头：用 ${firstName} 称呼，提及他们的公司名和具体业务
    - 中间：介绍 ${brand.brand_name} 的产品如何与他们的业务互补（引用他们的具体产品或业务模式）
    - 结尾：提出具体的合作建议（如样品、报价、展会见面等）
-   - 语言：英文，专业但亲切
+   - 专业但亲切的语气
    - 长度：150-250词
    - 必须个性化：引用该公司的具体产品、市场定位或业务特点
    - 禁止使用模板化的套话
@@ -159,11 +276,12 @@ ${brand.company_intro}
    - 编造虚假信息
    - 使用"Dear Sir/Madam"等泛泛称呼（除非确实不知道联系人姓名）
    - 承诺无法兑现的条件
+   - 使用英文写给非英语国家的客户（必须使用当地语言！）
 
 请返回纯JSON格式：
 {
-  "subject": "邮件主题",
-  "body": "邮件正文（纯文本，用\\n换行）"
+  "subject": "邮件主题（用客户所在国语言）",
+  "body": "邮件正文（纯文本，用客户所在国语言，用\\n换行）"
 }`;
 }
 
