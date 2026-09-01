@@ -80,9 +80,10 @@ const INTER_SOURCE_DELAY_MS = 2_000;
 const SEARCH_QUERIES = [
   (name: string, country: string) => `"${name}" ${country} water sports company email phone contact`,
   (name: string) => `"${name}" email whatsapp cellphone contact person`,
-  (name: string) => `"${name}" team staff manager owner linkedin`,
+  (name: string) => `site:linkedin.com/company "${name}"`,
+  (name: string) => `site:linkedin.com/in "${name}" CEO owner manager`,
+  (name: string) => `site:linkedin.com "${name}" purchasing buyer manager`,
   (name: string) => `"${name}" about products services inflatable boat SUP`,
-  (name: string) => `site:linkedin.com "${name}"`,
 ];
 const DEFAULT_MODEL = "gemini-2.5-flash-lite";
 const FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash"];
@@ -573,13 +574,20 @@ const AI_SYSTEM_PROMPT = `你是一名高级B2B市场数据分析师和营销专
 6. 严禁编造手机号码、WhatsApp号码或任何联系方式
 
 核心任务一——联系方式挖掘（最高优先级）：
-- 从网页、搜索结果、社交媒体中提取真实的email地址
+- 从网页、搜索结果中提取真实的email地址
 - 从网页、搜索结果中提取真实的手机号码（Cellphone/Mobile）
 - 只有在官网包含 wa.me 链接、WhatsApp图标或社媒明确标注时才填写WhatsApp
-- 从LinkedIn、Facebook等提取联系人姓名和职位
 - 所有联系方式必须有明确来源，不得猜测或编造
 
-核心任务二——社交媒体验证：
+核心任务二——LinkedIn联系人挖掘（特别重要）：
+- 从搜索结果中的LinkedIn页面提取公司员工信息
+- 重点查找以下职位的人员：CEO、Owner、Founder、Director、Manager、Purchasing、Buyer、Sales
+- 记录每个人的：姓名（First Name + Last Name）、职位（Title）、LinkedIn URL
+- 如果LinkedIn页面包含邮箱或电话，也一并记录
+- 只记录在搜索结果中明确出现的人名，不得猜测
+- LinkedIn URL必须是真实的搜索结果链接
+
+核心任务三——社交媒体验证：
 - 从数据中找到的所有社交媒体链接已通过"已验证社交媒体"部分提供
 - 只使用已验证的社交媒体链接，不得自行猜测或编造社媒地址
 - 记录每个社交媒体平台的账号名称和URL
@@ -610,12 +618,26 @@ ${researchContext || "（未获取到有效信息）"}
 
 ## 分析要求
 
-### 第一优先级：联系方式挖掘
-请从上述数据中仔细提取以下联系信息，每条都必须有明确来源：
+### 第一优先级：联系方式和LinkedIn联系人挖掘
+请从上述数据中仔细提取以下信息，每条都必须有明确来源：
+
+#### 联系方式
 - Email地址：从网页、联系页面、搜索结果中找到的真实邮箱
 - 手机号码（Cellphone/Mobile）：从网页、社媒中找到的真实手机号
 - WhatsApp：仅当官网有wa.me链接或社媒明确标注时才填写
-- 联系人姓名和职位：从Team/About/LinkedIn等页面找到的真实人员
+
+#### LinkedIn联系人（特别重要）
+搜索结果中包含LinkedIn页面，请仔细提取每个LinkedIn页面上出现的公司员工：
+- 人名（First Name + Last Name）：在搜索结果摘要或标题中明确出现的姓名
+- 职位（Title）：CEO、Owner、Founder、Director、Manager、Purchasing、Buyer、Sales等
+- LinkedIn URL：搜索结果中真实的LinkedIn链接
+- 联系方式：如果页面包含邮箱或电话
+
+请尽可能多地找到LinkedIn上的公司员工，特别是：
+- 公司创始人和高管（CEO、Owner、Founder、Director）
+- 采购和销售负责人（Purchasing、Buyer、Sales Manager、Export）
+- 产品和市场负责人（Product Manager、Marketing Manager）
+- 运营负责人（Operations、General Manager）
 
 ### 第二优先级：业务分析
 1. 客户细分：该公司的核心业务是什么？在水上运动行业中扮演什么角色？
