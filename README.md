@@ -66,14 +66,20 @@ Cloudflare Worker 位于：
 crm-ai-worker/
 ```
 
-Worker 每 5 分钟运行一次，每次从 D1 原子认领最多 3 条 `pending` 客户记录：
+Worker 每 5 分钟运行一次，每次从 D1 认领 1 条 `pending` 客户记录，进行深度多源研究：
 
 ```text
 pending
-  ↓ 原子认领
+  ↓ 原子认领（每次1条，质量优先）
 processing
-  ↓ 10 秒网页抓取 + HTMLRewriter
-Gemini AI 分析（15 秒超时）
+  ↓ Step 1: 抓取主网站（15秒超时）
+  ↓ Step 2: Google/Searlo/Tavily/Exa/DuckDuckGo 多引擎搜索
+  ↓         搜索公司名+国家+行业关键词（3次查询）
+  ↓         自动轮询多个API Key
+  ↓ Step 3: 抓取搜索结果页面内容
+  ↓ Step 4: 抓取子页面（/about, /contact, /team）
+  ↓ Step 5: 抓取社交媒体（LinkedIn, Facebook, Instagram）
+  ↓ Step 6: AI 深度分析（30秒超时，交叉验证多源数据）
   ↓ D1 batch
 completed / failed
 ```
@@ -182,6 +188,78 @@ GEMINI_API_KEY
 CLOUDFLARE_D1_DATABASE_ID
 ADMIN_PANEL_TOKEN
 ```
+
+### 多搜索引擎 API 配置（可选）
+
+Worker 支持 5 个搜索引擎自动轮询，用于深度研究公司信息。每个引擎支持多个 API Key 自动切换，无需配置也能工作（DuckDuckGo 作为最终备用，无需 Key）。
+
+#### 搜索引擎免费额度
+
+| 引擎 | 免费额度 | 需要注册 | 注册地址 |
+|------|---------|---------|----------|
+| Google Custom Search | 100次/天/Key | 是 | https://console.cloud.google.com |
+| Searlo | 3000次/月/Key | 是 | https://searlo.com |
+| Tavily | 1000次/月/Key | 是 | https://tavily.com |
+| Exa | 1000次/月/Key | 是 | https://exa.ai |
+| DuckDuckGo | 无限次 | 否 | 无需注册 |
+
+#### 推荐配置（3 个 Google Key = 300次/天）
+
+在 GitHub **Settings → Secrets and variables → Actions** 中添加：
+
+```text
+# Google Custom Search（推荐，每个 Key 100次/天）
+GOOGLE_SEARCH_API_KEY       = AIza...
+GOOGLE_SEARCH_ENGINE_ID     = xxxxx:xxxxx
+GOOGLE_SEARCH_API_KEY_2     = AIza...（第二个 Key）
+GOOGLE_SEARCH_ENGINE_ID_2   = xxxxx:xxxxx
+GOOGLE_SEARCH_API_KEY_3     = AIza...（第三个 Key）
+GOOGLE_SEARCH_ENGINE_ID_3   = xxxxx:xxxxx
+
+# Searlo（可选，每个 Key 3000次/月）
+SEARLO_API_KEY              = sl-...
+SEARLO_API_KEY_2            = sl-...（第二个 Key）
+
+# Tavily（可选，每个 Key 1000次/月）
+TAVILY_API_KEY              = tvly-...
+TAVILY_API_KEY_2            = tvly-...（第二个 Key）
+
+# Exa（可选，每个 Key 1000次/月）
+EXA_API_KEY                 = ...
+EXA_API_KEY_2               = ...（第二个 Key）
+```
+
+#### Google Custom Search 设置步骤
+
+1. 打开 https://console.cloud.google.com/apis/credentials
+2. 创建项目 → 启用 Custom Search JSON API → 创建 API Key
+3. 打开 https://programmablesearchengine.google.com/
+4. 创建搜索引擎 → 勾选 **"搜索整个网络"** → 复制搜索引擎 ID
+5. 重复以上步骤创建多个 Key 以获得更高配额
+
+#### Tavily 设置步骤
+
+1. 打开 https://tavily.com
+2. 注册账号 → 获取 API Key
+3. 免费额度：1000次/月
+
+#### Exa 设置步骤
+
+1. 打开 https://exa.ai
+2. 注册账号 → 获取 API Key
+3. 免费额度：1000次/月
+
+#### 搜索工作原理
+
+每家公司会执行 3 次搜索查询：
+
+```text
+查询1: "公司名" 国家 water sports company
+查询2: "公司名" distributor dealer inflatable boat SUP kayak
+查询3: "公司名" about team contact email phone
+```
+
+搜索结果自动去重，抓取页面内容后与网站数据一起送入 AI 深度分析。
 
 仓库中的 workflow 文件为：
 
@@ -367,20 +445,58 @@ crm-ai-worker/schema.sql
 表：
 
 ```text
-customers
+customers （客户主表，47个字段）
+contacts （联系人表，支持多联系人）
 ```
 
-字段：
+customers 核心字段：
 
 ```text
-id
-company_id
-domain
-status
-customer_segment
-personas_and_solutions
-remarks
-updated_at
+id               数据库ID
+display_id       客户ID（格式: 国家代号-序号，如 ES-0001）
+company_id       内部UUID
+domain           企业网址
+status           状态（pending/processing/completed/failed）
+company_name     公司名称
+legal_name       法人名称
+first_name       联系人名
+last_name        联系人姓
+full_name        全名
+email            邮箱
+cellphone        手机
+tel              电话
+whatsapp         WhatsApp
+country          国家
+city             城市
+street_address   街道地址
+products_services 产品与服务
+customer_segment 客户细分
+personas_and_solutions  AI分析结果JSON
+remarks          中文备注
+is_manufacturer  制造商
+is_distributor   分销商
+is_retailer      零售商
+is_rental        租赁
+social_accounts  社交账号JSON
+updated_at       更新时间
+```
+
+contacts 联系人字段：
+
+```text
+contact_id       联系人ID（格式: 客户ID_序号，如 ES-0001_001）
+company_id       所属客户UUID
+seq              序号
+first_name       名
+last_name        姓
+full_name        全名
+title            职位
+email            邮箱
+cellphone        手机
+tel              电话
+whatsapp         WhatsApp
+linkedin_url     LinkedIn
+social_accounts  社交账号JSON
 ```
 
 状态值：
