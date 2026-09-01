@@ -16,6 +16,15 @@ interface Env {
   DB: D1Database;
   GEMINI_API_KEY: string;
   GEMINI_MODEL?: string;
+  GROQ_API_KEY?: string;
+  GROQ_API_KEY_2?: string;
+  GROQ_MODEL?: string;
+  MISTRAL_API_KEY?: string;
+  MISTRAL_API_KEY_2?: string;
+  MISTRAL_MODEL?: string;
+  DEEPSEEK_API_KEY?: string;
+  DEEPSEEK_API_KEY_2?: string;
+  DEEPSEEK_MODEL?: string;
   GOOGLE_SEARCH_API_KEY?: string;
   GOOGLE_SEARCH_ENGINE_ID?: string;
   GOOGLE_SEARCH_API_KEY_2?: string;
@@ -475,34 +484,7 @@ function parseAnalysis(content: string): CustomerAnalysis {
   };
 }
 
-async function analyzeCustomer(
-  customer: CustomerRow,
-  researchContext: string,
-  env: Env,
-): Promise<CustomerAnalysis> {
-  if (!env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured");
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
-  try {
-    const requestedModel = env.GEMINI_MODEL || DEFAULT_MODEL;
-    const models = [requestedModel, ...FALLBACK_MODELS].filter(
-      (model, index, all) => all.indexOf(model) === index,
-    );
-    let lastModelError = "Gemini model is unavailable";
-    for (const model of models) {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-        {
-          method: "POST",
-          signal: controller.signal,
-          headers: {
-            "x-goog-api-key": env.GEMINI_API_KEY,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            systemInstruction: {
-              parts: [{
-                text: `你是一名高级B2B市场数据分析师，专注于水上运动行业（inflatable boats, RIB boats, SUPs, kayaks, yachts, kitesurfing, windsurfing等）。
+const AI_SYSTEM_PROMPT = `你是一名高级B2B市场数据分析师，专注于水上运动行业（inflatable boats, RIB boats, SUPs, kayaks, yachts, kitesurfing, windsurfing等）。
 
 你的核心原则：
 1. 数据真实性高于一切——宁可留空，绝不编造
@@ -515,13 +497,10 @@ async function analyzeCustomer(
 - 识别公司的核心业务模式（制造商/分销商/零售商/租赁/培训等）
 - 分析其在水上运动行业的具体定位
 - 识别关键决策者和采购负责人
-- 评估其作为潜在客户的价值`,
-              }],
-            },
-            contents: [{
-              role: "user",
-              parts: [{
-                text: `请深度分析以下企业信息，交叉验证多个来源的数据，提供详细的客户画像。
+- 评估其作为潜在客户的价值`;
+
+function buildUserPrompt(customer: CustomerRow, researchContext: string): string {
+  return `请深度分析以下企业信息，交叉验证多个来源的数据，提供详细的客户画像。
 
 ## 基本信息
 - 公司识别码：${customer.company_id}
@@ -535,73 +514,208 @@ ${researchContext || "（未获取到有效信息）"}
 2. 客户画像：识别2-5个关键角色（如采购经理、产品总监、创始人等），分析每个角色的需求和痛点
 3. 解决方案：针对每个角色，提供具体的解决方案建议
 4. 备注：总结公司的关键信息、潜在合作机会和风险点
-5. 信息来源标注：注明分析结论来自哪个信息来源`,
-              }],
-            }],
-            generationConfig: {
-              temperature: 0.1,
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: "OBJECT",
-                properties: {
-                  customer_segment: { type: "STRING" },
-                  personas_and_solutions: {
-                    type: "OBJECT",
-                    properties: {
-                      personas: {
-                        type: "ARRAY",
-                        items: {
-                          type: "OBJECT",
-                          properties: {
-                            name: { type: "STRING" },
-                            role: { type: "STRING" },
-                            needs: { type: "ARRAY", items: { type: "STRING" } },
-                            pain_points: { type: "ARRAY", items: { type: "STRING" } },
+5. 信息来源标注：注明分析结论来自哪个信息来源`;
+}
+
+interface OpenAIResponse {
+  choices?: Array<{ message?: { content?: string } }>;
+}
+
+async function openaiCompatibleAnalyze(
+  apiUrl: string,
+  apiKey: string,
+  model: string,
+  customer: CustomerRow,
+  researchContext: string,
+  controller: AbortController,
+): Promise<CustomerAnalysis> {
+  const response = await fetch(apiUrl, {
+    method: "POST",
+    signal: controller.signal,
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: AI_SYSTEM_PROMPT },
+        { role: "user", content: buildUserPrompt(customer, researchContext) },
+      ],
+      temperature: 0.1,
+      response_format: { type: "json_object" },
+    }),
+  });
+  if (!response.ok) {
+    const errBody = (await response.text()).replace(/\s+/g, " ").trim().slice(0, 200);
+    throw new Error(`HTTP ${response.status}${errBody ? `: ${errBody}` : ""}`);
+  }
+  const data: OpenAIResponse = await response.json();
+  const content = data.choices?.[0]?.message?.content;
+  if (typeof content !== "string") throw new Error("AI response has no text content");
+  return parseAnalysis(content);
+}
+
+async function analyzeWithGemini(
+  customer: CustomerRow,
+  researchContext: string,
+  env: Env,
+  controller: AbortController,
+): Promise<CustomerAnalysis | null> {
+  const keys: Array<{ key: string; model: string }> = [];
+  if (env.GEMINI_API_KEY) {
+    keys.push({ key: env.GEMINI_API_KEY, model: env.GEMINI_MODEL || DEFAULT_MODEL });
+  }
+  for (const { key, model } of keys) {
+    const models = [model, ...FALLBACK_MODELS].filter(
+      (m, i, all) => all.indexOf(m) === i,
+    );
+    for (const m of models) {
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m)}:generateContent`,
+          {
+            method: "POST",
+            signal: controller.signal,
+            headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              systemInstruction: { parts: [{ text: AI_SYSTEM_PROMPT }] },
+              contents: [{ role: "user", parts: [{ text: buildUserPrompt(customer, researchContext) }] }],
+              generationConfig: {
+                temperature: 0.1,
+                responseMimeType: "application/json",
+                responseSchema: {
+                  type: "OBJECT",
+                  properties: {
+                    customer_segment: { type: "STRING" },
+                    personas_and_solutions: {
+                      type: "OBJECT",
+                      properties: {
+                        personas: {
+                          type: "ARRAY",
+                          items: {
+                            type: "OBJECT",
+                            properties: {
+                              name: { type: "STRING" },
+                              role: { type: "STRING" },
+                              needs: { type: "ARRAY", items: { type: "STRING" } },
+                              pain_points: { type: "ARRAY", items: { type: "STRING" } },
+                            },
+                            required: ["name", "needs"],
                           },
-                          required: ["name", "needs"],
+                        },
+                        solutions: {
+                          type: "ARRAY",
+                          items: {
+                            type: "OBJECT",
+                            properties: {
+                              name: { type: "STRING" },
+                              value: { type: "STRING" },
+                              target_persona: { type: "STRING" },
+                            },
+                            required: ["name", "value"],
+                          },
                         },
                       },
-                      solutions: {
-                        type: "ARRAY",
-                        items: {
-                          type: "OBJECT",
-                          properties: {
-                            name: { type: "STRING" },
-                            value: { type: "STRING" },
-                            target_persona: { type: "STRING" },
-                          },
-                          required: ["name", "value"],
-                        },
-                      },
+                      required: ["personas", "solutions"],
                     },
-                    required: ["personas", "solutions"],
+                    remarks: { type: "STRING" },
                   },
-                  remarks: { type: "STRING" },
+                  required: ["customer_segment", "personas_and_solutions", "remarks"],
                 },
-                required: ["customer_segment", "personas_and_solutions", "remarks"],
               },
-            },
-          }),
-        },
-      );
-      if (response.ok) {
-        const payload: unknown = await response.json();
-        const content = (
-          payload as {
-            candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }>;
-          }
-        ).candidates?.[0]?.content?.parts?.[0]?.text;
-        if (typeof content !== "string") throw new Error("Gemini response has no text content");
-        return parseAnalysis(content);
-      }
-
-      const errorBody = (await response.text()).replace(/\s+/g, " ").trim().slice(0, 240);
-      lastModelError = `Gemini HTTP ${response.status}${errorBody ? `: ${errorBody}` : ""}`;
-
-      // 429 = rate limit, 503 = model overloaded: try next model
-      if (response.status !== 404) throw new Error(lastModelError);
+            }),
+          },
+        );
+        if (response.ok) {
+          const payload: unknown = await response.json();
+          const content = (
+            payload as { candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }> }
+          ).candidates?.[0]?.content?.parts?.[0]?.text;
+          if (typeof content === "string") return parseAnalysis(content);
+        }
+      } catch { /* try next model */ }
     }
-    throw new Error(lastModelError);
+  }
+  return null;
+}
+
+async function analyzeWithGroq(
+  customer: CustomerRow,
+  researchContext: string,
+  env: Env,
+  controller: AbortController,
+): Promise<CustomerAnalysis | null> {
+  const keys: Array<{ key: string; model: string }> = [];
+  if (env.GROQ_API_KEY) keys.push({ key: env.GROQ_API_KEY, model: env.GROQ_MODEL || "llama-3.1-70b-versatile" });
+  if (env.GROQ_API_KEY_2) keys.push({ key: env.GROQ_API_KEY_2, model: env.GROQ_MODEL || "llama-3.1-70b-versatile" });
+  for (const { key, model } of keys) {
+    try {
+      return await openaiCompatibleAnalyze("https://api.groq.com/openai/v1/chat/completions", key, model, customer, researchContext, controller);
+    } catch { /* try next key */ }
+  }
+  return null;
+}
+
+async function analyzeWithMistral(
+  customer: CustomerRow,
+  researchContext: string,
+  env: Env,
+  controller: AbortController,
+): Promise<CustomerAnalysis | null> {
+  const keys: Array<{ key: string; model: string }> = [];
+  if (env.MISTRAL_API_KEY) keys.push({ key: env.MISTRAL_API_KEY, model: env.MISTRAL_MODEL || "mistral-large-latest" });
+  if (env.MISTRAL_API_KEY_2) keys.push({ key: env.MISTRAL_API_KEY_2, model: env.MISTRAL_MODEL || "mistral-large-latest" });
+  for (const { key, model } of keys) {
+    try {
+      return await openaiCompatibleAnalyze("https://api.mistral.ai/v1/chat/completions", key, model, customer, researchContext, controller);
+    } catch { /* try next key */ }
+  }
+  return null;
+}
+
+async function analyzeWithDeepSeek(
+  customer: CustomerRow,
+  researchContext: string,
+  env: Env,
+  controller: AbortController,
+): Promise<CustomerAnalysis | null> {
+  const keys: Array<{ key: string; model: string }> = [];
+  if (env.DEEPSEEK_API_KEY) keys.push({ key: env.DEEPSEEK_API_KEY, model: env.DEEPSEEK_MODEL || "deepseek-chat" });
+  if (env.DEEPSEEK_API_KEY_2) keys.push({ key: env.DEEPSEEK_API_KEY_2, model: env.DEEPSEEK_MODEL || "deepseek-chat" });
+  for (const { key, model } of keys) {
+    try {
+      return await openaiCompatibleAnalyze("https://api.deepseek.com/v1/chat/completions", key, model, customer, researchContext, controller);
+    } catch { /* try next key */ }
+  }
+  return null;
+}
+
+async function analyzeCustomer(
+  customer: CustomerRow,
+  researchContext: string,
+  env: Env,
+): Promise<CustomerAnalysis> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+  try {
+    // Try Gemini first
+    let result = await analyzeWithGemini(customer, researchContext, env, controller);
+    if (result) return result;
+
+    // Fallback to Groq
+    result = await analyzeWithGroq(customer, researchContext, env, controller);
+    if (result) return result;
+
+    // Fallback to Mistral
+    result = await analyzeWithMistral(customer, researchContext, env, controller);
+    if (result) return result;
+
+    // Fallback to DeepSeek
+    result = await analyzeWithDeepSeek(customer, researchContext, env, controller);
+    if (result) return result;
+
+    throw new Error("所有AI Provider均不可用，请配置至少一个AI API Key");
   } finally {
     clearTimeout(timer);
   }
