@@ -219,9 +219,9 @@ async function listCustomers(request: Request, env: AdminEnv): Promise<Response>
   const bindings: Array<string | number> = [];
 
   if (search) {
-    where.push("(company_id LIKE ? OR domain LIKE ? OR customer_segment LIKE ? OR remarks LIKE ?)");
+    where.push("(company_id LIKE ? OR domain LIKE ? OR company_name LIKE ? OR customer_segment LIKE ? OR product_categories LIKE ? OR country LIKE ? OR remarks LIKE ?)");
     const pattern = `%${search}%`;
-    bindings.push(pattern, pattern, pattern, pattern);
+    bindings.push(pattern, pattern, pattern, pattern, pattern, pattern, pattern);
   }
   if (status) {
     if (!CUSTOMER_STATUSES.has(status)) return jsonResponse({ detail: "Invalid status" }, 400);
@@ -305,27 +305,33 @@ async function updateCustomer(request: Request, env: AdminEnv, id: number): Prom
 }
 
 async function handleAdminApi(request: Request, env: AdminEnv): Promise<Response> {
-  const url = new URL(request.url);
-  if (url.pathname === "/admin/api/customers" && request.method === "GET") {
-    return listCustomers(request, env);
-  }
-  const id = parseCustomerId(url.pathname);
-  if (id !== null) {
-    if (request.method === "GET") {
-      const customer = await getCustomer(env, id);
-      if (!customer) return jsonResponse({ detail: "Customer not found" }, 404);
-      const contacts = await getCustomerContacts(env, customer.company_id);
-      return jsonResponse({ ...customer, contacts });
+  try {
+    const url = new URL(request.url);
+    if (url.pathname === "/admin/api/customers" && request.method === "GET") {
+      return await listCustomers(request, env);
     }
-    if (request.method === "PATCH") return updateCustomer(request, env, id);
+    const id = parseCustomerId(url.pathname);
+    if (id !== null) {
+      if (request.method === "GET") {
+        const customer = await getCustomer(env, id);
+        if (!customer) return jsonResponse({ detail: "Customer not found" }, 404);
+        const contacts = await getCustomerContacts(env, customer.company_id);
+        return jsonResponse({ ...customer, contacts });
+      }
+      if (request.method === "PATCH") return await updateCustomer(request, env, id);
+    }
+    return jsonResponse({ detail: "Not Found" }, 404);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return jsonResponse({ detail: `API Error: ${msg}` }, 500);
   }
-  return jsonResponse({ detail: "Not Found" }, 404);
 }
 
 export async function handleAdminRequest(
   request: Request,
   env: AdminEnv,
 ): Promise<Response | null> {
+  try {
   const url = new URL(request.url);
   if (url.pathname !== "/admin" && !url.pathname.startsWith("/admin/")) return null;
 
@@ -371,6 +377,10 @@ export async function handleAdminRequest(
   }
 
   return new Response("Not Found", { status: 404 });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return jsonResponse({ detail: `Internal Error: ${msg}` }, 500);
+  }
 }
 
 const ADMIN_LOGIN_HTML = `<!doctype html>
@@ -395,7 +405,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
   var state={offset:0,limit:50,total:0,selected:null,dirty:{}};
   var $=function(id){return document.getElementById(id)};
   var esc=function(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})};
-  var api=function(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin';throw new Error('登录已过期')}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败');return d})})};
+  var api=function(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin';throw new Error('登录已过期')}var ct=r.headers.get('content-type')||'';if(ct.indexOf('json')===-1&&ct.indexOf('text/plain')===-1){return r.text().then(function(t){throw new Error('服务器返回非JSON响应 (HTTP '+r.status+'): '+t.slice(0,100))})}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败 ('+r.status+')');return d})})};
   var showMsg=function(id,t,g){var e=$(id);e.textContent=t;e.className='notice '+(g?'success':'error');e.classList.remove('hidden')};
   var badge=function(s){return'<span class="badge badge-'+esc(s)+'">'+esc(s)+'</span>'};
   var load=function(){var p=new URLSearchParams({q:$('search').value,status:$('status').value,limit:String(state.limit),offset:String(state.offset)});api('/admin/api/customers?'+p.toString()).then(function(d){state.total=d.total;$('summary').textContent='共 '+d.total+' 条（显示公司名称、网址、状态、客户细分、国家、联系方式）';$('rows').innerHTML=d.items.map(function(c){var did=c.display_id||'N/A';return'<tr><td>'+esc(did)+'</td><td>'+esc(c.company_name||'-')+'</td><td><a href="'+esc(c.domain)+'" target="_blank">'+esc((c.domain||'').slice(0,35))+'</a></td><td>'+badge(c.status)+'</td><td>'+esc((c.customer_segment||'-').slice(0,35))+'</td><td>'+esc((c.country||'-'))+'</td><td>'+esc((c.email||c.cellphone||'-').slice(0,25))+'</td><td><button class="button" onclick="window.openDetail('+c.id+')">查看详情</button></td></tr>'}).join('')||'<tr><td colspan="8">暂无数据</td></tr>';$('pageInfo').textContent=(state.total?state.offset+1:0)+'-'+Math.min(state.offset+state.limit,state.total)+' / '+state.total;$('prev').disabled=state.offset===0;$('next').disabled=state.offset+state.limit>=state.total}).catch(function(e){showMsg('listMessage',e.message,false)})};
