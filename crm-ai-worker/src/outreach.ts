@@ -110,17 +110,17 @@ const COUNTRY_LANGUAGES: Record<string, string> = {
   MZ: "Portuguese", CV: "Portuguese", GW: "Portuguese", ST: "Portuguese",
   TL: "Portuguese", MO: "Portuguese",
   // 法语
-  FR: "French (Français)", BE: "French (Français)", CH: "French (Français)",
+  FR: "French (Français)", BE: "French (Français) / Dutch / German", CH: "French (Français) / German / Italian",
   CA: "French (Français) / English", SN: "French", CM: "French",
   CI: "French", ML: "French", BF: "French", NE: "French", TG: "French",
   BJ: "French", GA: "French", CD: "French", MG: "French", RW: "French",
   // 德语
-  DE: "German (Deutsch)", AT: "German (Deutsch)", CH: "German (Deutsch) / French / Italian",
+  DE: "German (Deutsch)", AT: "German (Deutsch)",
   LI: "German",
   // 意大利语
   IT: "Italian (Italiano)", SM: "Italian", VA: "Italian",
   // 荷兰语
-  NL: "Dutch (Nederlands)", BE: "Dutch / French",
+  NL: "Dutch (Nederlands)",
   // 英语
   US: "English", GB: "English", AU: "English", NZ: "English",
   IE: "English", ZA: "English", SG: "English", HK: "English",
