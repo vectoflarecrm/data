@@ -512,7 +512,7 @@ function parseAnalysis(content: string): CustomerAnalysis {
   };
 }
 
-const AI_SYSTEM_PROMPT = `你是一名高级B2B市场数据分析师，专注于水上运动行业（inflatable boats, RIB boats, SUPs, kayaks, yachts, kitesurfing, windsurfing等）。
+const AI_SYSTEM_PROMPT = `你是一名高级B2B市场数据分析师和营销专家，专注于水上运动行业（inflatable boats, RIB boats, SUPs, kayaks, yachts, kitesurfing, windsurfing等）。
 
 你的核心原则：
 1. 数据真实性高于一切——宁可留空，绝不编造
@@ -522,14 +522,21 @@ const AI_SYSTEM_PROMPT = `你是一名高级B2B市场数据分析师，专注于
 5. 严禁根据姓名猜测邮箱格式（如禁止从 John Doe 生成 john.doe@company.com）
 6. 严禁编造手机号码、WhatsApp号码或任何联系方式
 
-核心任务——联系方式挖掘（最高优先级）：
+核心任务一——联系方式挖掘（最高优先级）：
 - 从网页、搜索结果、社交媒体中提取真实的email地址
 - 从网页、搜索结果中提取真实的手机号码（Cellphone/Mobile）
 - 只有在官网包含 wa.me 链接、WhatsApp图标或社媒明确标注时才填写WhatsApp
 - 从LinkedIn、Facebook等提取联系人姓名和职位
 - 所有联系方式必须有明确来源，不得猜测或编造
 
+核心任务二——个性化开发内容生成：
+- 基于公司的全文字信息（产品、服务、新闻、博客、社媒内容），为每个联系人生成个性化的开发邮件和WhatsApp消息
+- 邮件和消息必须引用该公司的具体内容（如他们销售的产品、最近的活动、市场定位等）
+- 语言风格专业但亲切，适合B2B水上运动行业
+- 每条开发内容不超过200字，简洁有力
+
 分析要求：
+- 充分利用公司的所有文字信息（产品描述、公司介绍、新闻、博客、社媒帖子等）
 - 交叉验证多个信息来源，确保数据准确
 - 识别公司的核心业务模式（制造商/分销商/零售商/租赁/培训等）
 - 分析其在水上运动行业的具体定位
@@ -860,7 +867,13 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
       throw new Error("无法从任何来源获取有效信息");
     }
 
-    // Step 4: AI deep analysis
+    // Step 4: Save full research text to database
+    const trimmedResearch = researchContext.slice(0, 50_000);
+    await env.DB.prepare(
+      `UPDATE customers SET full_research_text = ? WHERE id = ?`
+    ).bind(trimmedResearch, customer.id).run();
+
+    // Step 5: AI deep analysis
     const analysis = await analyzeCustomer(customer, researchContext, env);
     const personas = JSON.stringify(analysis.personas_and_solutions);
     const remarks = withCompanyMarker(analysis.remarks, customer.company_id);

@@ -61,7 +61,7 @@ const CUSTOMER_COLUMNS = `
   industry, company_type, business_model, founded_year, employee_range,
   description, target_markets, is_manufacturer, is_importer, is_distributor,
   is_wholesaler, is_retailer, is_ecommerce, is_rental, is_oem, social_accounts,
-  customer_segment, personas_and_solutions, remarks, updated_at
+  full_research_text, customer_segment, personas_and_solutions, remarks, updated_at
 `;
 const CUSTOMER_STATUSES = new Set(["pending", "processing", "completed", "failed"]);
 const COOKIE_NAME = "crm_admin_token";
@@ -443,6 +443,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
     {key:'is_oem',label:'OEM',type:'select',options:['0','1']},
     {key:'social_accounts',label:'社交账号 JSON',type:'textarea'},
     {key:'customer_segment',label:'客户细分 (Customer Segment)',type:'input'},
+    {key:'full_research_text',label:'完整研究文本',type:'textarea'},
     {key:'personas_and_solutions',label:'AI 分析结果 JSON',type:'textarea',parseJson:true},
     {key:'remarks',label:'中文备注 (Remarks)',type:'textarea'}
   ];

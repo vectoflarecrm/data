@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS customers (
   is_rental INTEGER DEFAULT 0,
   is_oem INTEGER DEFAULT 0,
   social_accounts TEXT,
+  full_research_text TEXT,
   customer_segment TEXT,
   personas_and_solutions TEXT CHECK (personas_and_solutions IS NULL OR json_valid(personas_and_solutions)),
   remarks TEXT,
