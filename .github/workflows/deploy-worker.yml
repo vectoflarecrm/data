@@ -30,7 +30,16 @@ jobs:
       GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
       GOOGLE_SEARCH_API_KEY: ${{ secrets.GOOGLE_SEARCH_API_KEY }}
       GOOGLE_SEARCH_ENGINE_ID: ${{ secrets.GOOGLE_SEARCH_ENGINE_ID }}
+      GOOGLE_SEARCH_API_KEY_2: ${{ secrets.GOOGLE_SEARCH_API_KEY_2 }}
+      GOOGLE_SEARCH_ENGINE_ID_2: ${{ secrets.GOOGLE_SEARCH_ENGINE_ID_2 }}
+      GOOGLE_SEARCH_API_KEY_3: ${{ secrets.GOOGLE_SEARCH_API_KEY_3 }}
+      GOOGLE_SEARCH_ENGINE_ID_3: ${{ secrets.GOOGLE_SEARCH_ENGINE_ID_3 }}
       SEARLO_API_KEY: ${{ secrets.SEARLO_API_KEY }}
+      SEARLO_API_KEY_2: ${{ secrets.SEARLO_API_KEY_2 }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      TAVILY_API_KEY_2: ${{ secrets.TAVILY_API_KEY_2 }}
+      EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+      EXA_API_KEY_2: ${{ secrets.EXA_API_KEY_2 }}
       CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
       ADMIN_PANEL_TOKEN: ${{ secrets.ADMIN_PANEL_TOKEN }}
 
@@ -140,10 +149,33 @@ jobs:
             npx wrangler secret delete GOOGLE_SEARCH_API_KEY --name crm-ai-worker || true
             npx wrangler secret delete GOOGLE_SEARCH_ENGINE_ID --name crm-ai-worker || true
           fi
-          if [ -n "$SEARLO_API_KEY" ]; then
-            printf '%s' "$SEARLO_API_KEY" | npx wrangler secret put SEARLO_API_KEY
-            echo "Searlo search secret synced"
-          else
-            echo "Searlo not configured; Worker will skip Searlo search"
-            npx wrangler secret delete SEARLO_API_KEY --name crm-ai-worker || true
-          fi
+          # Sync Searlo keys
+          for var_name in SEARLO_API_KEY SEARLO_API_KEY_2; do
+            val="${!var_name:-}"
+            if [ -n "$val" ]; then
+              printf '%s' "$val" | npx wrangler secret put "$var_name"
+              echo "Synced $var_name"
+            else
+              npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
+            fi
+          done
+          # Sync Tavily keys
+          for var_name in TAVILY_API_KEY TAVILY_API_KEY_2; do
+            val="${!var_name:-}"
+            if [ -n "$val" ]; then
+              printf '%s' "$val" | npx wrangler secret put "$var_name"
+              echo "Synced $var_name"
+            else
+              npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
+            fi
+          done
+          # Sync Exa keys
+          for var_name in EXA_API_KEY EXA_API_KEY_2; do
+            val="${!var_name:-}"
+            if [ -n "$val" ]; then
+              printf '%s' "$val" | npx wrangler secret put "$var_name"
+              echo "Synced $var_name"
+            else
+              npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
+            fi
+          done

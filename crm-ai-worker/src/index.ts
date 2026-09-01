@@ -18,7 +18,16 @@ interface Env {
   GEMINI_MODEL?: string;
   GOOGLE_SEARCH_API_KEY?: string;
   GOOGLE_SEARCH_ENGINE_ID?: string;
+  GOOGLE_SEARCH_API_KEY_2?: string;
+  GOOGLE_SEARCH_ENGINE_ID_2?: string;
+  GOOGLE_SEARCH_API_KEY_3?: string;
+  GOOGLE_SEARCH_ENGINE_ID_3?: string;
   SEARLO_API_KEY?: string;
+  SEARLO_API_KEY_2?: string;
+  TAVILY_API_KEY?: string;
+  TAVILY_API_KEY_2?: string;
+  EXA_API_KEY?: string;
+  EXA_API_KEY_2?: string;
   ADMIN_PANEL_TOKEN?: string;
 }
 
@@ -174,49 +183,127 @@ async function extractLinks(response: Response): Promise<string[]> {
   return [...new Set(links)].slice(0, MAX_SOURCE_PAGES);
 }
 
-async function googleSearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
-  if (!env.GOOGLE_SEARCH_API_KEY || !env.GOOGLE_SEARCH_ENGINE_ID) return [];
-  try {
-    const params = new URLSearchParams({
-      key: env.GOOGLE_SEARCH_API_KEY,
-      cx: env.GOOGLE_SEARCH_ENGINE_ID,
-      q: query,
-      num: String(MAX_SEARCH_RESULTS),
-    });
-    const resp = await fetchWithTimeout(
-      `https://www.googleapis.com/customsearch/v1?${params.toString()}`,
-      FETCH_TIMEOUT_MS,
-    );
-    if (!resp.ok) return [];
-    const data: GoogleSearchResponse = await resp.json();
-    return (data.items ?? []).map((item) => ({
-      title: item.title,
-      link: item.link,
-      snippet: item.snippet,
-    }));
-  } catch {
-    return [];
+function getGoogleKeys(env: Env): Array<{ key: string; cx: string }> {
+  const keys: Array<{ key: string; cx: string }> = [];
+  if (env.GOOGLE_SEARCH_API_KEY && env.GOOGLE_SEARCH_ENGINE_ID) {
+    keys.push({ key: env.GOOGLE_SEARCH_API_KEY, cx: env.GOOGLE_SEARCH_ENGINE_ID });
   }
+  if (env.GOOGLE_SEARCH_API_KEY_2 && env.GOOGLE_SEARCH_ENGINE_ID_2) {
+    keys.push({ key: env.GOOGLE_SEARCH_API_KEY_2, cx: env.GOOGLE_SEARCH_ENGINE_ID_2 });
+  }
+  if (env.GOOGLE_SEARCH_API_KEY_3 && env.GOOGLE_SEARCH_ENGINE_ID_3) {
+    keys.push({ key: env.GOOGLE_SEARCH_API_KEY_3, cx: env.GOOGLE_SEARCH_ENGINE_ID_3 });
+  }
+  return keys;
+}
+
+function getSearloKeys(env: Env): string[] {
+  const keys: string[] = [];
+  if (env.SEARLO_API_KEY) keys.push(env.SEARLO_API_KEY);
+  if (env.SEARLO_API_KEY_2) keys.push(env.SEARLO_API_KEY_2);
+  return keys;
+}
+
+function getTavilyKeys(env: Env): string[] {
+  const keys: string[] = [];
+  if (env.TAVILY_API_KEY) keys.push(env.TAVILY_API_KEY);
+  if (env.TAVILY_API_KEY_2) keys.push(env.TAVILY_API_KEY_2);
+  return keys;
+}
+
+function getExaKeys(env: Env): string[] {
+  const keys: string[] = [];
+  if (env.EXA_API_KEY) keys.push(env.EXA_API_KEY);
+  if (env.EXA_API_KEY_2) keys.push(env.EXA_API_KEY_2);
+  return keys;
+}
+
+async function googleSearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
+  const keys = getGoogleKeys(env);
+  for (const { key, cx } of keys) {
+    try {
+      const params = new URLSearchParams({ key, cx, q: query, num: String(MAX_SEARCH_RESULTS) });
+      const resp = await fetchWithTimeout(
+        `https://www.googleapis.com/customsearch/v1?${params.toString()}`,
+        FETCH_TIMEOUT_MS,
+      );
+      if (!resp.ok) continue;
+      const data: GoogleSearchResponse = await resp.json();
+      const items = (data.items ?? []).map((item) => ({
+        title: item.title, link: item.link, snippet: item.snippet,
+      }));
+      if (items.length > 0) return items;
+    } catch { /* try next key */ }
+  }
+  return [];
 }
 
 async function searloSearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
-  if (!env.SEARLO_API_KEY) return [];
-  try {
-    const resp = await fetchWithTimeout(
-      `https://api.searlo.com/search?q=${encodeURIComponent(query)}&num=${MAX_SEARCH_RESULTS}`,
-      FETCH_TIMEOUT_MS,
-      { headers: { "Authorization": `Bearer ${env.SEARLO_API_KEY}` } },
-    );
-    if (!resp.ok) return [];
-    const data = await resp.json() as { results?: Array<{ title: string; url: string; snippet: string }> };
-    return (data.results ?? []).map((item) => ({
-      title: item.title,
-      link: item.url,
-      snippet: item.snippet,
-    }));
-  } catch {
-    return [];
+  const keys = getSearloKeys(env);
+  for (const apiKey of keys) {
+    try {
+      const resp = await fetchWithTimeout(
+        `https://api.searlo.com/search?q=${encodeURIComponent(query)}&num=${MAX_SEARCH_RESULTS}`,
+        FETCH_TIMEOUT_MS,
+        { headers: { "Authorization": `Bearer ${apiKey}` } },
+      );
+      if (!resp.ok) continue;
+      const data = await resp.json() as { results?: Array<{ title: string; url: string; snippet: string }> };
+      const items = (data.results ?? []).map((item) => ({
+        title: item.title, link: item.url, snippet: item.snippet,
+      }));
+      if (items.length > 0) return items;
+    } catch { /* try next key */ }
   }
+  return [];
+}
+
+async function tavilySearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
+  const keys = getTavilyKeys(env);
+  for (const apiKey of keys) {
+    try {
+      const resp = await fetchWithTimeout(
+        `https://api.tavily.com/search`,
+        FETCH_TIMEOUT_MS,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+          body: JSON.stringify({ query, max_results: MAX_SEARCH_RESULTS, include_answer: false }),
+        },
+      );
+      if (!resp.ok) continue;
+      const data = await resp.json() as { results?: Array<{ title: string; url: string; content: string }> };
+      const items = (data.results ?? []).map((item) => ({
+        title: item.title, link: item.url, snippet: item.content?.slice(0, 200) || "",
+      }));
+      if (items.length > 0) return items;
+    } catch { /* try next key */ }
+  }
+  return [];
+}
+
+async function exaSearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
+  const keys = getExaKeys(env);
+  for (const apiKey of keys) {
+    try {
+      const resp = await fetchWithTimeout(
+        `https://api.exa.ai/search`,
+        FETCH_TIMEOUT_MS,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-api-key": apiKey },
+          body: JSON.stringify({ query, numResults: MAX_SEARCH_RESULTS, type: "neural" }),
+        },
+      );
+      if (!resp.ok) continue;
+      const data = await resp.json() as { results?: Array<{ title: string; url: string; text: string }> };
+      const items = (data.results ?? []).map((item) => ({
+        title: item.title, link: item.url, snippet: item.text?.slice(0, 200) || "",
+      }));
+      if (items.length > 0) return items;
+    } catch { /* try next key */ }
+  }
+  return [];
 }
 
 async function duckduckgoSearch(query: string): Promise<GoogleSearchResult[]> {
@@ -256,13 +343,20 @@ async function duckduckgoSearch(query: string): Promise<GoogleSearchResult[]> {
 }
 
 async function multiEngineSearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
-  // Try Google first, then Searlo, then DuckDuckGo
+  // Try each engine with key rotation, fallback to next engine
   let results = await googleSearch(query, env);
   if (results.length > 0) return results;
 
   results = await searloSearch(query, env);
   if (results.length > 0) return results;
 
+  results = await tavilySearch(query, env);
+  if (results.length > 0) return results;
+
+  results = await exaSearch(query, env);
+  if (results.length > 0) return results;
+
+  // DuckDuckGo is always available (no API key needed)
   results = await duckduckgoSearch(query);
   return results;
 }
