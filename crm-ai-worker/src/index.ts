@@ -224,6 +224,9 @@ const AI_TIMEOUT_MS = 30_000;
 const MAX_SOURCE_PAGES = 5;
 const MAX_SEARCH_RESULTS = 5;
 const INTER_SOURCE_DELAY_MS = 2_000;
+// Realistic browser UA: many sites (and search engines) serve degraded pages
+// or blocks to bot-style UAs, which was silently degrading research quality.
+const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const SEARCH_QUERIES = [
   (name: string, country: string) => `"${name}" ${country} water sports company email phone contact`,
   (name: string) => `"${name}" email whatsapp cellphone contact person`,
@@ -232,6 +235,46 @@ const SEARCH_QUERIES = [
   (name: string) => `site:linkedin.com "${name}" purchasing buyer manager`,
   (name: string) => `"${name}" about products services inflatable boat SUP`,
 ];
+// Search-result URLs that add noise, not signal: marketplaces, aggregators,
+// social feeds and directories drown out the company's own pages.
+const NOISE_URL_PATTERNS = [
+  "pinterest.", "facebook.com/sharer", "amazon.", "ebay.", "aliexpress.",
+  "etsy.", "alibaba.", "made-in-china.", "tripadvisor.", "yelp.",
+  "wikipedia.", "youtube.com/watch", "instagram.com/p/", "tiktok.com/@",
+  "crunchbase.com", "zoominfo.com", "apollo.io", "dnb.com", "bloomberg.com",
+  "google.com/search", "tradeford.", "kompass.", "europages.", "wlw.",
+];
+
+function isNoiseResult(url: string): boolean {
+  const lower = url.toLowerCase();
+  return NOISE_URL_PATTERNS.some((p) => lower.includes(p));
+}
+
+function isOwnDomain(url: string, domain: string | undefined): boolean {
+  if (!domain) return false;
+  try {
+    const resultHost = new URL(url).hostname.replace(/^www\./, "");
+    const ownHost = new URL(normalizeDomain(domain)).hostname.replace(/^www\./, "");
+    return resultHost === ownHost || resultHost.endsWith(`.${ownHost}`) || ownHost.endsWith(`.${resultHost}`);
+  } catch {
+    return false;
+  }
+}
+
+// Direct contact extraction from raw page text: complement AI analysis with
+// verbatim evidence so the model has anchored candidates, not just prose.
+const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+const PHONE_REGEX = /\+?\d[\d\s().-]{7,}\d/g;
+
+function extractContactEvidence(text: string): { emails: string[]; phones: string[] } {
+  const emails = [...new Set((text.match(EMAIL_REGEX) ?? []).map((e) => e.toLowerCase()))]
+    .filter((e) => !e.endsWith(".png") && !e.endsWith(".jpg") && !e.includes("example.") && !e.includes("sentry") && e.length < 80)
+    .slice(0, 8);
+  const phones = [...new Set((text.match(PHONE_REGEX) ?? []).map((p) => p.trim()))]
+    .filter((p) => p.replace(/\D/g, "").length >= 8 && p.replace(/\D/g, "").length <= 15)
+    .slice(0, 8);
+  return { emails, phones };
+}
 const DEFAULT_MODEL = "gemini-2.5-flash-lite";
 const FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash"];
 const STALE_PROCESSING_MINUTES = 30;
@@ -279,7 +322,7 @@ async function fetchWithTimeout(url: string, timeoutMs: number, options?: Reques
     return await fetch(url, {
       ...options,
       signal: controller.signal,
-      headers: { "User-Agent": "crm-ai-worker/0.1", ...options?.headers },
+      headers: { "User-Agent": BROWSER_UA, ...options?.headers },
     });
   } finally {
     clearTimeout(timer);
@@ -687,7 +730,13 @@ async function tavilySearch(query: string, env: Env, taskKeyIndex = 0): Promise<
         {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-          body: JSON.stringify({ query, max_results: MAX_SEARCH_RESULTS, include_answer: false }),
+          body: JSON.stringify({
+            query,
+            max_results: MAX_SEARCH_RESULTS,
+            include_answer: false,
+            search_depth: "advanced", // deeper, higher-relevance results than basic
+            include_raw_content: true, // page text inline: extra signal without extra fetches
+          }),
         },
       );
       if (resp.status === 429 || resp.status === 401 || resp.status === 403) {
@@ -697,10 +746,15 @@ async function tavilySearch(query: string, env: Env, taskKeyIndex = 0): Promise<
         continue;
       }
       if (!resp.ok) continue;
-      const data = await resp.json() as { results?: Array<{ title: string; url: string; content: string }> };
-      const items = (data.results ?? []).map((item) => ({
-        title: item.title, link: item.url, snippet: item.content?.slice(0, 200) || "",
-      }));
+      const data = await resp.json() as { results?: Array<{ title: string; url: string; content: string; raw_content?: string | null }> };
+      const items = (data.results ?? [])
+        .filter((item) => !isNoiseResult(item.url))
+        .map((item) => ({
+          title: item.title,
+          link: item.url,
+          // Prefer Tavily's extracted raw content over the short summary
+          snippet: (item.raw_content?.slice(0, 500) || item.content?.slice(0, 200) || ""),
+        }));
       return items;
     } catch {
       // Network error: try the next key
@@ -795,7 +849,7 @@ async function multiEngineSearch(query: string, env: Env, tavilyKeyIndex = 0): P
   return results;
 }
 
-async function searchCompanyInfo(companyName: string, country: string, env: Env, tavilyKeyIndex = 0): Promise<string> {
+async function searchCompanyInfo(companyName: string, country: string, env: Env, tavilyKeyIndex = 0, customerDomain?: string): Promise<string> {
   const allResults: GoogleSearchResult[] = [];
   const seenUrls = new Set<string>();
 
@@ -803,6 +857,7 @@ async function searchCompanyInfo(companyName: string, country: string, env: Env,
     const query = queryFn(companyName, country);
     const results = await multiEngineSearch(query, env, tavilyKeyIndex);
     for (const r of results) {
+      if (isNoiseResult(r.link) || isOwnDomain(r.link, customerDomain)) continue;
       if (!seenUrls.has(r.link)) {
         seenUrls.add(r.link);
         allResults.push(r);
@@ -813,22 +868,34 @@ async function searchCompanyInfo(companyName: string, country: string, env: Env,
 
   if (allResults.length === 0) return "";
 
-  // Fetch content from top search results
+  // Fetch content from top search results. LinkedIn pages carry the richest
+  // contact/role signal, so they are prioritised; own-domain results are
+  // skipped (the main site is already fetched separately).
+  const prioritised = [...allResults]
+    .filter((r) => !isOwnDomain(r.link, customerDomain))
+    .sort((a, b) => Number(b.link.includes("linkedin.com")) - Number(a.link.includes("linkedin.com")));
   const pages: string[] = [];
-  for (const result of allResults.slice(0, MAX_SEARCH_RESULTS)) {
+  for (const result of prioritised.slice(0, MAX_SOURCE_PAGES)) {
     try {
-      // Skip the company's own website (already fetched)
       const resp = await fetchWithTimeout(result.link, FETCH_TIMEOUT_MS);
       if (resp.ok) {
         const text = await extractPageText(resp);
         if (text.length > 100) {
-          pages.push(`\n=== 搜索结果: ${result.title} ===\nURL: ${result.link}\n摘要: ${result.snippet}\n内容: ${text.slice(0, 2_000)}`);
+          // Give LinkedIn pages more room (role/title lists are long)
+          const budget = result.link.includes("linkedin.com") ? 6_000 : 4_000;
+          const contact = extractContactEvidence(text);
+          const contactLine = contact.emails.length || contact.phones.length
+            ? `\n[直接提取] 邮箱: ${contact.emails.join(", ") || "无"} | 电话: ${contact.phones.join(", ") || "无"}`
+            : "";
+          pages.push(`\n=== 搜索结果: ${result.title} ===\nURL: ${result.link}\n摘要: ${result.snippet.slice(0, 300)}\n内容: ${text.slice(0, budget)}${contactLine}`);
         }
       }
       await sleep(INTER_SOURCE_DELAY_MS);
     } catch { /* skip failed pages */ }
   }
 
+  // Snippets already contain Tavily raw-content extracts, so they remain a
+  // useful fallback even when full page fetches fail.
   return pages.length > 0
     ? `\n\n--- 搜索结果页面 (${allResults.length}条) ---\n${pages.join("\n")}`
     : `\n\n--- 搜索结果摘要 (${allResults.length}条) ---\n${allResults.map((r) => `${r.title}: ${r.snippet}`).join("\n")}`;
@@ -1357,7 +1424,7 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
     // Step 2: Google search for company information
     const companyName = customer.company_name || customer.company_id;
     const country = customer.country || "";
-    const googleResults = await searchCompanyInfo(companyName, country, env, customer.id);
+    const googleResults = await searchCompanyInfo(companyName, country, env, customer.id, customer.domain);
 
     // Step 3: Fetch additional sources (sub-pages, social media)
     const additionalText = await fetchAdditionalSources(companyName, customer.domain, env);
