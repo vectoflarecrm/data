@@ -7,8 +7,15 @@ import {
   deleteOutreachEmail,
   getOutreachStats,
 } from "./outreach";
+import {
+  getQuota,
+  sendOutreachEmail,
+  sendDelayMs,
+  GmailEnv,
+  GmailConfigError,
+} from "./gmail";
 
-export interface AdminEnv {
+export interface AdminEnv extends GmailEnv {
   DB: D1Database;
   ADMIN_PANEL_TOKEN?: string;
   GEMINI_API_KEY?: string;
@@ -366,6 +373,55 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
       return jsonResponse(stats);
     }
 
+    // GET /admin/api/outreach/quota - Gmail daily send quota
+    if (path === "/admin/api/outreach/quota" && request.method === "GET") {
+      return jsonResponse(await getQuota(env));
+    }
+
+    // POST /admin/api/outreach/send-batch - Send draft emails via Gmail with rate limiting
+    if (path === "/admin/api/outreach/send-batch" && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as { brand?: string; limit?: number };
+      const limit = Math.min(Math.max(Number(body.limit) || 10, 1), 50);
+      const params: unknown[] = [];
+      let clause = "WHERE status = 'draft' AND email_to IS NOT NULL AND email_to != ''";
+      if (body.brand) {
+        clause += " AND brand_name = ?";
+        params.push(body.brand);
+      }
+      const drafts = await env.DB.prepare(
+        `SELECT id, email_to, subject, body FROM outreach_emails ${clause} ORDER BY id LIMIT ?`,
+      ).bind(...params, limit).all<{ id: number; email_to: string; subject: string | null; body: string | null }>();
+
+      const quota = await getQuota(env);
+      const delayMs = sendDelayMs(env);
+      const results: Array<{ id: number; ok: boolean; error?: string }> = [];
+      let sent = 0;
+      for (const draft of drafts.results) {
+        if (quota.sent_today + sent >= quota.daily_limit) {
+          results.push({ id: draft.id, ok: false, error: "今日配额已用完，未发送" });
+          continue;
+        }
+        if (sent > 0) await new Promise((r) => setTimeout(r, delayMs));
+        try {
+          const r = await sendOutreachEmail(env, draft);
+          if (r.ok) sent++;
+          results.push({ id: draft.id, ok: r.ok, error: r.error });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          results.push({ id: draft.id, ok: false, error: msg });
+          if (e instanceof GmailConfigError) break; // config missing: stop the batch
+        }
+      }
+      const after = await getQuota(env);
+      return jsonResponse({
+        attempted: drafts.results.length,
+        sent,
+        failed: results.filter((r) => !r.ok).length,
+        quota: after,
+        results,
+      });
+    }
+
     // PATCH /admin/api/outreach/emails/:id - Update email
     if (path.startsWith("/admin/api/outreach/emails/") && request.method === "PATCH") {
       const id = Number(path.split("/").pop());
@@ -650,6 +706,8 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 <select id="filterBrand" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit"><option value="">全部品牌</option><option value="Afarer">Afarer (SUPs)</option><option value="Aquafarer">Aquafarer (Inflatable)</option><option value="Neptunor">Neptunor (RIB)</option></select>
 <select id="filterStatus" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit"><option value="">全部状态</option><option value="draft">草稿</option><option value="sent">已发送</option></select>
 <button class="btn btn-secondary btn-sm" id="refreshEmails">刷新</button>
+<span id="quotaInfo" style="font-size:13px;color:#475569;margin-left:auto">📧 Gmail 配额加载中…</span>
+<button class="btn btn-primary btn-sm" id="sendBatchBtn">📤 批量发送草稿</button>
 </div><div id="emailsArea"></div>
 <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px"><button class="btn btn-secondary btn-sm" id="emailPrev">上一页</button><span id="emailPageInfo"></span><button class="btn btn-secondary btn-sm" id="emailNext">下一页</button></div>
 </div>
@@ -664,7 +722,7 @@ function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){retur
 function api(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin/outreach';throw new Error('登录过期')}var ct=r.headers.get('content-type')||'';if(ct.indexOf('json')===-1){return r.text().then(function(t){throw new Error('非JSON响应: '+t.slice(0,100))})}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败');return d})})}
 
 // Tab switching
-document.querySelectorAll('.tab').forEach(function(tab){tab.onclick=function(){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tab-content').forEach(function(c){c.style.display='none'});tab.classList.add('active');document.getElementById('tab-'+tab.dataset.tab).style.display='block';if(tab.dataset.tab==='settings')loadBrands();if(tab.dataset.tab==='emails'){loadStats();loadEmails()}}});
+document.querySelectorAll('.tab').forEach(function(tab){tab.onclick=function(){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tab-content').forEach(function(c){c.style.display='none'});tab.classList.add('active');document.getElementById('tab-'+tab.dataset.tab).style.display='block';if(tab.dataset.tab==='settings')loadBrands();if(tab.dataset.tab==='emails'){loadStats();loadEmails();loadQuota()}}});
 
 // Brand settings
 function loadBrands(){api('/admin/api/outreach/settings').then(function(d){var h='';d.settings.forEach(function(b){h+='<div class="brand-card"><div class="brand-header"><div><span class="brand-name">'+esc(b.brand_name)+'</span> <span class="brand-category">'+esc(b.product_category)+'</span></div><label class="toggle"><input type="checkbox" '+(b.enabled?'checked':'')+' data-brand="'+esc(b.brand_name)+'" class="enable-toggle"><span class="slider"></span></label></div><label style="font-weight:600;font-size:13px;color:#475569">公司简介</label><textarea class="intro-textarea" data-brand="'+esc(b.brand_name)+'">'+esc(b.company_intro)+'</textarea><div style="margin-top:10px;text-align:right"><button class="btn btn-primary btn-sm save-intro" data-brand="'+esc(b.brand_name)+'">💾 保存简介</button></div></div>'});document.getElementById('brandsArea').innerHTML=h||'<p>暂无品牌配置</p>';document.querySelectorAll('.enable-toggle').forEach(function(el){el.onchange=function(){var brand=el.dataset.brand;var enabled=el.checked;api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enabled})}).then(function(){showToast(brand+(enabled?' 已启用':' 已禁用'),true)}).catch(function(e){showToast(e.message,false);el.checked=!enabled)}});document.querySelectorAll('.save-intro').forEach(function(el){el.onclick=function(){var brand=el.dataset.brand;var ta=document.querySelector('.intro-textarea[data-brand="'+brand+'"]');api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({company_intro:ta.value})}).then(function(){showToast(brand+' 简介已保存',true)}).catch(function(e){showToast(e.message,false)}}})}).catch(function(e){document.getElementById('brandsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>'})}
@@ -686,6 +744,23 @@ document.querySelectorAll('.del-email').forEach(function(b){b.onclick=function()
 document.querySelectorAll('.mark-sent').forEach(function(b){b.onclick=function(){api('/admin/api/outreach/emails/'+b.dataset.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'sent'})}).then(function(){showToast('已标记为已发送',true);loadEmails();loadStats()}).catch(function(e){showToast(e.message,false)}}})}).catch(function(e){document.getElementById('emailsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>'})}
 
 document.getElementById('refreshEmails').onclick=function(){emailState.offset=0;loadEmails()};
+
+function loadQuota(){api('/admin/api/outreach/quota').then(function(q){document.getElementById('quotaInfo').textContent='📧 Gmail 今日 '+q.sent_today+'/'+q.daily_limit+' 剩余 '+q.remaining}).catch(function(){document.getElementById('quotaInfo').textContent='📧 Gmail 未配置'})}
+
+var sending=false;
+document.getElementById('sendBatchBtn').onclick=function(){
+if(sending)return;
+var brand=document.getElementById('filterBrand').value;
+var n=prompt('本次批量发送数量（1-50，受每日配额限制）：','10');
+if(n===null)return;
+sending=true;
+var btn=this;btn.textContent='⏳ 发送中…';
+showToast('开始批量发送，每封间隔几秒，请勿关闭页面',true);
+api('/admin/api/outreach/send-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:brand||undefined,limit:Number(n)||10})}).then(function(d){
+var fails=d.results.filter(function(r){return !r.ok});
+showToast('发送完成：成功 '+d.sent+' 封，失败 '+d.failed+' 封（今日 '+d.quota.sent_today+'/'+d.quota.daily_limit+'）',d.failed===0);
+if(fails.length){console.log('发送失败明细',fails);alert('前3条失败原因：\n'+fails.slice(0,3).map(function(f){return '#'+f.id+': '+f.error}).join('\n'))}
+}).catch(function(e){showToast(e.message,false)}).finally(function(){sending=false;btn.textContent='📤 批量发送草稿';loadQuota();loadEmails();loadStats()})};
 document.getElementById('filterBrand').onchange=function(){emailState.offset=0;loadEmails()};
 document.getElementById('filterStatus').onchange=function(){emailState.offset=0;loadEmails()};
 document.getElementById('emailPrev').onclick=function(){if(emailState.offset>0){emailState.offset=Math.max(0,emailState.offset-emailState.limit);loadEmails()}};

@@ -98,3 +98,16 @@ CREATE TABLE IF NOT EXISTS api_key_health (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (provider, key_index)
 );
+
+-- Gmail send log (daily quota tracking + delivery audit for outreach emails)
+CREATE TABLE IF NOT EXISTS gmail_send_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  outreach_email_id INTEGER,
+  recipient TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'sent' CHECK (status IN ('sent', 'failed')),
+  detail TEXT,
+  sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_gmail_send_log_date ON gmail_send_log(date(sent_at));
+CREATE INDEX IF NOT EXISTS idx_gmail_send_log_email ON gmail_send_log(outreach_email_id);

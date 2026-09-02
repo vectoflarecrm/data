@@ -442,6 +442,51 @@ npx wrangler d1 execute crm-ai-db --remote --command="SELECT COUNT(*) AS total F
 
 预计有官网或规范域名的公司约 `752` 条；没有官网的 `29` 条本地公司会被跳过，因为当前 `customers.domain` 是必填且 Worker 无法抓取空网址。若本地存在被忽略的 `crm-ai-worker/wrangler.local.toml`，同步脚本会自动使用它；否则使用 `wrangler.toml`。
 
+### 邮件发送：Google Workspace Gmail（Service Account）
+
+开发信通过 **Google Workspace Gmail API** 发送，使用 Service Account + 域级委派（Domain-wide Delegation），服务器端全自动，无需人工刷新 token。
+
+#### 防封杀发送机制
+
+- **每日配额**：默认 400 封/天（低于 Gmail 免费层 500 封/天上限，可通过 `GMAIL_DAILY_LIMIT` 调整），配额记录在 D1 `gmail_send_log` 表，用完自动拒绝发送；
+- **发送间隔**：每封默认间隔 3 秒（`GMAIL_SEND_DELAY_MS` 可调），模拟人工节奏；
+- **发送审计**：每封邮件的发送结果（成功/失败 + 原因）记录在 `gmail_send_log`；
+- **失败不中断**：批量发送时单封失败不影响后续，配额用完自动停止。
+
+#### 配置步骤
+
+1. **创建 Service Account**：
+   - 打开 https://console.cloud.google.com → 选择 Workspace 同组织项目；
+   - API和服务 → 启用 **Gmail API**；
+   - IAM 和管理 → 服务账号 → 创建服务账号 → 密钥 → 新建 **JSON** 密钥并下载。
+2. **域级委派**：
+   - 打开 https://admin.google.com → 安全性 → 访问和数据控制 → API 控制方 → **管理域范围委派**；
+   - 新增，填入 Service Account 的 **Client ID**（OAuth2 客户端 ID，不是邮箱）；
+   - 授权范围填：`https://www.googleapis.com/auth/gmail.send`
+3. **填写 GitHub Secrets**：
+   ```text
+   GMAIL_SERVICE_ACCOUNT_EMAIL = xxx@xxx.iam.gserviceaccount.com（Service Account 邮箱）
+   GMAIL_SERVICE_ACCOUNT_KEY   = JSON 私钥文件中的 private_key 字段值（PEM 格式，含 BEGIN/END 行）
+   GMAIL_SENDER_EMAIL          = 发件邮箱（Workspace 中真实用户的邮箱地址）
+   GMAIL_DAILY_LIMIT           = 400（可选，默认 400）
+   GMAIL_SEND_DELAY_MS         = 3000（可选，默认 3000 毫秒）
+   ```
+4. 推送后部署 workflow 自动同步到 Worker。
+
+#### 面板操作
+
+在 `https://crm-ai-worker.<子域>.workers.dev/admin/outreach` 的 **开发信管理 → 邮件列表** 页：
+
+- 顶部显示 **Gmail 今日配额**（已发/上限/剩余）；
+- 点击 **📤 批量发送草稿**，输入本次发送数量（1-50），Worker 按配额和间隔逐封通过 Gmail 发出；
+- 发送成功的草稿自动标记为 **已发送**；失败会弹出前 3 条原因。
+
+#### 注意事项
+
+- Service Account 只能以 **同 Workspace 域内真实用户** 的身份发信（`sub` 声明），个人 Gmail 账号不支持域级委派；
+- 私钥是敏感凭据，只存 GitHub Secret 和 Worker Secret，不要提交到 Git；
+- 新部署后建议先发 1-2 封验证送达，再逐步放量；新发信域名/账号大量发送冷邮件容易触发 Gmail 限流（429），遇限流等待即可，配额逻辑不会重试已失败的发送。
+
 ### D1 客户管理面板
 
 Worker 部署后访问：

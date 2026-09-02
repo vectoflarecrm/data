@@ -198,6 +198,11 @@ jobs:
       EXA_API_KEY_58: ${{ secrets.EXA_API_KEY_58 }}
       EXA_API_KEY_59: ${{ secrets.EXA_API_KEY_59 }}
       EXA_API_KEY_60: ${{ secrets.EXA_API_KEY_60 }}
+      GMAIL_SERVICE_ACCOUNT_EMAIL: ${{ secrets.GMAIL_SERVICE_ACCOUNT_EMAIL }}
+      GMAIL_SERVICE_ACCOUNT_KEY: ${{ secrets.GMAIL_SERVICE_ACCOUNT_KEY }}
+      GMAIL_SENDER_EMAIL: ${{ secrets.GMAIL_SENDER_EMAIL }}
+      GMAIL_DAILY_LIMIT: ${{ secrets.GMAIL_DAILY_LIMIT }}
+      GMAIL_SEND_DELAY_MS: ${{ secrets.GMAIL_SEND_DELAY_MS }}
       CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
       ADMIN_PANEL_TOKEN: ${{ secrets.ADMIN_PANEL_TOKEN }}
 
@@ -333,6 +338,23 @@ jobs:
               npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
             fi
           done
+          # Sync Gmail (Google Workspace service account) sending secrets
+          for var_name in GMAIL_SERVICE_ACCOUNT_EMAIL GMAIL_SENDER_EMAIL GMAIL_DAILY_LIMIT GMAIL_SEND_DELAY_MS; do
+            val="${!var_name:-}"
+            if [ -n "$val" ]; then
+              printf '%s' "$val" | npx wrangler secret put "$var_name"
+              echo "Synced $var_name"
+            else
+              npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
+            fi
+          done
+          # Private key contains newlines: sync via stdin file
+          if [ -n "$GMAIL_SERVICE_ACCOUNT_KEY" ]; then
+            printf '%s' "$GMAIL_SERVICE_ACCOUNT_KEY" | npx wrangler secret put GMAIL_SERVICE_ACCOUNT_KEY
+            echo "Synced GMAIL_SERVICE_ACCOUNT_KEY"
+          else
+            npx wrangler secret delete GMAIL_SERVICE_ACCOUNT_KEY --name crm-ai-worker 2>/dev/null || true
+          fi
           if [ -n "$ADMIN_PANEL_TOKEN" ]; then
             printf '%s' "$ADMIN_PANEL_TOKEN" | npx wrangler secret put ADMIN_PANEL_TOKEN
           else
