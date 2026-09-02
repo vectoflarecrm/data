@@ -48,12 +48,11 @@ git push -u origin main
 
 ```bash
 git remote -v
-```
+```## 当前本地提交
+查看最新提交：
 
-## 当前本地提交
-
-```text
-ed98751 Enforce verified customer research and canonical product categories
+```bash
+git log --oneline -5
 ```
 
 ## 安全说明

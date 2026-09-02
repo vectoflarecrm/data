@@ -428,11 +428,27 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
       if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
       const body = (await request.json()) as Record<string, unknown>;
       const updates: { status?: string; subject?: string; body?: string } = {};
-      if (typeof body.status === "string") updates.status = body.status;
+      // Status is restricted: real sending goes through send-batch/send-one;
+      // 'draft' is only allowed to revert a mistaken manual mark.
+      if (body.status === "draft") updates.status = body.status;
       if (typeof body.subject === "string") updates.subject = body.subject;
       if (typeof body.body === "string") updates.body = body.body;
       await updateOutreachEmail(env, id, updates);
       return jsonResponse({ ok: true });
+    }
+
+    // POST /admin/api/outreach/emails/:id/send - Send a single draft via Gmail
+    if (path.startsWith("/admin/api/outreach/emails/") && path.endsWith("/send") && request.method === "POST") {
+      const id = Number(path.split("/")[path.split("/").length - 2]);
+      if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
+      const row = await env.DB.prepare(
+        "SELECT id, email_to, subject, body, status FROM outreach_emails WHERE id = ?",
+      ).bind(id).first<{ id: number; email_to: string; subject: string | null; body: string | null; status: string }>();
+      if (!row) return jsonResponse({ detail: "Email not found" }, 404);
+      if (row.status !== "draft") return jsonResponse({ detail: "只有草稿可以发送" }, 400);
+      const result = await sendOutreachEmail(env, row);
+      const quota = await getQuota(env);
+      return jsonResponse({ ok: result.ok, error: result.error, gmail_message_id: result.gmail_message_id, quota });
     }
 
     // DELETE /admin/api/outreach/emails/:id - Delete email
@@ -737,11 +753,16 @@ function showMsg(id,t,g){var e=document.getElementById(id);if(!e)return;e.textCo
 var emailState={offset:0,limit:20,total:0};
 function loadStats(){api('/admin/api/outreach/stats').then(function(s){var h='<div class="stat-card"><div class="stat-value">'+s.total+'</div><div class="stat-label">总计</div></div><div class="stat-card"><div class="stat-value">'+s.draft+'</div><div class="stat-label">草稿</div></div><div class="stat-card"><div class="stat-value">'+s.sent+'</div><div class="stat-label">已发送</div></div>';s.by_brand.forEach(function(b){h+='<div class="stat-card"><div class="stat-value">'+b.count+'</div><div class="stat-label">'+esc(b.brand_name)+'</div></div>'});document.getElementById('statsArea').innerHTML=h}).catch(function(){})}
 function loadEmails(){var brand=document.getElementById('filterBrand').value;var status=document.getElementById('filterStatus').value;var p=new URLSearchParams({limit:String(emailState.limit),offset:String(emailState.offset)});if(brand)p.set('brand',brand);if(status)p.set('status',status);
-api('/admin/api/outreach/emails?'+p.toString()).then(function(d){emailState.total=d.total;var h='';d.items.forEach(function(e){h+='<div class="email-card"><div class="email-header"><span class="email-subject">'+esc(e.subject||'(无主题)')+'</span><div><span class="badge badge-'+esc(e.status)+'">'+(e.status==='sent'?'已发送':'草稿')+'</span> <button class="btn btn-sm btn-danger del-email" data-id="'+e.id+'">删除</button>'+(e.status==='draft'?' <button class="btn btn-sm btn-primary mark-sent" data-id="'+e.id+'">标记已发送</button>':'')+'</div></div><div class="email-meta">'+esc(e.brand_name||'')+' → '+esc(e.company_name||'')+' ('+esc(e.display_id||'')+') | 收件人: '+esc(e.email_to||'未知')+' | '+esc(e.created_at||'')+'</div><div class="email-body">'+esc(e.body||'')+'</div></div>'});if(!d.items.length)h='<p style="color:#6b7280;text-align:center;padding:20px">暂无开发信</p>';
+api('/admin/api/outreach/emails?'+p.toString()).then(function(d){emailState.total=d.total;var h='';d.items.forEach(function(e){h+='<div class="email-card"><div class="email-header"><span class="email-subject">'+esc(e.subject||'(无主题)')+'</span><div><span class="badge badge-'+esc(e.status)+'">'+(e.status==='sent'?'已发送':'草稿')+'</span> <button class="btn btn-sm btn-danger del-email" data-id="'+e.id+'">删除</button>'+(e.status==='draft'?' <button class="btn btn-sm btn-primary send-one" data-id="'+e.id+'">📧 发送</button>':'')+'</div></div><div class="email-meta">'+esc(e.brand_name||'')+' → '+esc(e.company_name||'')+' ('+esc(e.display_id||'')+') | 收件人: '+esc(e.email_to||'未知')+' | '+esc(e.created_at||'')+'</div><div class="email-body">'+esc(e.body||'')+'</div></div>'});if(!d.items.length)h='<p style="color:#6b7280;text-align:center;padding:20px">暂无开发信</p>';
 emailState.total=d.total;document.getElementById('emailsArea').innerHTML=h;document.getElementById('emailPageInfo').textContent=(d.total?emailState.offset+1:0)+'-'+Math.min(emailState.offset+emailState.limit,d.total)+' / '+d.total;
 document.getElementById('emailPrev').disabled=emailState.offset===0;document.getElementById('emailNext').disabled=emailState.offset+emailState.limit>=d.total;
 document.querySelectorAll('.del-email').forEach(function(b){b.onclick=function(){if(!confirm('确定删除？'))return;api('/admin/api/outreach/emails/'+b.dataset.id,{method:'DELETE'}).then(function(){showToast('已删除',true);loadEmails();loadStats()}).catch(function(e){showToast(e.message,false)}}});
-document.querySelectorAll('.mark-sent').forEach(function(b){b.onclick=function(){api('/admin/api/outreach/emails/'+b.dataset.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'sent'})}).then(function(){showToast('已标记为已发送',true);loadEmails();loadStats()}).catch(function(e){showToast(e.message,false)}}})}).catch(function(e){document.getElementById('emailsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>'})}
+document.querySelectorAll('.send-one').forEach(function(b){b.onclick=function(){
+if(b.disabled)return;b.disabled=true;b.textContent='⏳…';
+api('/admin/api/outreach/emails/'+b.dataset.id+'/send',{method:'POST'}).then(function(d){
+if(d.ok){showToast('已通过 Gmail 发送（今日 '+d.quota.sent_today+'/'+d.quota.daily_limit+'）',true)}
+else{showToast('发送失败：'+(d.error||'未知错误'),false)}
+loadQuota();loadStats();loadEmails()}).catch(function(e){showToast(e.message,false);b.disabled=false;b.textContent='📧 发送'}}})}).catch(function(e){document.getElementById('emailsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>'})}
 
 document.getElementById('refreshEmails').onclick=function(){emailState.offset=0;loadEmails()};
 
