@@ -370,7 +370,20 @@ async function extractPageText(response: Response): Promise<string> {
     .on("p", { text(text) { addText(text.text); } })
     .on("h1", { text(text) { addText("[标题] " + text.text); } })
     .on("h2", { text(text) { addText("[小标题] " + text.text); } })
-    .on("li", { text(text) { addText("• " + text.text); } });
+    .on("li", { text(text) { addText("• " + text.text); } })
+    // Contact details often live ONLY in link hrefs (mailto:/tel:), which the
+    // text-element handlers above never see. Surface them as text so the
+    // contact-evidence extraction and the AI can pick them up.
+    .on("a", {
+      element(element) {
+        const href = element.getAttribute("href") ?? "";
+        if (href.toLowerCase().startsWith("mailto:")) {
+          addText("[邮箱链接] " + href.slice(7).split("?")[0]);
+        } else if (href.toLowerCase().startsWith("tel:")) {
+          addText("[电话链接] " + href.slice(4));
+        }
+      },
+    });
 
   await rewriter.transform(response).arrayBuffer();
   return parts.join("\n").slice(0, 15_000);
@@ -895,10 +908,18 @@ async function searchCompanyInfo(companyName: string, country: string, env: Env,
   }
 
   // Snippets already contain Tavily raw-content extracts, so they remain a
-  // useful fallback even when full page fetches fail.
-  return pages.length > 0
-    ? `\n\n--- 搜索结果页面 (${allResults.length}条) ---\n${pages.join("\n")}`
-    : `\n\n--- 搜索结果摘要 (${allResults.length}条) ---\n${allResults.map((r) => `${r.title}: ${r.snippet}`).join("\n")}`;
+  // useful fallback even when full page fetches fail. Contact evidence is
+  // also mined from snippet text, since LinkedIn/business directories often
+  // show emails in snippets even when the page itself is paywalled.
+  if (pages.length === 0) {
+    const snippetText = allResults.map((r) => `${r.snippet}`).join("\n");
+    const contact = extractContactEvidence(snippetText);
+    const contactLine = contact.emails.length || contact.phones.length
+      ? `\n[直接提取] 邮箱: ${contact.emails.join(", ") || "无"} | 电话: ${contact.phones.join(", ") || "无"}`
+      : "";
+    return `\n\n--- 搜索结果摘要 (${allResults.length}条) ---\n${allResults.map((r) => `${r.title}: ${r.snippet}`).join("\n")}${contactLine}`;
+  }
+  return `\n\n--- 搜索结果页面 (${allResults.length}条) ---\n${pages.join("\n")}`;
 }
 
 async function fetchAdditionalSources(companyName: string, domain: string, env: Env): Promise<string> {
