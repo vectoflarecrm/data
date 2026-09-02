@@ -264,14 +264,40 @@ function isOwnDomain(url: string, domain: string | undefined): boolean {
 // Direct contact extraction from raw page text: complement AI analysis with
 // verbatim evidence so the model has anchored candidates, not just prose.
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-const PHONE_REGEX = /\+?\d[\d\s().-]{7,}\d/g;
+const PHONE_REGEX = /(?:(?:\+\d{1,3}[\s.-]?)?(?:\(\d{1,4}\)[\s.-]?)?\d{2,4}[\s.-]?\d{2,4}[\s.-]?\d{2,4})/g;
 
 function extractContactEvidence(text: string): { emails: string[]; phones: string[] } {
   const emails = [...new Set((text.match(EMAIL_REGEX) ?? []).map((e) => e.toLowerCase()))]
     .filter((e) => !e.endsWith(".png") && !e.endsWith(".jpg") && !e.includes("example.") && !e.includes("sentry") && e.length < 80)
     .slice(0, 8);
   const phones = [...new Set((text.match(PHONE_REGEX) ?? []).map((p) => p.trim()))]
-    .filter((p) => p.replace(/\D/g, "").length >= 8 && p.replace(/\D/g, "").length <= 15)
+    .filter((p) => {
+      const digits = p.replace(/\D/g, "");
+      // Reject junk like repeated/sequential digit runs and pure-zero strings:
+      // 905-907-908 style sequences and copyright dates were common false hits.
+      if (digits.length < 8 || digits.length > 15) return false;
+      if (/^(\d)\1+$/.test(digits)) return false; // all same digit
+      if (/(?:0123456789|12345678|87654321|98765432)/.test(digits)) return false; // sequential
+      if (/^0+$/.test(digits)) return false;
+      if (/^20\d{2}[-\s.]?20\d{2}$/.test(p.trim())) return false; // copyright year pairs
+      // Junk detector: 905-907-908 style serials contain two near-identical
+      // halves (edit distance 1) or two ascending-delta runs. Real numbers
+      // rarely satisfy either.
+      const half = Math.floor(digits.length / 2);
+      let diff = 0;
+      for (let i = 0; i < half; i++) if (digits[i] !== digits[half + i]) diff++;
+      if (half >= 3 && diff <= 1) return false; // halves nearly identical
+      const group = digits.match(/\d{3}/g);
+      if (group && group.length >= 3) {
+        // Cross-group step (e.g. 111|222|333: each +1; 905|906|907: each +1)
+        const steps = group.slice(1).map((g, i) => g.charCodeAt(0) - group[i].charCodeAt(0));
+        const uniform = new Set(steps).size === 1 && Math.abs(steps[0]) <= 2;
+        if (uniform) return false;
+      }
+      const unique = new Set(digits).size;
+      if (unique <= 2 && digits.length >= 8) return false; // too few distinct digits
+      return true;
+    })
     .slice(0, 8);
   return { emails, phones };
 }
