@@ -28,6 +28,45 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+      GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+      GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
+      GEMINI_API_KEY_4: ${{ secrets.GEMINI_API_KEY_4 }}
+      GEMINI_API_KEY_5: ${{ secrets.GEMINI_API_KEY_5 }}
+      GEMINI_API_KEY_6: ${{ secrets.GEMINI_API_KEY_6 }}
+      GEMINI_API_KEY_7: ${{ secrets.GEMINI_API_KEY_7 }}
+      GEMINI_API_KEY_8: ${{ secrets.GEMINI_API_KEY_8 }}
+      GEMINI_API_KEY_9: ${{ secrets.GEMINI_API_KEY_9 }}
+      GEMINI_API_KEY_10: ${{ secrets.GEMINI_API_KEY_10 }}
+      GEMINI_API_KEY_11: ${{ secrets.GEMINI_API_KEY_11 }}
+      GEMINI_API_KEY_12: ${{ secrets.GEMINI_API_KEY_12 }}
+      GEMINI_API_KEY_13: ${{ secrets.GEMINI_API_KEY_13 }}
+      GEMINI_API_KEY_14: ${{ secrets.GEMINI_API_KEY_14 }}
+      GEMINI_API_KEY_15: ${{ secrets.GEMINI_API_KEY_15 }}
+      GEMINI_API_KEY_16: ${{ secrets.GEMINI_API_KEY_16 }}
+      GEMINI_API_KEY_17: ${{ secrets.GEMINI_API_KEY_17 }}
+      GEMINI_API_KEY_18: ${{ secrets.GEMINI_API_KEY_18 }}
+      GEMINI_API_KEY_19: ${{ secrets.GEMINI_API_KEY_19 }}
+      GEMINI_API_KEY_20: ${{ secrets.GEMINI_API_KEY_20 }}
+      GEMINI_API_KEY_21: ${{ secrets.GEMINI_API_KEY_21 }}
+      GEMINI_API_KEY_22: ${{ secrets.GEMINI_API_KEY_22 }}
+      GEMINI_API_KEY_23: ${{ secrets.GEMINI_API_KEY_23 }}
+      GEMINI_API_KEY_24: ${{ secrets.GEMINI_API_KEY_24 }}
+      GEMINI_API_KEY_25: ${{ secrets.GEMINI_API_KEY_25 }}
+      GEMINI_API_KEY_26: ${{ secrets.GEMINI_API_KEY_26 }}
+      GEMINI_API_KEY_27: ${{ secrets.GEMINI_API_KEY_27 }}
+      GEMINI_API_KEY_28: ${{ secrets.GEMINI_API_KEY_28 }}
+      GEMINI_API_KEY_29: ${{ secrets.GEMINI_API_KEY_29 }}
+      GEMINI_API_KEY_30: ${{ secrets.GEMINI_API_KEY_30 }}
+      GEMINI_API_KEY_31: ${{ secrets.GEMINI_API_KEY_31 }}
+      GEMINI_API_KEY_32: ${{ secrets.GEMINI_API_KEY_32 }}
+      GEMINI_API_KEY_33: ${{ secrets.GEMINI_API_KEY_33 }}
+      GEMINI_API_KEY_34: ${{ secrets.GEMINI_API_KEY_34 }}
+      GEMINI_API_KEY_35: ${{ secrets.GEMINI_API_KEY_35 }}
+      GEMINI_API_KEY_36: ${{ secrets.GEMINI_API_KEY_36 }}
+      GEMINI_API_KEY_37: ${{ secrets.GEMINI_API_KEY_37 }}
+      GEMINI_API_KEY_38: ${{ secrets.GEMINI_API_KEY_38 }}
+      GEMINI_API_KEY_39: ${{ secrets.GEMINI_API_KEY_39 }}
+      GEMINI_API_KEY_40: ${{ secrets.GEMINI_API_KEY_40 }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
       GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
@@ -37,18 +76,128 @@ jobs:
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       DEEPSEEK_API_KEY_2: ${{ secrets.DEEPSEEK_API_KEY_2 }}
       DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL }}
-      GOOGLE_SEARCH_API_KEY: ${{ secrets.GOOGLE_SEARCH_API_KEY }}
-      GOOGLE_SEARCH_ENGINE_ID: ${{ secrets.GOOGLE_SEARCH_ENGINE_ID }}
-      GOOGLE_SEARCH_API_KEY_2: ${{ secrets.GOOGLE_SEARCH_API_KEY_2 }}
-      GOOGLE_SEARCH_ENGINE_ID_2: ${{ secrets.GOOGLE_SEARCH_ENGINE_ID_2 }}
-      GOOGLE_SEARCH_API_KEY_3: ${{ secrets.GOOGLE_SEARCH_API_KEY_3 }}
-      GOOGLE_SEARCH_ENGINE_ID_3: ${{ secrets.GOOGLE_SEARCH_ENGINE_ID_3 }}
       SEARLO_API_KEY: ${{ secrets.SEARLO_API_KEY }}
       SEARLO_API_KEY_2: ${{ secrets.SEARLO_API_KEY_2 }}
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       TAVILY_API_KEY_2: ${{ secrets.TAVILY_API_KEY_2 }}
+      TAVILY_API_KEY_3: ${{ secrets.TAVILY_API_KEY_3 }}
+      TAVILY_API_KEY_4: ${{ secrets.TAVILY_API_KEY_4 }}
+      TAVILY_API_KEY_5: ${{ secrets.TAVILY_API_KEY_5 }}
+      TAVILY_API_KEY_6: ${{ secrets.TAVILY_API_KEY_6 }}
+      TAVILY_API_KEY_7: ${{ secrets.TAVILY_API_KEY_7 }}
+      TAVILY_API_KEY_8: ${{ secrets.TAVILY_API_KEY_8 }}
+      TAVILY_API_KEY_9: ${{ secrets.TAVILY_API_KEY_9 }}
+      TAVILY_API_KEY_10: ${{ secrets.TAVILY_API_KEY_10 }}
+      TAVILY_API_KEY_11: ${{ secrets.TAVILY_API_KEY_11 }}
+      TAVILY_API_KEY_12: ${{ secrets.TAVILY_API_KEY_12 }}
+      TAVILY_API_KEY_13: ${{ secrets.TAVILY_API_KEY_13 }}
+      TAVILY_API_KEY_14: ${{ secrets.TAVILY_API_KEY_14 }}
+      TAVILY_API_KEY_15: ${{ secrets.TAVILY_API_KEY_15 }}
+      TAVILY_API_KEY_16: ${{ secrets.TAVILY_API_KEY_16 }}
+      TAVILY_API_KEY_17: ${{ secrets.TAVILY_API_KEY_17 }}
+      TAVILY_API_KEY_18: ${{ secrets.TAVILY_API_KEY_18 }}
+      TAVILY_API_KEY_19: ${{ secrets.TAVILY_API_KEY_19 }}
+      TAVILY_API_KEY_20: ${{ secrets.TAVILY_API_KEY_20 }}
+      TAVILY_API_KEY_21: ${{ secrets.TAVILY_API_KEY_21 }}
+      TAVILY_API_KEY_22: ${{ secrets.TAVILY_API_KEY_22 }}
+      TAVILY_API_KEY_23: ${{ secrets.TAVILY_API_KEY_23 }}
+      TAVILY_API_KEY_24: ${{ secrets.TAVILY_API_KEY_24 }}
+      TAVILY_API_KEY_25: ${{ secrets.TAVILY_API_KEY_25 }}
+      TAVILY_API_KEY_26: ${{ secrets.TAVILY_API_KEY_26 }}
+      TAVILY_API_KEY_27: ${{ secrets.TAVILY_API_KEY_27 }}
+      TAVILY_API_KEY_28: ${{ secrets.TAVILY_API_KEY_28 }}
+      TAVILY_API_KEY_29: ${{ secrets.TAVILY_API_KEY_29 }}
+      TAVILY_API_KEY_30: ${{ secrets.TAVILY_API_KEY_30 }}
+      TAVILY_API_KEY_31: ${{ secrets.TAVILY_API_KEY_31 }}
+      TAVILY_API_KEY_32: ${{ secrets.TAVILY_API_KEY_32 }}
+      TAVILY_API_KEY_33: ${{ secrets.TAVILY_API_KEY_33 }}
+      TAVILY_API_KEY_34: ${{ secrets.TAVILY_API_KEY_34 }}
+      TAVILY_API_KEY_35: ${{ secrets.TAVILY_API_KEY_35 }}
+      TAVILY_API_KEY_36: ${{ secrets.TAVILY_API_KEY_36 }}
+      TAVILY_API_KEY_37: ${{ secrets.TAVILY_API_KEY_37 }}
+      TAVILY_API_KEY_38: ${{ secrets.TAVILY_API_KEY_38 }}
+      TAVILY_API_KEY_39: ${{ secrets.TAVILY_API_KEY_39 }}
+      TAVILY_API_KEY_40: ${{ secrets.TAVILY_API_KEY_40 }}
+      TAVILY_API_KEY_41: ${{ secrets.TAVILY_API_KEY_41 }}
+      TAVILY_API_KEY_42: ${{ secrets.TAVILY_API_KEY_42 }}
+      TAVILY_API_KEY_43: ${{ secrets.TAVILY_API_KEY_43 }}
+      TAVILY_API_KEY_44: ${{ secrets.TAVILY_API_KEY_44 }}
+      TAVILY_API_KEY_45: ${{ secrets.TAVILY_API_KEY_45 }}
+      TAVILY_API_KEY_46: ${{ secrets.TAVILY_API_KEY_46 }}
+      TAVILY_API_KEY_47: ${{ secrets.TAVILY_API_KEY_47 }}
+      TAVILY_API_KEY_48: ${{ secrets.TAVILY_API_KEY_48 }}
+      TAVILY_API_KEY_49: ${{ secrets.TAVILY_API_KEY_49 }}
+      TAVILY_API_KEY_50: ${{ secrets.TAVILY_API_KEY_50 }}
+      TAVILY_API_KEY_51: ${{ secrets.TAVILY_API_KEY_51 }}
+      TAVILY_API_KEY_52: ${{ secrets.TAVILY_API_KEY_52 }}
+      TAVILY_API_KEY_53: ${{ secrets.TAVILY_API_KEY_53 }}
+      TAVILY_API_KEY_54: ${{ secrets.TAVILY_API_KEY_54 }}
+      TAVILY_API_KEY_55: ${{ secrets.TAVILY_API_KEY_55 }}
+      TAVILY_API_KEY_56: ${{ secrets.TAVILY_API_KEY_56 }}
+      TAVILY_API_KEY_57: ${{ secrets.TAVILY_API_KEY_57 }}
+      TAVILY_API_KEY_58: ${{ secrets.TAVILY_API_KEY_58 }}
+      TAVILY_API_KEY_59: ${{ secrets.TAVILY_API_KEY_59 }}
+      TAVILY_API_KEY_60: ${{ secrets.TAVILY_API_KEY_60 }}
       EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
       EXA_API_KEY_2: ${{ secrets.EXA_API_KEY_2 }}
+      EXA_API_KEY_3: ${{ secrets.EXA_API_KEY_3 }}
+      EXA_API_KEY_4: ${{ secrets.EXA_API_KEY_4 }}
+      EXA_API_KEY_5: ${{ secrets.EXA_API_KEY_5 }}
+      EXA_API_KEY_6: ${{ secrets.EXA_API_KEY_6 }}
+      EXA_API_KEY_7: ${{ secrets.EXA_API_KEY_7 }}
+      EXA_API_KEY_8: ${{ secrets.EXA_API_KEY_8 }}
+      EXA_API_KEY_9: ${{ secrets.EXA_API_KEY_9 }}
+      EXA_API_KEY_10: ${{ secrets.EXA_API_KEY_10 }}
+      EXA_API_KEY_11: ${{ secrets.EXA_API_KEY_11 }}
+      EXA_API_KEY_12: ${{ secrets.EXA_API_KEY_12 }}
+      EXA_API_KEY_13: ${{ secrets.EXA_API_KEY_13 }}
+      EXA_API_KEY_14: ${{ secrets.EXA_API_KEY_14 }}
+      EXA_API_KEY_15: ${{ secrets.EXA_API_KEY_15 }}
+      EXA_API_KEY_16: ${{ secrets.EXA_API_KEY_16 }}
+      EXA_API_KEY_17: ${{ secrets.EXA_API_KEY_17 }}
+      EXA_API_KEY_18: ${{ secrets.EXA_API_KEY_18 }}
+      EXA_API_KEY_19: ${{ secrets.EXA_API_KEY_19 }}
+      EXA_API_KEY_20: ${{ secrets.EXA_API_KEY_20 }}
+      EXA_API_KEY_21: ${{ secrets.EXA_API_KEY_21 }}
+      EXA_API_KEY_22: ${{ secrets.EXA_API_KEY_22 }}
+      EXA_API_KEY_23: ${{ secrets.EXA_API_KEY_23 }}
+      EXA_API_KEY_24: ${{ secrets.EXA_API_KEY_24 }}
+      EXA_API_KEY_25: ${{ secrets.EXA_API_KEY_25 }}
+      EXA_API_KEY_26: ${{ secrets.EXA_API_KEY_26 }}
+      EXA_API_KEY_27: ${{ secrets.EXA_API_KEY_27 }}
+      EXA_API_KEY_28: ${{ secrets.EXA_API_KEY_28 }}
+      EXA_API_KEY_29: ${{ secrets.EXA_API_KEY_29 }}
+      EXA_API_KEY_30: ${{ secrets.EXA_API_KEY_30 }}
+      EXA_API_KEY_31: ${{ secrets.EXA_API_KEY_31 }}
+      EXA_API_KEY_32: ${{ secrets.EXA_API_KEY_32 }}
+      EXA_API_KEY_33: ${{ secrets.EXA_API_KEY_33 }}
+      EXA_API_KEY_34: ${{ secrets.EXA_API_KEY_34 }}
+      EXA_API_KEY_35: ${{ secrets.EXA_API_KEY_35 }}
+      EXA_API_KEY_36: ${{ secrets.EXA_API_KEY_36 }}
+      EXA_API_KEY_37: ${{ secrets.EXA_API_KEY_37 }}
+      EXA_API_KEY_38: ${{ secrets.EXA_API_KEY_38 }}
+      EXA_API_KEY_39: ${{ secrets.EXA_API_KEY_39 }}
+      EXA_API_KEY_40: ${{ secrets.EXA_API_KEY_40 }}
+      EXA_API_KEY_41: ${{ secrets.EXA_API_KEY_41 }}
+      EXA_API_KEY_42: ${{ secrets.EXA_API_KEY_42 }}
+      EXA_API_KEY_43: ${{ secrets.EXA_API_KEY_43 }}
+      EXA_API_KEY_44: ${{ secrets.EXA_API_KEY_44 }}
+      EXA_API_KEY_45: ${{ secrets.EXA_API_KEY_45 }}
+      EXA_API_KEY_46: ${{ secrets.EXA_API_KEY_46 }}
+      EXA_API_KEY_47: ${{ secrets.EXA_API_KEY_47 }}
+      EXA_API_KEY_48: ${{ secrets.EXA_API_KEY_48 }}
+      EXA_API_KEY_49: ${{ secrets.EXA_API_KEY_49 }}
+      EXA_API_KEY_50: ${{ secrets.EXA_API_KEY_50 }}
+      EXA_API_KEY_51: ${{ secrets.EXA_API_KEY_51 }}
+      EXA_API_KEY_52: ${{ secrets.EXA_API_KEY_52 }}
+      EXA_API_KEY_53: ${{ secrets.EXA_API_KEY_53 }}
+      EXA_API_KEY_54: ${{ secrets.EXA_API_KEY_54 }}
+      EXA_API_KEY_55: ${{ secrets.EXA_API_KEY_55 }}
+      EXA_API_KEY_56: ${{ secrets.EXA_API_KEY_56 }}
+      EXA_API_KEY_57: ${{ secrets.EXA_API_KEY_57 }}
+      EXA_API_KEY_58: ${{ secrets.EXA_API_KEY_58 }}
+      EXA_API_KEY_59: ${{ secrets.EXA_API_KEY_59 }}
+      EXA_API_KEY_60: ${{ secrets.EXA_API_KEY_60 }}
       CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
       ADMIN_PANEL_TOKEN: ${{ secrets.ADMIN_PANEL_TOKEN }}
 
@@ -140,6 +289,17 @@ jobs:
       - name: Sync Worker secrets
         run: |
           printf '%s' "$GEMINI_API_KEY" | npx wrangler secret put GEMINI_API_KEY
+          # Sync extra Gemini keys (up to 40; one fixed key per company task)
+          for i in $(seq 2 40); do
+            var_name="GEMINI_API_KEY_$i"
+            val="${!var_name:-}"
+            if [ -n "$val" ]; then
+              printf '%s' "$val" | npx wrangler secret put "$var_name"
+              echo "Synced $var_name"
+            else
+              npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
+            fi
+          done
           if [ -n "$GEMINI_MODEL" ]; then
             printf '%s' "$GEMINI_MODEL" | npx wrangler secret put GEMINI_MODEL
           fi
@@ -179,15 +339,13 @@ jobs:
             echo "ADMIN_PANEL_TOKEN is not configured; /admin remains disabled"
             npx wrangler secret delete ADMIN_PANEL_TOKEN --name crm-ai-worker || true
           fi
-          if [ -n "$GOOGLE_SEARCH_API_KEY" ] && [ -n "$GOOGLE_SEARCH_ENGINE_ID" ]; then
-            printf '%s' "$GOOGLE_SEARCH_API_KEY" | npx wrangler secret put GOOGLE_SEARCH_API_KEY
-            printf '%s' "$GOOGLE_SEARCH_ENGINE_ID" | npx wrangler secret put GOOGLE_SEARCH_ENGINE_ID
-            echo "Google Custom Search secrets synced"
-          else
-            echo "Google search not configured; Worker will skip Google search"
-            npx wrangler secret delete GOOGLE_SEARCH_API_KEY --name crm-ai-worker || true
-            npx wrangler secret delete GOOGLE_SEARCH_ENGINE_ID --name crm-ai-worker || true
-          fi
+          # Legacy Google Custom Search secrets are no longer used by the Worker
+          npx wrangler secret delete GOOGLE_SEARCH_API_KEY --name crm-ai-worker 2>/dev/null || true
+          npx wrangler secret delete GOOGLE_SEARCH_ENGINE_ID --name crm-ai-worker 2>/dev/null || true
+          npx wrangler secret delete GOOGLE_SEARCH_API_KEY_2 --name crm-ai-worker 2>/dev/null || true
+          npx wrangler secret delete GOOGLE_SEARCH_ENGINE_ID_2 --name crm-ai-worker 2>/dev/null || true
+          npx wrangler secret delete GOOGLE_SEARCH_API_KEY_3 --name crm-ai-worker 2>/dev/null || true
+          npx wrangler secret delete GOOGLE_SEARCH_ENGINE_ID_3 --name crm-ai-worker 2>/dev/null || true
           # Sync Searlo keys
           for var_name in SEARLO_API_KEY SEARLO_API_KEY_2; do
             val="${!var_name:-}"
@@ -198,8 +356,9 @@ jobs:
               npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
             fi
           done
-          # Sync Tavily keys
-          for var_name in TAVILY_API_KEY TAVILY_API_KEY_2; do
+          # Sync Tavily keys (up to 60; one fixed key per company task)
+          for i in $(seq 1 60); do
+            if [ "$i" -eq 1 ]; then var_name=TAVILY_API_KEY; else var_name="TAVILY_API_KEY_$i"; fi
             val="${!var_name:-}"
             if [ -n "$val" ]; then
               printf '%s' "$val" | npx wrangler secret put "$var_name"
@@ -208,8 +367,9 @@ jobs:
               npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
             fi
           done
-          # Sync Exa keys
-          for var_name in EXA_API_KEY EXA_API_KEY_2; do
+          # Sync Exa keys (up to 60)
+          for i in $(seq 1 60); do
+            if [ "$i" -eq 1 ]; then var_name=EXA_API_KEY; else var_name="EXA_API_KEY_$i"; fi
             val="${!var_name:-}"
             if [ -n "$val" ]; then
               printf '%s' "$val" | npx wrangler secret put "$var_name"

@@ -73,7 +73,7 @@ pending
   ↓ 原子认领（每次1条，质量优先）
 processing
   ↓ Step 1: 抓取主网站（15秒超时）
-  ↓ Step 2: Google/Searlo/Tavily/Exa/DuckDuckGo 多引擎搜索
+  ↓ Step 2: Searlo/Tavily/Exa/DuckDuckGo 多引擎搜索（Tavily 主力，最多 20 Key 轮换）
   ↓         搜索公司名+国家+行业关键词（3次查询）
   ↓         自动轮询多个API Key
   ↓ Step 3: 抓取搜索结果页面内容
@@ -191,57 +191,86 @@ ADMIN_PANEL_TOKEN
 
 ### 多搜索引擎 API 配置（可选）
 
-Worker 支持 5 个搜索引擎自动轮询，用于深度研究公司信息。每个引擎支持多个 API Key 自动切换，无需配置也能工作（DuckDuckGo 作为最终备用，无需 Key）。
+Worker 支持多个搜索引擎与 AI Provider 的多 Key 池调度，用于深度研究公司信息。已移除 Google Custom Search；主力引擎为 **Tavily（最多 60 个 Key）**，AI 分析主力为 **Gemini（AI Studio 免费 Key，最多 40 个）**，无需配置搜索 Key 也能工作（DuckDuckGo 作为最终备用，无需 Key）。
 
 #### 搜索引擎免费额度
 
 | 引擎 | 免费额度 | 需要注册 | 注册地址 |
 |------|---------|---------|----------|
-| Google Custom Search | 100次/天/Key | 是 | https://console.cloud.google.com |
+| Tavily（主力） | 1000次/月/Key，支持最多 60 个 Key | 是 | https://tavily.com |
 | Searlo | 3000次/月/Key | 是 | https://searlo.com |
-| Tavily | 1000次/月/Key | 是 | https://tavily.com |
 | Exa | 1000次/月/Key | 是 | https://exa.ai |
 | DuckDuckGo | 无限次 | 否 | 无需注册 |
 
-#### 推荐配置（3 个 Google Key = 300次/天）
+#### 推荐配置（Gemini 40 + Tavily 60 + Exa 60）
 
 在 GitHub **Settings → Secrets and variables → Actions** 中添加：
 
 ```text
-# Google Custom Search（推荐，每个 Key 100次/天）
-GOOGLE_SEARCH_API_KEY       = AIza...
-GOOGLE_SEARCH_ENGINE_ID     = xxxxx:xxxxx
-GOOGLE_SEARCH_API_KEY_2     = AIza...（第二个 Key）
-GOOGLE_SEARCH_ENGINE_ID_2   = xxxxx:xxxxx
-GOOGLE_SEARCH_API_KEY_3     = AIza...（第三个 Key）
-GOOGLE_SEARCH_ENGINE_ID_3   = xxxxx:xxxxx
+# Gemini（AI 分析主力，AI Studio 免费 Key，最多 40 个）
+GEMINI_API_KEY              = AIza...
+GEMINI_API_KEY_2            = AIza...（第二个 Key）
+GEMINI_API_KEY_3            = AIza...
+...
+GEMINI_API_KEY_40           = AIza...
 
-# Searlo（可选，每个 Key 3000次/月）
+# Tavily（搜索主力，每个 Key 1000次/月，最多 60 个 Key）
+TAVILY_API_KEY              = tvly-...
+TAVILY_API_KEY_2            = tvly-...（第二个 Key）
+TAVILY_API_KEY_3            = tvly-...
+TAVILY_API_KEY_4            = tvly-...
+TAVILY_API_KEY_5            = tvly-...
+TAVILY_API_KEY_6            = tvly-...
+TAVILY_API_KEY_7            = tvly-...
+TAVILY_API_KEY_8            = tvly-...
+TAVILY_API_KEY_9            = tvly-...
+TAVILY_API_KEY_10           = tvly-...
+...
+TAVILY_API_KEY_58           = tvly-...
+TAVILY_API_KEY_59           = tvly-...
+TAVILY_API_KEY_60           = tvly-...
+
+# Exa（可选备用搜索，每个 Key 1000次/月，最多 60 个 Key）
+EXA_API_KEY                 = ...
+EXA_API_KEY_2               = ...
+...
+EXA_API_KEY_60              = ...
+
+# Searlo（可选，每个 Key 3000次/月，作为 Tavily 之后的备用引擎）
 SEARLO_API_KEY              = sl-...
 SEARLO_API_KEY_2            = sl-...（第二个 Key）
 
-# Tavily（可选，每个 Key 1000次/月）
-TAVILY_API_KEY              = tvly-...
-TAVILY_API_KEY_2            = tvly-...（第二个 Key）
-
-# Exa（可选，每个 Key 1000次/月）
-EXA_API_KEY                 = ...
-EXA_API_KEY_2               = ...（第二个 Key）
 ```
 
-#### Google Custom Search 设置步骤
+Key 数量可少于上限，只配置前 N 个即可，Worker 自动识别已配置的 Key。未配置任何搜索 Key 时仍可运行（DuckDuckGo 兜底）。
 
-1. 打开 https://console.cloud.google.com/apis/credentials
-2. 创建项目 → 启用 Custom Search JSON API → 创建 API Key
-3. 打开 https://programmablesearchengine.google.com/
-4. 创建搜索引擎 → 勾选 **"搜索整个网络"** → 复制搜索引擎 ID
-5. 重复以上步骤创建多个 Key 以获得更高配额
+#### 多 Key 池与防封杀原则（Gemini 40 / Tavily 60 / Exa 60）
+
+Worker 内置统一的多 Key 池调度（`api_key_health` 表），核心思路是 **不要在单个任务里频繁切换账号**，并且 **额度用完的 Key 立即停用**，让每个账号的行为看起来像正常用户：
+
+1. **一家公司 = 一个固定 Key**：每家公司按其 `customer.id` 确定性分配一个 Gemini Key、一个 Tavily Key、一个 Exa Key。该公司任务内的全部搜索查询和 AI 分析都用同一个 Key，不会在任务中途来回切换账号；
+2. **公司间均匀分散**：不同公司自动落到不同 Key 上，配额均摊（例如 6 次搜索 × 每月 N 家公司 ÷ 60 个 Tavily Key）；
+3. **额度用完立即停用**：Key 返回 `429/401/403` 时写入 `api_key_health` 表进入冷却期（Tavily/Exa 冷却 24 小时，覆盖月度配额；Gemini 冷却 60 秒，覆盖每分钟限流），冷却期内 **完全不再调用** 该 Key，后续任务自动跳到健康 Key；
+4. **仅必要时才切换**：只有分配的 Key 被拒绝/限流时才降级到下一个健康 Key，正常情况下整个任务始终用一个账号；
+5. **查询间延时**：每次搜索之间间隔 2 秒（`INTER_SOURCE_DELAY_MS`），每家公司之间间隔 5 秒（`INTER_CUSTOMER_DELAY_MS`），模拟人类节奏，避免瞬时高频请求；
+6. **全部 Key 耗尽即静默停止**：若某引擎所有 Key 都在冷却期，直接跳过该引擎（返回空结果），不会反复敲打已耗尽的账号；
+7. **多引擎/AI 分流**：搜索 Tavily → Searlo → Exa → DuckDuckGo；AI Gemini → Groq → Mistral → DeepSeek，进一步降低单 provider 压力；
+8. **无 Key 也可运行**：不配置任何搜索 Key 时自动降级为 DuckDuckGo，不会报错。
+
+#### Gemini（AI Studio 免费 Key）设置
+
+1. 打开 https://aistudio.google.com/apikey ，每个 Google 账号创建一个 API Key；
+2. 注意 AI Studio 免费 Key 的使用限制：免费层按 **每分钟请求数（RPM）和每日请求数（RPD）** 限流，不同模型额度不同（如 `gemini-2.5-flash-lite` 免费层约 15 RPM / 1000 RPD，以官方额度页为准）；
+3. 需要 40 个 Key 时准备 40 个 Google 账号，各自在 AI Studio 创建一个 Key；
+4. 将 Key 按序号填入 GitHub Secrets：`GEMINI_API_KEY`、`GEMINI_API_KEY_2` … `GEMINI_API_KEY_40`；
+5. Worker 每 5 分钟只处理 1 家公司（每任务 1 次 AI 调用 + 最多 4 次模型重试），单 Key 每日消耗远低于免费 RPD 上限；429 限流时该 Key 冷却 60 秒后自动恢复。
 
 #### Tavily 设置步骤
 
-1. 打开 https://tavily.com
-2. 注册账号 → 获取 API Key
-3. 免费额度：1000次/月
+1. 打开 https://tavily.com ，每个账号注册后获取一个 API Key（`tvly-` 开头）；
+2. 需要 60 个 Key 时用不同邮箱注册 60 个账号，各取一个 Key；
+3. 将 Key 按序号填入 GitHub Secrets：`TAVILY_API_KEY`、`TAVILY_API_KEY_2` … `TAVILY_API_KEY_60`；
+4. 免费额度：每个 Key 1000次/月，60 个 Key 合计约 60000次/月；用完（429）后该 Key 冷却 24 小时不再调用，直到下月配额恢复。
 
 #### Exa 设置步骤
 
@@ -251,15 +280,18 @@ EXA_API_KEY_2               = ...（第二个 Key）
 
 #### 搜索工作原理
 
-每家公司会执行 3 次搜索查询：
+每家公司会执行 6 次搜索查询：
 
 ```text
-查询1: "公司名" 国家 water sports company
-查询2: "公司名" distributor dealer inflatable boat SUP kayak
-查询3: "公司名" about team contact email phone
+查询1: "公司名" 国家 water sports company email phone contact
+查询2: "公司名" email whatsapp cellphone contact person
+查询3: site:linkedin.com/company "公司名"
+查询4: site:linkedin.com/in "公司名" CEO owner manager
+查询5: site:linkedin.com "公司名" purchasing buyer manager
+查询6: "公司名" about products services inflatable boat SUP
 ```
 
-搜索结果自动去重，抓取页面内容后与网站数据一起送入 AI 深度分析。
+Tavily/Exa/Gemini Key 按公司 ID 固定分配（一家公司始终用同一组 Key，耗尽的 Key 自动停用），搜索结果自动去重，抓取页面内容后与网站数据一起送入 AI 深度分析。
 
 仓库中的 workflow 文件为：
 

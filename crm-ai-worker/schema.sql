@@ -87,3 +87,14 @@ CREATE TABLE IF NOT EXISTS outreach_emails (
 CREATE INDEX IF NOT EXISTS idx_outreach_customer_id ON outreach_emails(customer_id);
 CREATE INDEX IF NOT EXISTS idx_outreach_status ON outreach_emails(status);
 CREATE INDEX IF NOT EXISTS idx_outreach_product ON outreach_emails(product_category);
+
+-- API key health tracking (anti-ban: a key that returns 429/quota-exhausted is
+-- disabled until its cooldown expires, so we never hammer an exhausted key)
+CREATE TABLE IF NOT EXISTS api_key_health (
+  provider TEXT NOT NULL,
+  key_index INTEGER NOT NULL,
+  exhausted_until TIMESTAMP,
+  last_error TEXT,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (provider, key_index)
+);

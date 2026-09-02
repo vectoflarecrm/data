@@ -17,6 +17,45 @@ interface Env {
   DB: D1Database;
   GEMINI_API_KEY: string;
   GEMINI_MODEL?: string;
+  GEMINI_API_KEY_2?: string;
+  GEMINI_API_KEY_3?: string;
+  GEMINI_API_KEY_4?: string;
+  GEMINI_API_KEY_5?: string;
+  GEMINI_API_KEY_6?: string;
+  GEMINI_API_KEY_7?: string;
+  GEMINI_API_KEY_8?: string;
+  GEMINI_API_KEY_9?: string;
+  GEMINI_API_KEY_10?: string;
+  GEMINI_API_KEY_11?: string;
+  GEMINI_API_KEY_12?: string;
+  GEMINI_API_KEY_13?: string;
+  GEMINI_API_KEY_14?: string;
+  GEMINI_API_KEY_15?: string;
+  GEMINI_API_KEY_16?: string;
+  GEMINI_API_KEY_17?: string;
+  GEMINI_API_KEY_18?: string;
+  GEMINI_API_KEY_19?: string;
+  GEMINI_API_KEY_20?: string;
+  GEMINI_API_KEY_21?: string;
+  GEMINI_API_KEY_22?: string;
+  GEMINI_API_KEY_23?: string;
+  GEMINI_API_KEY_24?: string;
+  GEMINI_API_KEY_25?: string;
+  GEMINI_API_KEY_26?: string;
+  GEMINI_API_KEY_27?: string;
+  GEMINI_API_KEY_28?: string;
+  GEMINI_API_KEY_29?: string;
+  GEMINI_API_KEY_30?: string;
+  GEMINI_API_KEY_31?: string;
+  GEMINI_API_KEY_32?: string;
+  GEMINI_API_KEY_33?: string;
+  GEMINI_API_KEY_34?: string;
+  GEMINI_API_KEY_35?: string;
+  GEMINI_API_KEY_36?: string;
+  GEMINI_API_KEY_37?: string;
+  GEMINI_API_KEY_38?: string;
+  GEMINI_API_KEY_39?: string;
+  GEMINI_API_KEY_40?: string;
   GROQ_API_KEY?: string;
   GROQ_API_KEY_2?: string;
   GROQ_MODEL?: string;
@@ -26,18 +65,128 @@ interface Env {
   DEEPSEEK_API_KEY?: string;
   DEEPSEEK_API_KEY_2?: string;
   DEEPSEEK_MODEL?: string;
-  GOOGLE_SEARCH_API_KEY?: string;
-  GOOGLE_SEARCH_ENGINE_ID?: string;
-  GOOGLE_SEARCH_API_KEY_2?: string;
-  GOOGLE_SEARCH_ENGINE_ID_2?: string;
-  GOOGLE_SEARCH_API_KEY_3?: string;
-  GOOGLE_SEARCH_ENGINE_ID_3?: string;
   SEARLO_API_KEY?: string;
   SEARLO_API_KEY_2?: string;
   TAVILY_API_KEY?: string;
   TAVILY_API_KEY_2?: string;
+  TAVILY_API_KEY_3?: string;
+  TAVILY_API_KEY_4?: string;
+  TAVILY_API_KEY_5?: string;
+  TAVILY_API_KEY_6?: string;
+  TAVILY_API_KEY_7?: string;
+  TAVILY_API_KEY_8?: string;
+  TAVILY_API_KEY_9?: string;
+  TAVILY_API_KEY_10?: string;
+  TAVILY_API_KEY_11?: string;
+  TAVILY_API_KEY_12?: string;
+  TAVILY_API_KEY_13?: string;
+  TAVILY_API_KEY_14?: string;
+  TAVILY_API_KEY_15?: string;
+  TAVILY_API_KEY_16?: string;
+  TAVILY_API_KEY_17?: string;
+  TAVILY_API_KEY_18?: string;
+  TAVILY_API_KEY_19?: string;
+  TAVILY_API_KEY_20?: string;
+  TAVILY_API_KEY_21?: string;
+  TAVILY_API_KEY_22?: string;
+  TAVILY_API_KEY_23?: string;
+  TAVILY_API_KEY_24?: string;
+  TAVILY_API_KEY_25?: string;
+  TAVILY_API_KEY_26?: string;
+  TAVILY_API_KEY_27?: string;
+  TAVILY_API_KEY_28?: string;
+  TAVILY_API_KEY_29?: string;
+  TAVILY_API_KEY_30?: string;
+  TAVILY_API_KEY_31?: string;
+  TAVILY_API_KEY_32?: string;
+  TAVILY_API_KEY_33?: string;
+  TAVILY_API_KEY_34?: string;
+  TAVILY_API_KEY_35?: string;
+  TAVILY_API_KEY_36?: string;
+  TAVILY_API_KEY_37?: string;
+  TAVILY_API_KEY_38?: string;
+  TAVILY_API_KEY_39?: string;
+  TAVILY_API_KEY_40?: string;
+  TAVILY_API_KEY_41?: string;
+  TAVILY_API_KEY_42?: string;
+  TAVILY_API_KEY_43?: string;
+  TAVILY_API_KEY_44?: string;
+  TAVILY_API_KEY_45?: string;
+  TAVILY_API_KEY_46?: string;
+  TAVILY_API_KEY_47?: string;
+  TAVILY_API_KEY_48?: string;
+  TAVILY_API_KEY_49?: string;
+  TAVILY_API_KEY_50?: string;
+  TAVILY_API_KEY_51?: string;
+  TAVILY_API_KEY_52?: string;
+  TAVILY_API_KEY_53?: string;
+  TAVILY_API_KEY_54?: string;
+  TAVILY_API_KEY_55?: string;
+  TAVILY_API_KEY_56?: string;
+  TAVILY_API_KEY_57?: string;
+  TAVILY_API_KEY_58?: string;
+  TAVILY_API_KEY_59?: string;
+  TAVILY_API_KEY_60?: string;
   EXA_API_KEY?: string;
   EXA_API_KEY_2?: string;
+  EXA_API_KEY_3?: string;
+  EXA_API_KEY_4?: string;
+  EXA_API_KEY_5?: string;
+  EXA_API_KEY_6?: string;
+  EXA_API_KEY_7?: string;
+  EXA_API_KEY_8?: string;
+  EXA_API_KEY_9?: string;
+  EXA_API_KEY_10?: string;
+  EXA_API_KEY_11?: string;
+  EXA_API_KEY_12?: string;
+  EXA_API_KEY_13?: string;
+  EXA_API_KEY_14?: string;
+  EXA_API_KEY_15?: string;
+  EXA_API_KEY_16?: string;
+  EXA_API_KEY_17?: string;
+  EXA_API_KEY_18?: string;
+  EXA_API_KEY_19?: string;
+  EXA_API_KEY_20?: string;
+  EXA_API_KEY_21?: string;
+  EXA_API_KEY_22?: string;
+  EXA_API_KEY_23?: string;
+  EXA_API_KEY_24?: string;
+  EXA_API_KEY_25?: string;
+  EXA_API_KEY_26?: string;
+  EXA_API_KEY_27?: string;
+  EXA_API_KEY_28?: string;
+  EXA_API_KEY_29?: string;
+  EXA_API_KEY_30?: string;
+  EXA_API_KEY_31?: string;
+  EXA_API_KEY_32?: string;
+  EXA_API_KEY_33?: string;
+  EXA_API_KEY_34?: string;
+  EXA_API_KEY_35?: string;
+  EXA_API_KEY_36?: string;
+  EXA_API_KEY_37?: string;
+  EXA_API_KEY_38?: string;
+  EXA_API_KEY_39?: string;
+  EXA_API_KEY_40?: string;
+  EXA_API_KEY_41?: string;
+  EXA_API_KEY_42?: string;
+  EXA_API_KEY_43?: string;
+  EXA_API_KEY_44?: string;
+  EXA_API_KEY_45?: string;
+  EXA_API_KEY_46?: string;
+  EXA_API_KEY_47?: string;
+  EXA_API_KEY_48?: string;
+  EXA_API_KEY_49?: string;
+  EXA_API_KEY_50?: string;
+  EXA_API_KEY_51?: string;
+  EXA_API_KEY_52?: string;
+  EXA_API_KEY_53?: string;
+  EXA_API_KEY_54?: string;
+  EXA_API_KEY_55?: string;
+  EXA_API_KEY_56?: string;
+  EXA_API_KEY_57?: string;
+  EXA_API_KEY_58?: string;
+  EXA_API_KEY_59?: string;
+  EXA_API_KEY_60?: string;
   ADMIN_PANEL_TOKEN?: string;
 }
 
@@ -45,14 +194,6 @@ interface GoogleSearchResult {
   title: string;
   link: string;
   snippet: string;
-}
-
-interface GoogleSearchResponse {
-  items?: Array<{
-    title: string;
-    link: string;
-    snippet: string;
-  }>;
 }
 
 interface CustomerAnalysis {
@@ -262,17 +403,175 @@ async function verifySocialMedia(links: string[]): Promise<SocialMediaLink[]> {
   return verified;
 }
 
-function getGoogleKeys(env: Env): Array<{ key: string; cx: string }> {
-  const keys: Array<{ key: string; cx: string }> = [];
-  if (env.GOOGLE_SEARCH_API_KEY && env.GOOGLE_SEARCH_ENGINE_ID) {
-    keys.push({ key: env.GOOGLE_SEARCH_API_KEY, cx: env.GOOGLE_SEARCH_ENGINE_ID });
+function getTavilyKeys(env: Env): string[] {
+  const keys: string[] = [];
+  for (const apiKey of [
+    env.TAVILY_API_KEY,
+    env.TAVILY_API_KEY_2,
+    env.TAVILY_API_KEY_3,
+    env.TAVILY_API_KEY_4,
+    env.TAVILY_API_KEY_5,
+    env.TAVILY_API_KEY_6,
+    env.TAVILY_API_KEY_7,
+    env.TAVILY_API_KEY_8,
+    env.TAVILY_API_KEY_9,
+    env.TAVILY_API_KEY_10,
+    env.TAVILY_API_KEY_11,
+    env.TAVILY_API_KEY_12,
+    env.TAVILY_API_KEY_13,
+    env.TAVILY_API_KEY_14,
+    env.TAVILY_API_KEY_15,
+    env.TAVILY_API_KEY_16,
+    env.TAVILY_API_KEY_17,
+    env.TAVILY_API_KEY_18,
+    env.TAVILY_API_KEY_19,
+    env.TAVILY_API_KEY_20,
+    env.TAVILY_API_KEY_21,
+    env.TAVILY_API_KEY_22,
+    env.TAVILY_API_KEY_23,
+    env.TAVILY_API_KEY_24,
+    env.TAVILY_API_KEY_25,
+    env.TAVILY_API_KEY_26,
+    env.TAVILY_API_KEY_27,
+    env.TAVILY_API_KEY_28,
+    env.TAVILY_API_KEY_29,
+    env.TAVILY_API_KEY_30,
+    env.TAVILY_API_KEY_31,
+    env.TAVILY_API_KEY_32,
+    env.TAVILY_API_KEY_33,
+    env.TAVILY_API_KEY_34,
+    env.TAVILY_API_KEY_35,
+    env.TAVILY_API_KEY_36,
+    env.TAVILY_API_KEY_37,
+    env.TAVILY_API_KEY_38,
+    env.TAVILY_API_KEY_39,
+    env.TAVILY_API_KEY_40,
+    env.TAVILY_API_KEY_41,
+    env.TAVILY_API_KEY_42,
+    env.TAVILY_API_KEY_43,
+    env.TAVILY_API_KEY_44,
+    env.TAVILY_API_KEY_45,
+    env.TAVILY_API_KEY_46,
+    env.TAVILY_API_KEY_47,
+    env.TAVILY_API_KEY_48,
+    env.TAVILY_API_KEY_49,
+    env.TAVILY_API_KEY_50,
+    env.TAVILY_API_KEY_51,
+    env.TAVILY_API_KEY_52,
+    env.TAVILY_API_KEY_53,
+    env.TAVILY_API_KEY_54,
+    env.TAVILY_API_KEY_55,
+    env.TAVILY_API_KEY_56,
+    env.TAVILY_API_KEY_57,
+    env.TAVILY_API_KEY_58,
+    env.TAVILY_API_KEY_59,
+    env.TAVILY_API_KEY_60,
+  ]) {
+    if (apiKey) keys.push(apiKey);
   }
-  if (env.GOOGLE_SEARCH_API_KEY_2 && env.GOOGLE_SEARCH_ENGINE_ID_2) {
-    keys.push({ key: env.GOOGLE_SEARCH_API_KEY_2, cx: env.GOOGLE_SEARCH_ENGINE_ID_2 });
+  return keys;
+}
+interface KeyHealthRow {
+  key_index: number;
+  exhausted_until: string | null;
+}
+
+// Cooldown for a key that returned 429/quota-exhausted: Tavily/Exa quotas are
+// monthly, so a 429 means the pool for that key is gone until the next cycle.
+// A 1-day cooldown keeps the row meaningful without burning retries; Gemini
+// daily quotas recover faster, so it uses a shorter cooldown.
+const SEARCH_KEY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const GEMINI_KEY_COOLDOWN_MS = 60 * 1000;
+
+async function loadExhaustedKeyIndexes(env: Env, provider: string): Promise<Set<number>> {
+  try {
+    const result = await env.DB.prepare(
+      `SELECT key_index, exhausted_until FROM api_key_health
+       WHERE provider = ? AND exhausted_until IS NOT NULL AND exhausted_until > datetime('now')`,
+    ).bind(provider).all<KeyHealthRow>();
+    return new Set((result.results ?? []).map((r) => r.key_index));
+  } catch {
+    return new Set(); // table missing or transient error: assume all keys healthy
   }
-  if (env.GOOGLE_SEARCH_API_KEY_3 && env.GOOGLE_SEARCH_ENGINE_ID_3) {
-    keys.push({ key: env.GOOGLE_SEARCH_API_KEY_3, cx: env.GOOGLE_SEARCH_ENGINE_ID_3 });
-  }
+}
+
+async function markKeyExhausted(env: Env, provider: string, keyIndex: number, cooldownMs: number, reason: string): Promise<void> {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO api_key_health (provider, key_index, exhausted_until, last_error, updated_at)
+       VALUES (?, ?, datetime('now', ?), ?, CURRENT_TIMESTAMP)
+       ON CONFLICT (provider, key_index)
+       DO UPDATE SET exhausted_until = datetime('now', ?), last_error = excluded.last_error, updated_at = CURRENT_TIMESTAMP`,
+    ).bind(provider, keyIndex, `+${Math.round(cooldownMs / 1000)} seconds`, reason.slice(0, 200), `+${Math.round(cooldownMs / 1000)} seconds`).run();
+  } catch { /* best effort */ }
+}
+
+interface KeyPoolAttempt {
+  apiKey: string;
+  keyIndex: number;
+}
+
+// Build the per-task key order for a provider:
+// - ONE fixed key per company task (start index derived from customer id), so a
+//   single task never hops between accounts (anti-ban).
+// - Keys known to be exhausted (D1 health table) are excluded entirely.
+// - The remaining keys follow in rotation order as rare fallbacks.
+function buildKeyOrder(keys: string[], startIndex: number, exhausted: Set<number>): KeyPoolAttempt[] {
+  const healthy = keys
+    .map((apiKey, keyIndex) => ({ apiKey, keyIndex }))
+    .filter((k) => !exhausted.has(k.keyIndex));
+  if (healthy.length === 0) return [];
+  const start = ((startIndex % healthy.length) + healthy.length) % healthy.length;
+  return [...healthy.slice(start), ...healthy.slice(0, start)];
+}
+
+function getGeminiKeys(env: Env): Array<{ key: string; keyIndex: number }> {
+  const keys: Array<{ key: string; keyIndex: number }> = [];
+  const raw = [
+    env.GEMINI_API_KEY,
+    env.GEMINI_API_KEY_2,
+    env.GEMINI_API_KEY_3,
+    env.GEMINI_API_KEY_4,
+    env.GEMINI_API_KEY_5,
+    env.GEMINI_API_KEY_6,
+    env.GEMINI_API_KEY_7,
+    env.GEMINI_API_KEY_8,
+    env.GEMINI_API_KEY_9,
+    env.GEMINI_API_KEY_10,
+    env.GEMINI_API_KEY_11,
+    env.GEMINI_API_KEY_12,
+    env.GEMINI_API_KEY_13,
+    env.GEMINI_API_KEY_14,
+    env.GEMINI_API_KEY_15,
+    env.GEMINI_API_KEY_16,
+    env.GEMINI_API_KEY_17,
+    env.GEMINI_API_KEY_18,
+    env.GEMINI_API_KEY_19,
+    env.GEMINI_API_KEY_20,
+    env.GEMINI_API_KEY_21,
+    env.GEMINI_API_KEY_22,
+    env.GEMINI_API_KEY_23,
+    env.GEMINI_API_KEY_24,
+    env.GEMINI_API_KEY_25,
+    env.GEMINI_API_KEY_26,
+    env.GEMINI_API_KEY_27,
+    env.GEMINI_API_KEY_28,
+    env.GEMINI_API_KEY_29,
+    env.GEMINI_API_KEY_30,
+    env.GEMINI_API_KEY_31,
+    env.GEMINI_API_KEY_32,
+    env.GEMINI_API_KEY_33,
+    env.GEMINI_API_KEY_34,
+    env.GEMINI_API_KEY_35,
+    env.GEMINI_API_KEY_36,
+    env.GEMINI_API_KEY_37,
+    env.GEMINI_API_KEY_38,
+    env.GEMINI_API_KEY_39,
+    env.GEMINI_API_KEY_40,
+  ];
+  raw.forEach((key, keyIndex) => {
+    if (key) keys.push({ key, keyIndex });
+  });
   return keys;
 }
 
@@ -283,38 +582,73 @@ function getSearloKeys(env: Env): string[] {
   return keys;
 }
 
-function getTavilyKeys(env: Env): string[] {
-  const keys: string[] = [];
-  if (env.TAVILY_API_KEY) keys.push(env.TAVILY_API_KEY);
-  if (env.TAVILY_API_KEY_2) keys.push(env.TAVILY_API_KEY_2);
-  return keys;
-}
-
 function getExaKeys(env: Env): string[] {
   const keys: string[] = [];
-  if (env.EXA_API_KEY) keys.push(env.EXA_API_KEY);
-  if (env.EXA_API_KEY_2) keys.push(env.EXA_API_KEY_2);
-  return keys;
-}
-
-async function googleSearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
-  const keys = getGoogleKeys(env);
-  for (const { key, cx } of keys) {
-    try {
-      const params = new URLSearchParams({ key, cx, q: query, num: String(MAX_SEARCH_RESULTS) });
-      const resp = await fetchWithTimeout(
-        `https://www.googleapis.com/customsearch/v1?${params.toString()}`,
-        FETCH_TIMEOUT_MS,
-      );
-      if (!resp.ok) continue;
-      const data: GoogleSearchResponse = await resp.json();
-      const items = (data.items ?? []).map((item) => ({
-        title: item.title, link: item.link, snippet: item.snippet,
-      }));
-      if (items.length > 0) return items;
-    } catch { /* try next key */ }
+  for (const apiKey of [
+    env.EXA_API_KEY,
+    env.EXA_API_KEY_2,
+    env.EXA_API_KEY_3,
+    env.EXA_API_KEY_4,
+    env.EXA_API_KEY_5,
+    env.EXA_API_KEY_6,
+    env.EXA_API_KEY_7,
+    env.EXA_API_KEY_8,
+    env.EXA_API_KEY_9,
+    env.EXA_API_KEY_10,
+    env.EXA_API_KEY_11,
+    env.EXA_API_KEY_12,
+    env.EXA_API_KEY_13,
+    env.EXA_API_KEY_14,
+    env.EXA_API_KEY_15,
+    env.EXA_API_KEY_16,
+    env.EXA_API_KEY_17,
+    env.EXA_API_KEY_18,
+    env.EXA_API_KEY_19,
+    env.EXA_API_KEY_20,
+    env.EXA_API_KEY_21,
+    env.EXA_API_KEY_22,
+    env.EXA_API_KEY_23,
+    env.EXA_API_KEY_24,
+    env.EXA_API_KEY_25,
+    env.EXA_API_KEY_26,
+    env.EXA_API_KEY_27,
+    env.EXA_API_KEY_28,
+    env.EXA_API_KEY_29,
+    env.EXA_API_KEY_30,
+    env.EXA_API_KEY_31,
+    env.EXA_API_KEY_32,
+    env.EXA_API_KEY_33,
+    env.EXA_API_KEY_34,
+    env.EXA_API_KEY_35,
+    env.EXA_API_KEY_36,
+    env.EXA_API_KEY_37,
+    env.EXA_API_KEY_38,
+    env.EXA_API_KEY_39,
+    env.EXA_API_KEY_40,
+    env.EXA_API_KEY_41,
+    env.EXA_API_KEY_42,
+    env.EXA_API_KEY_43,
+    env.EXA_API_KEY_44,
+    env.EXA_API_KEY_45,
+    env.EXA_API_KEY_46,
+    env.EXA_API_KEY_47,
+    env.EXA_API_KEY_48,
+    env.EXA_API_KEY_49,
+    env.EXA_API_KEY_50,
+    env.EXA_API_KEY_51,
+    env.EXA_API_KEY_52,
+    env.EXA_API_KEY_53,
+    env.EXA_API_KEY_54,
+    env.EXA_API_KEY_55,
+    env.EXA_API_KEY_56,
+    env.EXA_API_KEY_57,
+    env.EXA_API_KEY_58,
+    env.EXA_API_KEY_59,
+    env.EXA_API_KEY_60,
+  ]) {
+    if (apiKey) keys.push(apiKey);
   }
-  return [];
+  return keys;
 }
 
 async function searloSearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
@@ -337,9 +671,15 @@ async function searloSearch(query: string, env: Env): Promise<GoogleSearchResult
   return [];
 }
 
-async function tavilySearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
+async function tavilySearch(query: string, env: Env, taskKeyIndex = 0): Promise<GoogleSearchResult[]> {
   const keys = getTavilyKeys(env);
-  for (const apiKey of keys) {
+  if (keys.length === 0) return [];
+  const exhausted = await loadExhaustedKeyIndexes(env, "tavily");
+  const order = buildKeyOrder(keys, taskKeyIndex, exhausted);
+  if (order.length === 0) return []; // all keys exhausted: stop calling this cycle
+  // Anti-ban: the assigned key (first in order) serves the whole company task.
+  // We only move to the next key when the assigned one is rejected.
+  for (const { apiKey, keyIndex } of order) {
     try {
       const resp = await fetchWithTimeout(
         `https://api.tavily.com/search`,
@@ -350,20 +690,32 @@ async function tavilySearch(query: string, env: Env): Promise<GoogleSearchResult
           body: JSON.stringify({ query, max_results: MAX_SEARCH_RESULTS, include_answer: false }),
         },
       );
+      if (resp.status === 429 || resp.status === 401 || resp.status === 403) {
+        // Quota used up / key rejected: disable the key for the cooldown period
+        // so no later task calls it again, then fall back to the next key.
+        await markKeyExhausted(env, "tavily", keyIndex, SEARCH_KEY_COOLDOWN_MS, `HTTP ${resp.status}`);
+        continue;
+      }
       if (!resp.ok) continue;
       const data = await resp.json() as { results?: Array<{ title: string; url: string; content: string }> };
       const items = (data.results ?? []).map((item) => ({
         title: item.title, link: item.url, snippet: item.content?.slice(0, 200) || "",
       }));
-      if (items.length > 0) return items;
-    } catch { /* try next key */ }
+      return items;
+    } catch {
+      // Network error: try the next key
+    }
   }
   return [];
 }
 
-async function exaSearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
+async function exaSearch(query: string, env: Env, taskKeyIndex = 0): Promise<GoogleSearchResult[]> {
   const keys = getExaKeys(env);
-  for (const apiKey of keys) {
+  if (keys.length === 0) return [];
+  const exhausted = await loadExhaustedKeyIndexes(env, "exa");
+  const order = buildKeyOrder(keys, taskKeyIndex, exhausted);
+  if (order.length === 0) return []; // all keys exhausted: stop calling this cycle
+  for (const { apiKey, keyIndex } of order) {
     try {
       const resp = await fetchWithTimeout(
         `https://api.exa.ai/search`,
@@ -374,13 +726,19 @@ async function exaSearch(query: string, env: Env): Promise<GoogleSearchResult[]>
           body: JSON.stringify({ query, numResults: MAX_SEARCH_RESULTS, type: "neural" }),
         },
       );
+      if (resp.status === 429 || resp.status === 401 || resp.status === 403) {
+        await markKeyExhausted(env, "exa", keyIndex, SEARCH_KEY_COOLDOWN_MS, `HTTP ${resp.status}`);
+        continue;
+      }
       if (!resp.ok) continue;
       const data = await resp.json() as { results?: Array<{ title: string; url: string; text: string }> };
       const items = (data.results ?? []).map((item) => ({
         title: item.title, link: item.url, snippet: item.text?.slice(0, 200) || "",
       }));
-      if (items.length > 0) return items;
-    } catch { /* try next key */ }
+      return items;
+    } catch {
+      // Network error: try the next key
+    }
   }
   return [];
 }
@@ -421,18 +779,15 @@ async function duckduckgoSearch(query: string): Promise<GoogleSearchResult[]> {
   }
 }
 
-async function multiEngineSearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
-  // Try each engine with key rotation, fallback to next engine
-  let results = await googleSearch(query, env);
+async function multiEngineSearch(query: string, env: Env, tavilyKeyIndex = 0): Promise<GoogleSearchResult[]> {
+  // Tavily is the primary fleet (up to 60 keys); other engines are fallbacks
+  let results = await tavilySearch(query, env, tavilyKeyIndex);
   if (results.length > 0) return results;
 
   results = await searloSearch(query, env);
   if (results.length > 0) return results;
 
-  results = await tavilySearch(query, env);
-  if (results.length > 0) return results;
-
-  results = await exaSearch(query, env);
+  results = await exaSearch(query, env, tavilyKeyIndex);
   if (results.length > 0) return results;
 
   // DuckDuckGo is always available (no API key needed)
@@ -440,13 +795,13 @@ async function multiEngineSearch(query: string, env: Env): Promise<GoogleSearchR
   return results;
 }
 
-async function searchCompanyInfo(companyName: string, country: string, env: Env): Promise<string> {
+async function searchCompanyInfo(companyName: string, country: string, env: Env, tavilyKeyIndex = 0): Promise<string> {
   const allResults: GoogleSearchResult[] = [];
   const seenUrls = new Set<string>();
 
   for (const queryFn of SEARCH_QUERIES) {
     const query = queryFn(companyName, country);
-    const results = await multiEngineSearch(query, env);
+    const results = await multiEngineSearch(query, env, tavilyKeyIndex);
     for (const r of results) {
       if (!seenUrls.has(r.link)) {
         seenUrls.add(r.link);
@@ -475,8 +830,8 @@ async function searchCompanyInfo(companyName: string, country: string, env: Env)
   }
 
   return pages.length > 0
-    ? `\n\n--- Google 搜索结果 (${allResults.length}条) ---\n${pages.join("\n")}`
-    : `\n\n--- Google 搜索摘要 (${allResults.length}条) ---\n${allResults.map((r) => `${r.title}: ${r.snippet}`).join("\n")}`;
+    ? `\n\n--- 搜索结果页面 (${allResults.length}条) ---\n${pages.join("\n")}`
+    : `\n\n--- 搜索结果摘要 (${allResults.length}条) ---\n${allResults.map((r) => `${r.title}: ${r.snippet}`).join("\n")}`;
 }
 
 async function fetchAdditionalSources(companyName: string, domain: string, env: Env): Promise<string> {
@@ -745,11 +1100,18 @@ async function analyzeWithGemini(
   env: Env,
   controller: AbortController,
 ): Promise<CustomerAnalysis | null> {
-  const keys: Array<{ key: string; model: string }> = [];
-  if (env.GEMINI_API_KEY) {
-    keys.push({ key: env.GEMINI_API_KEY, model: env.GEMINI_MODEL || DEFAULT_MODEL });
-  }
-  for (const { key, model } of keys) {
+  const pool = getGeminiKeys(env);
+  if (pool.length === 0) return null;
+  const exhausted = await loadExhaustedKeyIndexes(env, "gemini");
+  // One fixed Gemini key per company task (index derived from customer.id):
+  // all models tried on the same key first; only a rejected/exhausted key
+  // rotates to the next key.
+  const order = buildKeyOrder(pool.map((p) => p.key), customer.id, exhausted)
+    .map((attempt) => pool.find((p) => p.key === attempt.apiKey)!)
+    .filter((p) => !exhausted.has(p.keyIndex));
+  if (order.length === 0) return null; // all keys cooling down
+  for (const { key, keyIndex } of order) {
+    const model = env.GEMINI_MODEL || DEFAULT_MODEL;
     const models = [model, ...FALLBACK_MODELS].filter(
       (m, i, all) => all.indexOf(m) === i,
     );
@@ -838,6 +1200,11 @@ async function analyzeWithGemini(
             payload as { candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }> }
           ).candidates?.[0]?.content?.parts?.[0]?.text;
           if (typeof content === "string") return parseAnalysis(content);
+        }
+        if (response.status === 429) {
+          // Key quota exhausted for now: cool it down and rotate to next key
+          await markKeyExhausted(env, "gemini", keyIndex, GEMINI_KEY_COOLDOWN_MS, `HTTP 429 on ${m}`);
+          break; // next key
         }
       } catch { /* try next model */ }
     }
@@ -990,7 +1357,7 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
     // Step 2: Google search for company information
     const companyName = customer.company_name || customer.company_id;
     const country = customer.country || "";
-    const googleResults = await searchCompanyInfo(companyName, country, env);
+    const googleResults = await searchCompanyInfo(companyName, country, env, customer.id);
 
     // Step 3: Fetch additional sources (sub-pages, social media)
     const additionalText = await fetchAdditionalSources(companyName, customer.domain, env);
