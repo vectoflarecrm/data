@@ -1020,19 +1020,49 @@ function parseAnalysis(content: string): CustomerAnalysis {
   if (!("personas_and_solutions" in object)) {
     throw new Error("AI response has no personas_and_solutions");
   }
+  // Sanitize a single contact field value: keep pure data, move prose elsewhere.
+  const cleanField = (value: unknown): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const v = value.trim();
+    if (!v) return undefined;
+    // Reject values that are prose/placeholders rather than data (e.g. phones
+    // annotated with sources, or "信息不足，需进一步验证" stuffed into fields).
+    if (/[。，]/.test(v) && !/^[+\d][\d\s().-]+$/.test(v)) return undefined;
+    if (v.includes("信息不足") || v.includes("需进一步验证") || v.includes("来源：") || v.includes("Source:")) return undefined;
+    return v;
+  };
+  const cleanEmail = (value: unknown): string | undefined => {
+    const v = cleanField(value);
+    // Must look like a full email address, not a domain or a note.
+    return v && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v) ? v.toLowerCase() : undefined;
+  };
+  const cleanPhone = (value: unknown): string | undefined => {
+    const v = cleanField(value);
+    if (!v) return undefined;
+    // Normalize "ext." extensions and keep only plausible phone characters.
+    const compact = v.replace(/ext\.?\s*\d+$/i, "").trim();
+    return /^[+\d][\d\s()./-]{6,}$/.test(compact) ? compact : undefined;
+  };
+  const cleanUrl = (value: unknown): string | undefined => {
+    const v = cleanField(value);
+    return v && /^https?:\/\//i.test(v) ? v : undefined;
+  };
   const foundContacts = Array.isArray(object.found_contacts)
     ? (object.found_contacts as Array<Record<string, unknown>>)
         .filter((c) => c && typeof c === "object")
         .map((c) => ({
-          first_name: typeof c.first_name === "string" ? c.first_name : undefined,
-          last_name: typeof c.last_name === "string" ? c.last_name : undefined,
-          title: typeof c.title === "string" ? c.title : undefined,
-          email: typeof c.email === "string" ? c.email : undefined,
-          cellphone: typeof c.cellphone === "string" ? c.cellphone : undefined,
-          whatsapp: typeof c.whatsapp === "string" ? c.whatsapp : undefined,
-          linkedin_url: typeof c.linkedin_url === "string" ? c.linkedin_url : undefined,
-          source: typeof c.source === "string" ? c.source : undefined,
+          first_name: cleanField(c.first_name),
+          last_name: cleanField(c.last_name),
+          title: cleanField(c.title),
+          email: cleanEmail(c.email),
+          cellphone: cleanPhone(c.cellphone),
+          whatsapp: cleanPhone(c.whatsapp),
+          linkedin_url: cleanUrl(c.linkedin_url),
+          source: cleanField(c.source),
         }))
+        // Hard entry bar: a contact must carry a real name, or a valid
+        // email, or a valid phone — otherwise drop it entirely.
+        .filter((c) => c.first_name || c.last_name || c.email || c.cellphone || c.whatsapp)
     : [];
   return {
     customer_segment: object.customer_segment.trim(),
@@ -1077,11 +1107,17 @@ const AI_SYSTEM_PROMPT = `你是一名高级B2B市场数据分析师和营销专
 - 只使用已验证的社交媒体链接，不得自行猜测或编造社媒地址
 - 记录每个社交媒体平台的账号名称和URL
 
-核心任务二——个性化开发内容生成：
-- 基于公司的全文字信息（产品、服务、新闻、博客、社媒内容），为每个联系人生成个性化的开发邮件和WhatsApp消息
-- 邮件和消息必须引用该公司的具体内容（如他们销售的产品、最近的活动、市场定位等）
+核心任务四——个性化开发信要点提炼：
+- 基于公司的全文字信息（产品、服务、新闻、博客、社媒内容），总结可用于个性化开发信的要点（推荐引用的具体产品、活动、市场定位），写入 remarks
 - 语言风格专业但亲切，适合B2B水上运动行业
-- 每条开发内容不超过200字，简洁有力
+
+联系人入库标准（硬性要求）：
+- 每条联系人必须至少包含：真实姓名（名+姓），或 真实邮箱，或 真实电话号码——三者至少其一
+- 完全没有任何姓名和联系方式的条目禁止输出（宁缺毋滥）
+- whatsapp 字段只填纯号码（如 +34600123456），禁止附加解释文字、来源说明或括号注释；来源信息一律写入 source 字段
+- 数值字段（email/cellphone/whatsapp/linkedin_url）只放数据本身，说明性文字写入 source
+- email 必须是页面上逐字出现的完整地址；只有域名（如 @company.com）而无完整地址时，email 留空并在 source 中记录该域名
+- 「信息不足，需进一步验证」这类文字禁止写入任何联系方式字段，只能写入 remarks
 
 分析要求：
 - 充分利用公司的所有文字信息（产品描述、公司介绍、新闻、博客、社媒帖子等）
