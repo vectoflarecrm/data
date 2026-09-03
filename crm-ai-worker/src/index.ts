@@ -1555,12 +1555,25 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
       ).bind(customer.company_id).first<{ max_seq: number }>();
       let nextSeq = (maxSeqResult?.max_seq ?? 0) + 1;
 
+      // Load existing contact fingerprints for this company so re-researched
+      // companies don't accumulate duplicate rows on retry.
+      const existing = await env.DB.prepare(
+        `SELECT first_name, last_name, email, cellphone, whatsapp FROM contacts WHERE company_id = ?`
+      ).bind(customer.company_id).all<{ first_name: string | null; last_name: string | null; email: string | null; cellphone: string | null; whatsapp: string | null }>();
+      const fingerprint = (c: { first_name?: string | null; last_name?: string | null; email?: string | null; cellphone?: string | null; whatsapp?: string | null }) =>
+        [c.first_name, c.last_name, c.email, c.cellphone, c.whatsapp].map((v) => (v || "").trim().toLowerCase()).join("|");
+      const seen = new Set((existing.results ?? []).map(fingerprint));
+
       const contactStmts: D1PreparedStatement[] = [];
       for (const ct of analysis.found_contacts) {
         // Only save contacts with at least a name or email
         const hasName = ct.first_name || ct.last_name;
         const hasContact = ct.email || ct.cellphone || ct.whatsapp;
         if (!hasName && !hasContact) continue;
+
+        const fp = fingerprint(ct);
+        if (seen.has(fp)) continue; // skip duplicates (within batch and vs. DB)
+        seen.add(fp);
 
         const contactId = `${customer.display_id || customer.company_id}_${String(nextSeq).padStart(3, "0")}`;
         contactStmts.push(
