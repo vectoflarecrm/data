@@ -65,6 +65,10 @@ interface Env {
   DEEPSEEK_API_KEY?: string;
   DEEPSEEK_API_KEY_2?: string;
   DEEPSEEK_MODEL?: string;
+  OPENROUTER_API_KEY?: string;
+  OPENROUTER_API_KEY_2?: string;
+  OPENROUTER_API_KEY_3?: string;
+  OPENROUTER_MODEL?: string;
   SEARLO_API_KEY?: string;
   SEARLO_API_KEY_2?: string;
   TAVILY_API_KEY?: string;
@@ -1382,6 +1386,25 @@ async function analyzeWithDeepSeek(
   return null;
 }
 
+async function analyzeWithOpenRouter(
+  customer: CustomerRow,
+  researchContext: string,
+  env: Env,
+  controller: AbortController,
+): Promise<CustomerAnalysis | null> {
+  const keys: Array<{ key: string; model: string }> = [];
+  const model = env.OPENROUTER_MODEL || "google/gemini-2.5-flash";
+  if (env.OPENROUTER_API_KEY) keys.push({ key: env.OPENROUTER_API_KEY, model });
+  if (env.OPENROUTER_API_KEY_2) keys.push({ key: env.OPENROUTER_API_KEY_2, model });
+  if (env.OPENROUTER_API_KEY_3) keys.push({ key: env.OPENROUTER_API_KEY_3, model });
+  for (const { key, model: m } of keys) {
+    try {
+      return await openaiCompatibleAnalyze("https://openrouter.ai/api/v1/chat/completions", key, m, customer, researchContext, controller);
+    } catch { /* try next key */ }
+  }
+  return null;
+}
+
 async function analyzeCustomer(
   customer: CustomerRow,
   researchContext: string,
@@ -1394,7 +1417,8 @@ async function analyzeCustomer(
       getGeminiKeys(env).length > 0 ||
       Boolean(env.GROQ_API_KEY || env.GROQ_API_KEY_2) ||
       Boolean(env.MISTRAL_API_KEY || env.MISTRAL_API_KEY_2) ||
-      Boolean(env.DEEPSEEK_API_KEY || env.DEEPSEEK_API_KEY_2);
+      Boolean(env.DEEPSEEK_API_KEY || env.DEEPSEEK_API_KEY_2) ||
+      Boolean(env.OPENROUTER_API_KEY || env.OPENROUTER_API_KEY_2 || env.OPENROUTER_API_KEY_3);
     if (!hasAnyProviderKey) {
       // Configuration error, not transient: fail immediately with a clear
       // message so the panel shows what is actually missing.
@@ -1414,6 +1438,10 @@ async function analyzeCustomer(
 
     // Fallback to DeepSeek
     result = await analyzeWithDeepSeek(customer, researchContext, env, controller);
+    if (result) return result;
+
+    // Fallback to OpenRouter
+    result = await analyzeWithOpenRouter(customer, researchContext, env, controller);
     if (result) return result;
 
     // Keys exist but every provider declined (rate limits, server errors).

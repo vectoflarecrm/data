@@ -23,6 +23,8 @@ export interface AdminEnv extends GmailEnv {
   GROQ_API_KEY?: string;
   MISTRAL_API_KEY?: string;
   DEEPSEEK_API_KEY?: string;
+  OPENROUTER_API_KEY?: string;
+  OPENROUTER_MODEL?: string;
 }
 
 interface AdminCustomer {

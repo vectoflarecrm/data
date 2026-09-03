@@ -254,7 +254,7 @@ Worker 内置统一的多 Key 池调度（`api_key_health` 表），核心思路
 4. **仅必要时才切换**：只有分配的 Key 被拒绝/限流时才降级到下一个健康 Key，正常情况下整个任务始终用一个账号；
 5. **查询间延时**：每次搜索之间间隔 2 秒（`INTER_SOURCE_DELAY_MS`），每家公司之间间隔 5 秒（`INTER_CUSTOMER_DELAY_MS`），模拟人类节奏，避免瞬时高频请求；
 6. **全部 Key 耗尽即静默停止**：若某引擎所有 Key 都在冷却期，直接跳过该引擎（返回空结果），不会反复敲打已耗尽的账号；
-7. **多引擎/AI 分流**：搜索 Tavily → Searlo → Exa → DuckDuckGo；AI Gemini → Groq → Mistral → DeepSeek，进一步降低单 provider 压力；
+7. **多引擎/AI 分流**：搜索 Tavily → Searlo → Exa → DuckDuckGo；AI Gemini → Groq → Mistral → DeepSeek → OpenRouter，进一步降低单 provider 压力；
 8. **无 Key 也可运行**：不配置任何搜索 Key 时自动降级为 DuckDuckGo，不会报错。
 
 #### Gemini（AI Studio 免费 Key）设置
@@ -264,6 +264,23 @@ Worker 内置统一的多 Key 池调度（`api_key_health` 表），核心思路
 3. 需要 40 个 Key 时准备 40 个 Google 账号，各自在 AI Studio 创建一个 Key；
 4. 将 Key 按序号填入 GitHub Secrets：`GEMINI_API_KEY`、`GEMINI_API_KEY_2` … `GEMINI_API_KEY_40`；
 5. Worker 每 5 分钟只处理 1 家公司（每任务 1 次 AI 调用 + 最多 4 次模型重试），单 Key 每日消耗远低于免费 RPD 上限；429 限流时该 Key 冷却 60 秒后自动恢复。
+
+#### OpenRouter（统一网关备用 AI）设置
+
+OpenRouter（https://openrouter.ai）聚合了各家模型（Gemini/Claude/GPT/Llama 等），一个 Key 即可调用多种模型，适合作为 Gemini 全部限流时的兜底：
+
+1. 注册 https://openrouter.ai → Keys 页面创建 API Key（`sk-or-` 开头）；
+2. 部分模型（如 `google/gemini-2.5-flash`）带 `:free` 后缀的免费版本，免费模型有每分钟/每日限额，付费模型按量计费（可设置月度限额防超支）；
+3. 填入 GitHub Secrets：
+
+```text
+OPENROUTER_API_KEY          = sk-or-...
+OPENROUTER_API_KEY_2        = sk-or-...（第二个 Key，可选）
+OPENROUTER_API_KEY_3        = sk-or-...（第三个 Key，可选）
+OPENROUTER_MODEL            = google/gemini-2.5-flash   # 可选，默认 google/gemini-2.5-flash；免费模型如 google/gemini-2.0-flash-exp:free
+```
+
+4. OpenRouter 在 AI 降级链中的位置：Gemini → Groq → Mistral → DeepSeek → **OpenRouter**；仅在前面所有 Provider 都不可用时才会调用。
 
 #### Tavily 设置步骤
 

@@ -393,11 +393,12 @@ async function callAiForOutreach(
     } catch { /* try next */ }
   }
 
-  // Try OpenAI-compatible APIs (Groq, Mistral, DeepSeek)
+  // Try OpenAI-compatible APIs (Groq, Mistral, DeepSeek, OpenRouter)
   const openaiKeys = [
     { key: env.GROQ_API_KEY, url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.1-70b-versatile" },
     { key: env.MISTRAL_API_KEY, url: "https://api.mistral.ai/v1/chat/completions", model: "mistral-large-latest" },
     { key: env.DEEPSEEK_API_KEY, url: "https://api.deepseek.com/v1/chat/completions", model: "deepseek-chat" },
+    { key: env.OPENROUTER_API_KEY, url: "https://openrouter.ai/api/v1/chat/completions", model: env.OPENROUTER_MODEL || "google/gemini-2.5-flash" },
   ];
   for (const api of openaiKeys) {
     if (!api.key) continue;
