@@ -1223,7 +1223,12 @@ async function analyzeWithGemini(
   const order = buildKeyOrder(pool.map((p) => p.key), customer.id, exhausted)
     .map((attempt) => pool.find((p) => p.key === attempt.apiKey)!)
     .filter((p) => !exhausted.has(p.keyIndex));
-  if (order.length === 0) return null; // all keys cooling down
+  if (order.length === 0) {
+    // All keys are in cooldown (e.g. HTTP 429 rate limit). This is transient —
+    // surface it as a retryable condition instead of silently falling through
+    // to the (unconfigured) fallback providers.
+    throw new Error("HTTP 429: all Gemini keys are cooling down (rate limited)");
+  }
   for (const { key, keyIndex } of order) {
     const model = env.GEMINI_MODEL || DEFAULT_MODEL;
     const models = [model, ...FALLBACK_MODELS].filter(
@@ -1385,6 +1390,16 @@ async function analyzeCustomer(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
   try {
+    const hasAnyProviderKey =
+      getGeminiKeys(env).length > 0 ||
+      Boolean(env.GROQ_API_KEY || env.GROQ_API_KEY_2) ||
+      Boolean(env.MISTRAL_API_KEY || env.MISTRAL_API_KEY_2) ||
+      Boolean(env.DEEPSEEK_API_KEY || env.DEEPSEEK_API_KEY_2);
+    if (!hasAnyProviderKey) {
+      // Configuration error, not transient: fail immediately with a clear
+      // message so the panel shows what is actually missing.
+      throw new Error("所有AI Provider均不可用，请配置至少一个AI API Key");
+    }
     // Try Gemini first
     let result = await analyzeWithGemini(customer, researchContext, env, controller);
     if (result) return result;
@@ -1401,7 +1416,9 @@ async function analyzeCustomer(
     result = await analyzeWithDeepSeek(customer, researchContext, env, controller);
     if (result) return result;
 
-    throw new Error("所有AI Provider均不可用，请配置至少一个AI API Key");
+    // Keys exist but every provider declined (rate limits, server errors).
+    // Transient — the message makes isRetryableAiError() re-queue it.
+    throw new Error("所有AI Provider暂时不可用（限流或服务错误），将在下个周期重试");
   } finally {
     clearTimeout(timer);
   }
@@ -1428,17 +1445,20 @@ async function claimCustomers(env: Env): Promise<CustomerRow[]> {
       LIMIT ?
     )
     RETURNING id, company_id, display_id, domain, status, company_name, country, customer_segment, personas_and_solutions, remarks
-  `).bind(BATCH_SIZE).all<CustomerRow>();
+  `  ).bind(BATCH_SIZE).all<CustomerRow>();
   return result.results;
 }
 
 function isRetryableAiError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const msg = error.message;
-  // Gemini429 (rate limit),500/502/503/504 (server errors) are retryable
+  // Gemini 429 (rate limit), 500/502/503/504 (server errors) are retryable
   for (const code of AI_RETRYABLE_STATUSES) {
     if (msg.includes(`HTTP ${code}`)) return true;
   }
+  // All providers busy (rate limited / transient server errors): re-queue for
+  // the next cron run instead of burning the record as a permanent failure.
+  if (msg.includes("暂时不可用")) return true;
   return false;
 }
 

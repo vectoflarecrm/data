@@ -303,8 +303,18 @@ class TestCompositeAndOrchestrator:
 
 @pytest.mark.asyncio
 async def test_playwright_provider_unavailable_when_missing() -> None:
-    with pytest.raises(ProviderUnavailable):
-        PlaywrightProvider()
+    import sys
+    # Temporarily remove playwright from importable modules
+    saved = sys.modules.pop("playwright.async_api", None)
+    sys.modules["playwright.async_api"] = None  # type: ignore[assignment]
+    try:
+        with pytest.raises(ProviderUnavailable):
+            PlaywrightProvider()
+    finally:
+        if saved is not None:
+            sys.modules["playwright.async_api"] = saved
+        else:
+            sys.modules.pop("playwright.async_api", None)
 
 
 async def _raise(exc: Exception) -> CrawlResult:
