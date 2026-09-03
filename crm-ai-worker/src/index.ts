@@ -1644,7 +1644,11 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
     `).bind(analysis.customer_segment, analysis.product_categories, analysis.company_size, analysis.geographic_coverage, personas, remarks, customer.id);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    const shouldRetry = isRetryableAiError(error) && retryCount < MAX_RETRIES;
+    // Rate-limit rejections (429 / full-pool cooldown) are infinite-retry:
+    // they depend on other tasks releasing quota, not on this record being
+    // broken, so they must never consume a retry slot or burn the record.
+    const isRateLimit = reason.includes("HTTP 429") || reason.includes("暂时不可用");
+    const shouldRetry = isRetryableAiError(error) && (isRateLimit || retryCount < MAX_RETRIES);
 
     if (shouldRetry) {
       const cleanRemarks = stripRetryTag(customer.remarks ?? "");
