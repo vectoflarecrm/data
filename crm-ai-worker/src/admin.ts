@@ -343,10 +343,53 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
     if (path.startsWith("/admin/api/outreach/settings/") && request.method === "PATCH") {
       const brandName = decodeURIComponent(path.split("/").pop() || "");
       const body = (await request.json()) as Record<string, unknown>;
-      const updates: { company_intro?: string; enabled?: boolean } = {};
+      const updates: { company_intro?: string; enabled?: boolean; sender_email?: string | null; sender_name?: string | null; signature?: string | null } = {};
       if (typeof body.company_intro === "string") updates.company_intro = body.company_intro;
       if (typeof body.enabled === "boolean") updates.enabled = body.enabled;
+      if (typeof body.sender_email === "string") updates.sender_email = body.sender_email.trim() || null;
+      if (typeof body.sender_name === "string") updates.sender_name = body.sender_name.trim() || null;
+      if (typeof body.signature === "string") updates.signature = body.signature || null;
       await updateBrandSetting(env, brandName, updates);
+      return jsonResponse({ ok: true });
+    }
+
+    // ── Brand attachments ──
+    // GET /admin/api/outreach/attachments?brand=X - list metadata
+    if (path === "/admin/api/outreach/attachments" && request.method === "GET") {
+      const brand = url.searchParams.get("brand");
+      if (!brand) return jsonResponse({ detail: "brand is required" }, 400);
+      const rows = await env.DB.prepare(
+        `SELECT id, brand_name, filename, mime_type, size_bytes, created_at
+         FROM outreach_attachments WHERE brand_name = ? ORDER BY created_at`,
+      ).bind(brand).all();
+      return jsonResponse({ attachments: rows.results ?? [] });
+    }
+    // POST /admin/api/outreach/attachments - upload (JSON: brand, filename, mime_type, content_base64)
+    if (path === "/admin/api/outreach/attachments" && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as {
+        brand?: string; filename?: string; mime_type?: string; content_base64?: string;
+      };
+      if (!body.brand || !body.filename || !body.content_base64) {
+        return jsonResponse({ detail: "brand, filename and content_base64 are required" }, 400);
+      }
+      const b64 = body.content_base64.replace(/^data:[^;]+;base64,/, "");
+      const sizeBytes = Math.floor((b64.length * 3) / 4);
+      if (sizeBytes > 4 * 1024 * 1024) return jsonResponse({ detail: "附件不能超过 4 MB" }, 400);
+      const count = await env.DB.prepare(
+        "SELECT COUNT(*) AS cnt FROM outreach_attachments WHERE brand_name = ?",
+      ).bind(body.brand).first<{ cnt: number }>();
+      if ((count?.cnt ?? 0) >= 5) return jsonResponse({ detail: "每个品牌最多 5 个附件" }, 400);
+      await env.DB.prepare(
+        `INSERT INTO outreach_attachments (brand_name, filename, mime_type, size_bytes, content_base64)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).bind(body.brand, body.filename.slice(0, 200), body.mime_type || "application/octet-stream", sizeBytes, b64).run();
+      return jsonResponse({ ok: true, size_bytes: sizeBytes });
+    }
+    // DELETE /admin/api/outreach/attachments/:id
+    if (path.startsWith("/admin/api/outreach/attachments/") && request.method === "DELETE") {
+      const id = Number(path.split("/").pop());
+      if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
+      await env.DB.prepare("DELETE FROM outreach_attachments WHERE id = ?").bind(id).run();
       return jsonResponse({ ok: true });
     }
 
@@ -391,8 +434,11 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
         params.push(body.brand);
       }
       const drafts = await env.DB.prepare(
-        `SELECT id, email_to, subject, body FROM outreach_emails ${clause} ORDER BY id LIMIT ?`,
-      ).bind(...params, limit).all<{ id: number; email_to: string; subject: string | null; body: string | null }>();
+        `SELECT e.id, e.email_to, e.subject, e.body, e.brand_name, s.sender_email, s.sender_name
+         FROM outreach_emails e
+         LEFT JOIN outreach_settings s ON s.brand_name = e.brand_name
+         ${clause} ORDER BY e.id LIMIT ?`,
+      ).bind(...params, limit).all<{ id: number; email_to: string; subject: string | null; body: string | null; brand_name: string | null; sender_email: string | null; sender_name: string | null }>();
 
       const quota = await getQuota(env);
       const delayMs = sendDelayMs(env);
@@ -405,7 +451,11 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
         }
         if (sent > 0) await new Promise((r) => setTimeout(r, delayMs));
         try {
-          const r = await sendOutreachEmail(env, draft);
+          const r = await sendOutreachEmail(env, draft, {
+            fromEmail: draft.sender_email,
+            fromName: draft.sender_name,
+            brandName: draft.brand_name,
+          });
           if (r.ok) sent++;
           results.push({ id: draft.id, ok: r.ok, error: r.error });
         } catch (e) {
@@ -444,13 +494,25 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
       const id = Number(path.split("/")[path.split("/").length - 2]);
       if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
       const row = await env.DB.prepare(
-        "SELECT id, email_to, subject, body, status FROM outreach_emails WHERE id = ?",
-      ).bind(id).first<{ id: number; email_to: string; subject: string | null; body: string | null; status: string }>();
+        "SELECT id, email_to, subject, body, status, brand_name FROM outreach_emails WHERE id = ?",
+      ).bind(id).first<{ id: number; email_to: string; subject: string | null; body: string | null; status: string; brand_name: string | null }>();
+      if (!row) return jsonResponse({ detail: "Email not found" }, 404);
       if (!row) return jsonResponse({ detail: "Email not found" }, 404);
       if (row.status !== "draft") return jsonResponse({ detail: "只有草稿可以发送" }, 400);
-      const result = await sendOutreachEmail(env, row);
+      // Resolve the sending identity from the email's brand (falls back to
+      // the global GMAIL_SENDER_EMAIL when the brand has none).
+      let fromEmail: string | null = null;
+      let fromName: string | null = null;
+      if (row.brand_name) {
+        const brand = await env.DB.prepare(
+          "SELECT sender_email, sender_name FROM outreach_settings WHERE brand_name = ?",
+        ).bind(row.brand_name).first<{ sender_email: string | null; sender_name: string | null }>();
+        fromEmail = brand?.sender_email ?? null;
+        fromName = brand?.sender_name ?? null;
+      }
+      const result = await sendOutreachEmail(env, row, { fromEmail, fromName, brandName: row.brand_name });
       const quota = await getQuota(env);
-      return jsonResponse({ ok: result.ok, error: result.error, gmail_message_id: result.gmail_message_id, quota });
+      return jsonResponse({ ok: result.ok, error: result.error, gmail_message_id: result.gmail_message_id, from: fromEmail, quota });
     }
 
     // DELETE /admin/api/outreach/emails/:id - Delete email
@@ -743,7 +805,9 @@ function api(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){loca
 document.querySelectorAll('.tab').forEach(function(tab){tab.onclick=function(){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tab-content').forEach(function(c){c.style.display='none'});tab.classList.add('active');document.getElementById('tab-'+tab.dataset.tab).style.display='block';if(tab.dataset.tab==='settings')loadBrands();if(tab.dataset.tab==='emails'){loadStats();loadEmails();loadQuota()}}});
 
 // Brand settings
-function loadBrands(){api('/admin/api/outreach/settings').then(function(d){var h='';d.settings.forEach(function(b){h+='<div class="brand-card"><div class="brand-header"><div><span class="brand-name">'+esc(b.brand_name)+'</span> <span class="brand-category">'+esc(b.product_category)+'</span></div><label class="toggle"><input type="checkbox" '+(b.enabled?'checked':'')+' data-brand="'+esc(b.brand_name)+'" class="enable-toggle"><span class="slider"></span></label></div><label style="font-weight:600;font-size:13px;color:#475569">公司简介</label><textarea class="intro-textarea" data-brand="'+esc(b.brand_name)+'">'+esc(b.company_intro)+'</textarea><div style="margin-top:10px;text-align:right"><button class="btn btn-primary btn-sm save-intro" data-brand="'+esc(b.brand_name)+'">💾 保存简介</button></div></div>'});document.getElementById('brandsArea').innerHTML=h||'<p>暂无品牌配置</p>';document.querySelectorAll('.enable-toggle').forEach(function(el){el.onchange=function(){var brand=el.dataset.brand;var enabled=el.checked;api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enabled})}).then(function(){showToast(brand+(enabled?' 已启用':' 已禁用'),true)}).catch(function(e){showToast(e.message,false);el.checked=!enabled)}});document.querySelectorAll('.save-intro').forEach(function(el){el.onclick=function(){var brand=el.dataset.brand;var ta=document.querySelector('.intro-textarea[data-brand="'+brand+'"]');api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({company_intro:ta.value})}).then(function(){showToast(brand+' 简介已保存',true)}).catch(function(e){showToast(e.message,false)}}})}).catch(function(e){document.getElementById('brandsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>'})}
+function loadBrands(){api('/admin/api/outreach/settings').then(function(d){var h='';d.settings.forEach(function(b){h+='<div class="brand-card"><div class="brand-header"><div><span class="brand-name">'+esc(b.brand_name)+'</span> <span class="brand-category">'+esc(b.product_category)+'</span></div><label class="toggle"><input type="checkbox" '+(b.enabled?'checked':'')+' data-brand="'+esc(b.brand_name)+'" class="enable-toggle"><span class="slider"></span></label></div><label style="font-weight:600;font-size:13px;color:#475569">发件身份（From 邮箱 / 显示名）</label><div style="display:flex;gap:8px;margin-top:4px"><input class="sender-email" data-brand="'+esc(b.brand_name)+'" placeholder="sender@yourdomain.com" value="'+esc(b.sender_email||'')+'" style="flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"><input class="sender-name" data-brand="'+esc(b.brand_name)+'" placeholder="Toby | Afarer Team" value="'+esc(b.sender_name||'')+'" style="flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"></div><label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件签名（原样附加在正文末尾）</label><textarea class="signature-textarea" data-brand="'+esc(b.brand_name)+'" style="width:100%;min-height:70px;margin-top:4px;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-family:monospace">'+esc(b.signature||'')+'</textarea><label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件附件（最多 5 个，每个 ≤4MB，发送时自动附带）</label><div class="att-list" data-brand="'+esc(b.brand_name)+'" style="margin-top:4px;font-size:13px;color:#334155">加载中…</div><div style="display:flex;gap:8px;margin-top:6px;align-items:center"><input type="file" class="att-file" data-brand="'+esc(b.brand_name)+'" style="font-size:13px"><button class="btn btn-sm btn-primary att-upload" data-brand="'+esc(b.brand_name)+'">⬆ 上传附件</button></div><label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">公司简介</label><textarea class="intro-textarea" data-brand="'+esc(b.brand_name)+'">'+esc(b.company_intro)+'</textarea><div style="margin-top:10px;text-align:right"><button class="btn btn-primary btn-sm save-brand" data-brand="'+esc(b.brand_name)+'">💾 保存配置</button></div></div>'});document.getElementById('brandsArea').innerHTML=h||'<p>暂无品牌配置</p>';document.querySelectorAll('.brand-card').forEach(function(card){var brand=card.querySelector('.enable-toggle').dataset.brand;loadAttachments(brand)});document.querySelectorAll('.enable-toggle').forEach(function(el){el.onchange=function(){var brand=el.dataset.brand;var enabled=el.checked;api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enabled})}).then(function(){showToast(brand+(enabled?' 已启用':' 已禁用'),true)}).catch(function(e){showToast(e.message,false);el.checked=!enabled)}}});document.querySelectorAll('.att-upload').forEach(function(el){el.onclick=function(){var brand=el.dataset.brand;var input=document.querySelector('.att-file[data-brand="'+brand+'"]');if(!input.files||!input.files[0]){showToast('请选择文件',false);return}var file=input.files[0];if(file.size>4*1024*1024){showToast('文件超过 4MB',false);return}var btn=el;btn.disabled=true;btn.textContent='⏳ 上传中…';var reader=new FileReader();reader.onload=function(){var b64=reader.result.split(',')[1];api('/admin/api/outreach/attachments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:brand,filename:file.name,mime_type:file.type||'application/octet-stream',content_base64:b64})}).then(function(){showToast('附件已上传',true);loadAttachments(brand)}).catch(function(e){showToast(e.message,false)}).finally(function(){btn.disabled=false;btn.textContent='⬆ 上传附件';input.value=''})};reader.readAsDataURL(file)}});document.querySelectorAll('.save-brand').forEach(function(el){el.onclick=function(){var brand=el.dataset.brand;var ta=document.querySelector('.intro-textarea[data-brand="'+brand+'"]');var se=document.querySelector('.sender-email[data-brand="'+brand+'"]');var sn=document.querySelector('.sender-name[data-brand="'+brand+'"]');var sg=document.querySelector('.signature-textarea[data-brand="'+brand+'"]');api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({company_intro:ta.value,sender_email:se.value,sender_name:sn.value,signature:sg.value})}).then(function(){showToast(brand+' 配置已保存（签名已更新）',true)}).catch(function(e){showToast(e.message,false)}})})}).catch(function(e){document.getElementById('brandsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>'})}
+
+function loadAttachments(brand){var box=document.querySelector('.att-list[data-brand="'+brand+'"]');if(!box)return;api('/admin/api/outreach/attachments?brand='+encodeURIComponent(brand)).then(function(d){if(!d.attachments.length){box.innerHTML='<span style="color:#6b7280">暂无附件</span>';return}box.innerHTML=d.attachments.map(function(a){return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0"><span>📄 '+esc(a.filename)+' ('+Math.round(a.size_bytes/1024)+' KB)</span><button class="btn btn-sm btn-danger att-del" data-id="'+a.id+'" data-brand="'+esc(brand)+'">删除</button></div>'}).join('');box.querySelectorAll('.att-del').forEach(function(btn){btn.onclick=function(){api('/admin/api/outreach/attachments/'+btn.dataset.id,{method:'DELETE'}).then(function(){showToast('附件已删除',true);loadAttachments(btn.dataset.brand)}).catch(function(e){showToast(e.message,false)})}})}).catch(function(){box.innerHTML='<span style="color:#6b7280">附件加载失败</span>'})}
 
 // Generate
 api('/admin/api/outreach/settings').then(function(d){var sel=document.getElementById('genBrand');sel.innerHTML='';d.settings.forEach(function(b){if(b.enabled){var opt=document.createElement('option');opt.value=b.brand_name;opt.textContent=b.brand_name+' ('+b.product_category+')';sel.appendChild(opt)}});if(!sel.options.length){sel.innerHTML='<option value="">-- 请先启用品牌 --</option>'}});

@@ -148,28 +148,82 @@ function encodeMimeHeaderWord(value: string): string {
   return `=?UTF-8?B?${b64urlEncode(bytes).replace(/-/g, "+").replace(/_/g, "/")}?=`;
 }
 
+export interface MimeAttachment {
+  filename: string;
+  mimeType: string;
+  /** Raw file bytes. */
+  data: Uint8Array;
+}
+
+function wrap76(b64: string): string {
+  return b64.replace(/(.{76})/g, "$1\r\n");
+}
+
+function encodeWordIfNeeded(value: string): string {
+  // Filenames with non-ASCII need RFC 2047 encoding.
+  return /^[- !"#$%&'()*+,./0-9:;<=>?@A-Z\\[\\]^_`a-z{|}~]*$/.test(value)
+    ? value
+    : encodeMimeHeaderWord(value);
+}
+
 export function buildMime(options: {
-  from: string;
+  from: string; // plain address, or "Display Name <addr@…>"
   to: string;
   subject: string;
   body: string;
+  attachments?: MimeAttachment[];
 }): string {
-  const headers = [
-    `From: ${encodeMimeHeaderWord(options.from)} <${options.from}>`,
+  // Accept either a bare address or a "Display Name <addr>" combo.
+  const combo = /^(.*)<([^>]+)>$/.exec(options.from.trim());
+  const fromAddr = combo ? combo[2].trim() : options.from.trim();
+  const fromName = combo ? combo[1].trim().replace(/^"|"$/g, "") : "";
+  const fromHeader = fromName
+    ? `${encodeMimeHeaderWord(fromName)} <${fromAddr}>`
+    : fromAddr;
+  const commonHeaders = [
+    `From: ${fromHeader}`,
     `To: ${escapeHeader(options.to)}`,
     `Subject: ${encodeMimeHeaderWord(options.subject)}`,
     "MIME-Version: 1.0",
+  ];
+  const bodyB64 = wrap76(
+    btoa(Array.from(new TextEncoder().encode(options.body)).map((b) => String.fromCharCode(b)).join("")),
+  );
+
+  const attachments = options.attachments ?? [];
+  if (attachments.length === 0) {
+    const headers = [
+      ...commonHeaders,
+      `Content-Type: text/plain; charset="UTF-8"`,
+      "Content-Transfer-Encoding: base64",
+    ];
+    return `${headers.join("\r\n")}\r\n\r\n${bodyB64}\r\n`;
+  }
+
+  // multipart/mixed: text part + attachment parts
+  const boundary = `bnd_${crypto.randomUUID().replace(/-/g, "")}`;
+  const parts: string[] = [
+    ...commonHeaders,
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    "",
+    `--${boundary}`,
     `Content-Type: text/plain; charset="UTF-8"`,
     "Content-Transfer-Encoding: base64",
+    "",
+    bodyB64,
   ];
-  const bodyB64 = btoa(
-    Array.from(new TextEncoder().encode(options.body))
-      .map((b) => String.fromCharCode(b))
-      .join(""),
-  );
-  // Wrap base64 at 76 chars per RFC 2045
-  const wrapped = bodyB64.replace(/(.{76})/g, "$1\r\n");
-  return `${headers.join("\r\n")}\r\n\r\n${wrapped}\r\n`;
+  for (const att of attachments) {
+    parts.push(
+      `--${boundary}`,
+      `Content-Type: ${att.mimeType}; name="${encodeWordIfNeeded(att.filename)}"`,
+      "Content-Transfer-Encoding: base64",
+      `Content-Disposition: attachment; filename="${encodeWordIfNeeded(att.filename)}"`,
+      "",
+      wrap76(btoa(Array.from(att.data).map((b) => String.fromCharCode(b)).join(""))),
+    );
+  }
+  parts.push(`--${boundary}--`, "");
+  return parts.join("\r\n");
 }
 
 /* ── Daily quota tracking (D1) ── */
@@ -224,15 +278,50 @@ export interface SendResult {
 export async function sendOutreachEmail(
   env: GmailEnv,
   email: { id: number; email_to: string; subject: string | null; body: string | null },
+  options?: { /** Per-brand sender mailbox (must be a Workspace user covered by the delegation). */
+    fromEmail?: string | null;
+    /** Optional display name for the From header (e.g. "Toby | Afarer Team"). */
+    fromName?: string | null;
+    /** Brand whose stored attachments should be attached. */
+    brandName?: string | null; },
 ): Promise<SendResult> {
-  const { clientEmail, privateKeyPem, senderEmail } = requireGmailConfig(env);
+  const { clientEmail, privateKeyPem, senderEmail: defaultSender } = requireGmailConfig(env);
   if (!email.email_to) return { ok: false, error: "收件人为空" };
   if (!email.subject || !email.body) return { ok: false, error: "主题或正文为空" };
 
   await assertQuota(env);
 
+  const senderEmail = options?.fromEmail?.trim() || defaultSender;
+  const fromDisplay = options?.fromName?.trim();
   const token = await getAccessToken(env, clientEmail, privateKeyPem, senderEmail);
-  const mime = buildMime({ from: senderEmail, to: email.email_to, subject: email.subject, body: email.body });
+
+  // Load the brand's attachments (cap: 3 files, 4 MB each) for the email.
+  const attachments: MimeAttachment[] = [];
+  if (options?.brandName) {
+    try {
+      const attRows = await env.DB.prepare(
+        `SELECT filename, mime_type, content_base64 FROM outreach_attachments
+         WHERE brand_name = ? ORDER BY created_at LIMIT 3`,
+      ).bind(options.brandName).all<{ filename: string; mime_type: string; content_base64: string }>();
+      for (const a of attRows.results ?? []) {
+        if (a.content_base64.length > 4_200_000) continue; // skip >~4MB encoded
+        const binary = atob(a.content_base64);
+        attachments.push({
+          filename: a.filename,
+          mimeType: a.mime_type || "application/octet-stream",
+          data: Uint8Array.from(binary, (ch) => ch.charCodeAt(0)),
+        });
+      }
+    } catch { /* attachments are best-effort; table may not exist yet */ }
+  }
+
+  const mime = buildMime({
+    from: fromDisplay ? `${fromDisplay} <${senderEmail}>` : senderEmail,
+    to: email.email_to,
+    subject: email.subject,
+    body: email.body,
+    attachments,
+  });
 
   const resp = await fetch(GMAIL_SEND_URL, {
     method: "POST",

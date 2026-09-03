@@ -62,8 +62,24 @@ CREATE TABLE IF NOT EXISTS outreach_settings (
   brand_name TEXT NOT NULL UNIQUE,
   product_category TEXT NOT NULL,
   company_intro TEXT,
+  sender_email TEXT,
+  sender_name TEXT,
   enabled INTEGER DEFAULT 0,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Brand email signatures
+ALTER TABLE outreach_settings ADD COLUMN signature TEXT;
+
+-- Outreach attachments (base64 in D1; small files like PDF catalogs)
+CREATE TABLE IF NOT EXISTS outreach_attachments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  brand_name TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  size_bytes INTEGER NOT NULL,
+  content_base64 TEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Generated outreach emails

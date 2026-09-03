@@ -5,6 +5,9 @@ export interface BrandConfig {
   brand_name: string;
   product_category: string; // SUPs | Inflatable boats | RIB boats
   company_intro: string;
+  sender_email: string | null; // per-brand sender identity (Gmail delegated mailbox)
+  sender_name: string | null;  // display name in the From header
+  signature: string | null;    // email signature block appended to every outreach body
   enabled: boolean;
 }
 
@@ -30,18 +33,27 @@ const DEFAULT_BRANDS: BrandConfig[] = [
     brand_name: "Afarer",
     product_category: "SUPs",
     company_intro: "[Afarer公司简介待填写]",
+    sender_email: "toby@afarer.com",
+    sender_name: "Toby | Afarer Team",
+    signature: null,
     enabled: false,
   },
   {
     brand_name: "Aquafarer",
     product_category: "Inflatable boats",
     company_intro: "[Aquafarer公司简介待填写]",
+    sender_email: null,
+    sender_name: null,
+    signature: null,
     enabled: false,
   },
   {
     brand_name: "Neptunor",
     product_category: "RIB boats",
     company_intro: "[Neptunor公司简介待填写]",
+    sender_email: "helen@neptunor.com",
+    sender_name: "Helen | Neptunor Team",
+    signature: null,
     enabled: false,
   },
 ];
@@ -54,8 +66,8 @@ export async function initBrandSettings(env: AdminEnv): Promise<void> {
 
   const stmts = DEFAULT_BRANDS.map((b) =>
     env.DB.prepare(
-      "INSERT OR IGNORE INTO outreach_settings (brand_name, product_category, company_intro, enabled) VALUES (?, ?, ?, ?)"
-    ).bind(b.brand_name, b.product_category, b.company_intro, b.enabled ? 1 : 0)
+      "INSERT OR IGNORE INTO outreach_settings (brand_name, product_category, company_intro, sender_email, sender_name, enabled) VALUES (?, ?, ?, ?, ?, ?)"
+    ).bind(b.brand_name, b.product_category, b.company_intro, b.sender_email, b.sender_name, b.enabled ? 1 : 0)
   );
   await env.DB.batch(stmts);
 }
@@ -64,12 +76,15 @@ export async function initBrandSettings(env: AdminEnv): Promise<void> {
 export async function getBrandSettings(env: AdminEnv): Promise<BrandConfig[]> {
   await initBrandSettings(env);
   const result = await env.DB.prepare(
-    "SELECT brand_name, product_category, company_intro, enabled FROM outreach_settings ORDER BY id"
-  ).all<{ brand_name: string; product_category: string; company_intro: string; enabled: number }>();
+    "SELECT brand_name, product_category, company_intro, sender_email, sender_name, signature, enabled FROM outreach_settings ORDER BY id"
+  ).all<{ brand_name: string; product_category: string; company_intro: string; sender_email: string | null; sender_name: string | null; signature: string | null; enabled: number }>();
   return result.results.map((r) => ({
     brand_name: r.brand_name,
     product_category: r.product_category,
     company_intro: r.company_intro || "",
+    sender_email: r.sender_email || null,
+    sender_name: r.sender_name || null,
+    signature: r.signature || null,
     enabled: r.enabled === 1,
   }));
 }
@@ -78,13 +93,25 @@ export async function getBrandSettings(env: AdminEnv): Promise<BrandConfig[]> {
 export async function updateBrandSetting(
   env: AdminEnv,
   brandName: string,
-  updates: Partial<Pick<BrandConfig, "company_intro" | "enabled">>
+  updates: Partial<Pick<BrandConfig, "company_intro" | "enabled" | "sender_email" | "sender_name" | "signature">>
 ): Promise<void> {
   const sets: string[] = [];
   const binds: unknown[] = [];
   if (updates.company_intro !== undefined) {
     sets.push("company_intro = ?");
     binds.push(updates.company_intro);
+  }
+  if (updates.sender_email !== undefined) {
+    sets.push("sender_email = ?");
+    binds.push(updates.sender_email);
+  }
+  if (updates.sender_name !== undefined) {
+    sets.push("sender_name = ?");
+    binds.push(updates.sender_name);
+  }
+  if (updates.signature !== undefined) {
+    sets.push("signature = ?");
+    binds.push(updates.signature);
   }
   if (updates.enabled !== undefined) {
     sets.push("enabled = ?");
@@ -236,11 +263,13 @@ function buildOutreachPrompt(
   return `你是一名专业的B2B营销专家，擅长撰写针对水上运动行业的个性化开发信。
 
 ## 你的身份
-你代表 **${brand.brand_name}** 公司，以下是我们公司的简介：
+你代表 **${brand.brand_name}** 公司${brand.sender_name ? `，发件人署名身份是：**${brand.sender_name}**（From 地址为 ${brand.sender_email}）` : ""}，以下是我们公司的简介：
 ${brand.company_intro}
 
 ## 产品类别
 我们主要经营：**${brand.product_category}**
+${brand.signature ? `## 邮件签名（必须原样放在正文末尾，不要修改内容，不要翻译，用\\n保持换行）
+${brand.signature}` : ""}
 
 ## 目标客户信息
 - 公司名称：${company.company_name || "未知"}
@@ -268,9 +297,10 @@ ${isEnglish ? "使用英文。" : `如果客户在西班牙，请用西班牙语
    - 中间：介绍 ${brand.brand_name} 的产品如何与他们的业务互补（引用他们的具体产品或业务模式）
    - 结尾：提出具体的合作建议（如样品、报价、展会见面等）
    - 专业但亲切的语气
-   - 长度：150-250词
+   - 长度：150-250词（不含签名）
    - 必须个性化：引用该公司的具体产品、市场定位或业务特点
    - 禁止使用模板化的套话
+${brand.signature ? "   - 正文最后必须原样附加上面提供的邮件签名块（保持原样，不要翻译或改动）" : ""}
 
 3. **严格禁止**：
    - 编造虚假信息
