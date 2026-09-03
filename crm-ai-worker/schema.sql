@@ -68,8 +68,10 @@ CREATE TABLE IF NOT EXISTS outreach_settings (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Brand email signatures
-ALTER TABLE outreach_settings ADD COLUMN signature TEXT;
+-- Brand email signatures and per-brand sender identities are added by
+-- migrations: ALTER TABLE outreach_settings ADD COLUMN signature / sender_email /
+-- sender_name (apply once with wrangler d1 execute; ignore duplicate-column
+-- errors on re-run).
 
 -- Outreach attachments (base64 in D1; small files like PDF catalogs)
 CREATE TABLE IF NOT EXISTS outreach_attachments (
