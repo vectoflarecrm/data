@@ -28,6 +28,7 @@ const GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/
 const DEFAULT_DAILY_LIMIT = 400;
 const DEFAULT_SEND_DELAY_MS = 3_000;
 const TOKEN_SAFETY_WINDOW_MS = 60_000;
+const EMAIL_ADDRESS_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
 
 /* ── Base64URL helpers ── */
 
@@ -81,6 +82,9 @@ function requireGmailConfig(env: GmailEnv): {
   }
   if (!privateKeyPem.includes("PRIVATE KEY")) {
     throw new GmailConfigError("GMAIL_SERVICE_ACCOUNT_KEY 必须是 PEM 格式私钥（-----BEGIN PRIVATE KEY-----）");
+  }
+  if (!EMAIL_ADDRESS_RE.test(senderEmail)) {
+    throw new GmailConfigError("GMAIL_SENDER_EMAIL 必须是有效的邮箱地址");
   }
   return { clientEmail, privateKeyPem, senderEmail };
 }
@@ -160,10 +164,10 @@ function wrap76(b64: string): string {
 }
 
 function encodeWordIfNeeded(value: string): string {
-  // Filenames with non-ASCII need RFC 2047 encoding.
-  return /^[- !"#$%&'()*+,./0-9:;<=>?@A-Z\\[\\]^_`a-z{|}~]*$/.test(value)
-    ? value
-    : encodeMimeHeaderWord(value);
+  // Filenames with non-ASCII need RFC 2047 encoding. Remove control
+  // characters and quote delimiters before placing the value in MIME headers.
+  const safe = value.replace(/[\r\n\x00-\x1F\x7F]+/g, " ").replace(/["\\]/g, "_").trim();
+  return /^[\x20-\x7E]*$/.test(safe) ? safe : encodeMimeHeaderWord(safe);
 }
 
 export function buildMime(options: {
@@ -292,6 +296,9 @@ export async function sendOutreachEmail(
   await assertQuota(env);
 
   const senderEmail = options?.fromEmail?.trim() || defaultSender;
+  if (!EMAIL_ADDRESS_RE.test(senderEmail)) {
+    return { ok: false, error: "发件邮箱无效" };
+  }
   const fromDisplay = options?.fromName?.trim();
   const token = await getAccessToken(env, clientEmail, privateKeyPem, senderEmail);
 
@@ -301,14 +308,14 @@ export async function sendOutreachEmail(
     try {
       const attRows = await env.DB.prepare(
         `SELECT filename, mime_type, content_base64 FROM outreach_attachments
-         WHERE brand_name = ? ORDER BY created_at LIMIT 3`,
+         WHERE brand_name = ? ORDER BY created_at LIMIT 5`,
       ).bind(options.brandName).all<{ filename: string; mime_type: string; content_base64: string }>();
       for (const a of attRows.results ?? []) {
-        if (a.content_base64.length > 4_200_000) continue; // skip >~4MB encoded
+        if (a.content_base64.length > 1_900_000) continue; // stay below D1's 2 MB row limit
         const binary = atob(a.content_base64);
         attachments.push({
           filename: a.filename,
-          mimeType: a.mime_type || "application/octet-stream",
+          mimeType: /^[\w.+-]+\/[\w.+-]+$/.test(a.mime_type) ? a.mime_type : "application/octet-stream",
           data: Uint8Array.from(binary, (ch) => ch.charCodeAt(0)),
         });
       }

@@ -49,36 +49,56 @@ npx wrangler d1 execute crm-ai-db --remote --file=./schema.sql
 npx wrangler d1 execute crm-ai-db --local --file=./schema.sql
 ```
 
-写入 Gemini API Key（不要写入源码或提交到 Git）：
+写入 AI API Key（不要写入源码或提交到 Git）：
 
 ```bash
 npx wrangler secret put GEMINI_API_KEY
+npx wrangler secret put GROQ_API_KEY
+npx wrangler secret put OPENROUTER_API_KEY
 ```
+
+Gemini 是首选 Provider；Groq、Mistral、DeepSeek 和 OpenRouter 按顺序作为备用 Provider。可为每个 Provider 配置多个 Key，限流或服务异常时自动切换，并在恢复前冷却受限 Key。
 
 可选模型配置：
 
 ```bash
 npx wrangler secret put GEMINI_MODEL
+npx wrangler secret put GROQ_MODEL
+npx wrangler secret put MISTRAL_MODEL
+npx wrangler secret put DEEPSEEK_MODEL
+npx wrangler secret put OPENROUTER_MODEL
 ```
 
 默认模型为：
 
 ```text
-gemini-2.5-flash-lite
+Gemini: gemini-2.5-flash-lite
+Groq: llama-3.1-70b-versatile
+Mistral: mistral-large-latest
+DeepSeek: deepseek-chat
+OpenRouter: google/gemini-2.5-flash
 ```
 
 ### 参数归类
 
-Worker 运行时必须使用的 Secret：
+可用的 Worker Secret：
 
 ```text
-GEMINI_API_KEY
+GEMINI_API_KEY, GEMINI_API_KEY_2 … GEMINI_API_KEY_40
+GROQ_API_KEY, GROQ_API_KEY_2, GROQ_MODEL
+MISTRAL_API_KEY, MISTRAL_API_KEY_2, MISTRAL_MODEL
+DEEPSEEK_API_KEY, DEEPSEEK_API_KEY_2, DEEPSEEK_MODEL
+OPENROUTER_API_KEY, OPENROUTER_API_KEY_2, OPENROUTER_API_KEY_3, OPENROUTER_MODEL
 ```
 
-可选的 Worker Secret：
+邮件发送还需要 Google Workspace Gmail 配置：
 
 ```text
-GEMINI_MODEL
+GMAIL_SERVICE_ACCOUNT_EMAIL
+GMAIL_SERVICE_ACCOUNT_KEY
+GMAIL_SENDER_EMAIL
+GMAIL_DAILY_LIMIT（可选）
+GMAIL_SEND_DELAY_MS（可选）
 ```
 
 D1 的 `database_id` 不是 Secret，而是写入 `wrangler.toml` 的数据库绑定配置。使用本地 Wrangler 登录部署时，不需要额外填写 Cloudflare API Token：
@@ -109,7 +129,7 @@ ADMIN_PANEL_TOKEN
 .github/workflows/deploy-worker.yml
 ```
 
-只有修改 `crm-ai-worker/**` 或 `.github/workflows/deploy-worker.yml` 并推送到 `main` 时，workflow 才会自动执行类型检查、Worker 部署并同步 `GEMINI_API_KEY`；修改 Python 主项目不会触发 Worker 部署。也可以在 GitHub Actions 页面选择 `Deploy CRM AI Worker`，点击 `Run workflow` 手动触发。
+只有修改 `crm-ai-worker/**` 或 `.github/workflows/deploy-worker.yml` 并推送到 `main` 时，workflow 才会自动执行类型检查、Worker 部署并同步 AI、搜索和 Gmail Secrets；修改 Python 主项目不会触发 Worker 部署。也可以在 GitHub Actions 页面选择 `Deploy CRM AI Worker`，点击 `Run workflow` 手动触发。
 
 Cloudflare API Token 建议创建为 **Account API Token → Custom token**，并限制到部署 Worker 的单个 Cloudflare Account。仅运行 `wrangler deploy` 时需要：
 
@@ -237,8 +257,9 @@ pending → processing → completed
 【合并数据公司ID: 对应的company_id】
 ```
 
-- AI Key 只从 `GEMINI_API_KEY` Secret 读取；
+- AI 使用 Gemini → Groq → Mistral → DeepSeek → OpenRouter 的回退链，Key 被限流时进入冷却，避免重复调用受限 Key；
 - AI 只能处理网页文本并写入画像字段，不能执行任意 SQL；
+- outreach 面板支持 Afarer（SUPs）和 Neptunor（RIB Boats + Inflatable Boats）两种品牌身份，可分别设置发件人、签名和附件；
 - D1 写回使用 `WHERE id = ? AND status = 'processing'`，避免过期任务覆盖新状态。
 
 ## D1 Schema
@@ -252,14 +273,12 @@ schema.sql
 字段包括：
 
 ```text
-id
-company_id
-domain
-status
-customer_segment
-personas_and_solutions
-remarks
-updated_at
+customers: id, company_id, domain, status, customer_segment, personas_and_solutions, remarks, updated_at
+outreach_settings: brand_name, product_category, company_intro, sender_email, sender_name, signature, enabled
+outreach_attachments: brand_name, filename, mime_type, size_bytes, content_base64
+outreach_emails: customer_id, email_to, brand_name, subject, body, status, sent_at
+api_key_health: provider, key_index, exhausted_until, last_error
+gmail_send_log: outreach_email_id, recipient, status, detail, sent_at
 ```
 
 并为 `status` 和 `company_id` 建立索引。

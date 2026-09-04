@@ -21,9 +21,17 @@ export interface AdminEnv extends GmailEnv {
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
   GROQ_API_KEY?: string;
+  GROQ_API_KEY_2?: string;
+  GROQ_MODEL?: string;
   MISTRAL_API_KEY?: string;
+  MISTRAL_API_KEY_2?: string;
+  MISTRAL_MODEL?: string;
   DEEPSEEK_API_KEY?: string;
+  DEEPSEEK_API_KEY_2?: string;
+  DEEPSEEK_MODEL?: string;
   OPENROUTER_API_KEY?: string;
+  OPENROUTER_API_KEY_2?: string;
+  OPENROUTER_API_KEY_3?: string;
   OPENROUTER_MODEL?: string;
 }
 
@@ -346,9 +354,20 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
       const updates: { company_intro?: string; enabled?: boolean; sender_email?: string | null; sender_name?: string | null; signature?: string | null } = {};
       if (typeof body.company_intro === "string") updates.company_intro = body.company_intro;
       if (typeof body.enabled === "boolean") updates.enabled = body.enabled;
-      if (typeof body.sender_email === "string") updates.sender_email = body.sender_email.trim() || null;
-      if (typeof body.sender_name === "string") updates.sender_name = body.sender_name.trim() || null;
-      if (typeof body.signature === "string") updates.signature = body.signature || null;
+      if (typeof body.sender_email === "string") {
+        const senderEmail = body.sender_email.trim();
+        if (senderEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(senderEmail)) {
+          return jsonResponse({ detail: "sender_email must be a valid email address" }, 400);
+        }
+        updates.sender_email = senderEmail || null;
+      }
+      if (typeof body.sender_name === "string") {
+        updates.sender_name = body.sender_name.replace(/[\r\n]+/g, " ").trim() || null;
+      }
+      if (typeof body.signature === "string") {
+        if (body.signature.length > 5_000) return jsonResponse({ detail: "signature is too long" }, 400);
+        updates.signature = body.signature || null;
+      }
       await updateBrandSetting(env, brandName, updates);
       return jsonResponse({ ok: true });
     }
@@ -369,20 +388,33 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
       const body = (await request.json().catch(() => ({}))) as {
         brand?: string; filename?: string; mime_type?: string; content_base64?: string;
       };
-      if (!body.brand || !body.filename || !body.content_base64) {
-        return jsonResponse({ detail: "brand, filename and content_base64 are required" }, 400);
+      if (typeof body.brand !== "string" || typeof body.filename !== "string" || typeof body.content_base64 !== "string" || !body.brand.trim() || !body.filename.trim() || !body.content_base64.trim()) {
+        return jsonResponse({ detail: "brand, filename and content_base64 are required strings" }, 400);
       }
-      const b64 = body.content_base64.replace(/^data:[^;]+;base64,/, "");
-      const sizeBytes = Math.floor((b64.length * 3) / 4);
-      if (sizeBytes > 4 * 1024 * 1024) return jsonResponse({ detail: "附件不能超过 4 MB" }, 400);
+      if (body.brand.length > 100) return jsonResponse({ detail: "brand is too long" }, 400);
+      const b64 = body.content_base64.replace(/^data:[^;]+;base64,/, "").replace(/\s+/g, "");
+      if (!/^[A-Za-z0-9+/]*={0,2}$/.test(b64) || b64.length % 4 === 1) {
+        return jsonResponse({ detail: "附件内容不是有效的 base64" }, 400);
+      }
+      const sizeBytes = Math.max(0, Math.floor((b64.length * 3) / 4) - (b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0));
+      if (sizeBytes <= 0) return jsonResponse({ detail: "附件不能为空" }, 400);
+      // D1 limits each string/row to 2 MB; base64 expands binary data by
+      // roughly 4/3, so keep raw attachments below 1.4 MB.
+      if (sizeBytes > 1_400_000) return jsonResponse({ detail: "附件不能超过 1.4 MB（D1 存储限制）" }, 400);
+      if (body.filename.length > 200 || /[\r\n\x00-\x1F\x7F]/.test(body.filename)) {
+        return jsonResponse({ detail: "附件文件名无效" }, 400);
+      }
+      if (body.mime_type !== undefined && (typeof body.mime_type !== "string" || !/^[\w.+-]+\/[\w.+-]+$/.test(body.mime_type))) {
+        return jsonResponse({ detail: "附件 MIME 类型无效" }, 400);
+      }
       const count = await env.DB.prepare(
         "SELECT COUNT(*) AS cnt FROM outreach_attachments WHERE brand_name = ?",
-      ).bind(body.brand).first<{ cnt: number }>();
+      ).bind(body.brand.trim()).first<{ cnt: number }>();
       if ((count?.cnt ?? 0) >= 5) return jsonResponse({ detail: "每个品牌最多 5 个附件" }, 400);
       await env.DB.prepare(
         `INSERT INTO outreach_attachments (brand_name, filename, mime_type, size_bytes, content_base64)
          VALUES (?, ?, ?, ?, ?)`,
-      ).bind(body.brand, body.filename.slice(0, 200), body.mime_type || "application/octet-stream", sizeBytes, b64).run();
+      ).bind(body.brand.trim(), body.filename.trim().slice(0, 200), body.mime_type || "application/octet-stream", sizeBytes, b64).run();
       return jsonResponse({ ok: true, size_bytes: sizeBytes });
     }
     // DELETE /admin/api/outreach/attachments/:id
@@ -396,8 +428,12 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
     // POST /admin/api/outreach/generate - Generate outreach emails
     if (path === "/admin/api/outreach/generate" && request.method === "POST") {
       const body = (await request.json()) as { brand?: string; limit?: number };
-      if (!body.brand) return jsonResponse({ detail: "brand is required" }, 400);
-      const result = await generateOutreachEmails(env, body.brand, body.limit || 10);
+      if (typeof body.brand !== "string" || !body.brand.trim()) return jsonResponse({ detail: "brand is required" }, 400);
+      const requestedLimit = Number(body.limit ?? 10);
+      if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 50) {
+        return jsonResponse({ detail: "limit must be an integer from 1 to 50" }, 400);
+      }
+      const result = await generateOutreachEmails(env, body.brand.trim(), requestedLimit);
       return jsonResponse(result);
     }
 
@@ -805,7 +841,7 @@ function api(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){loca
 document.querySelectorAll('.tab').forEach(function(tab){tab.onclick=function(){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tab-content').forEach(function(c){c.style.display='none'});tab.classList.add('active');document.getElementById('tab-'+tab.dataset.tab).style.display='block';if(tab.dataset.tab==='settings')loadBrands();if(tab.dataset.tab==='emails'){loadStats();loadEmails();loadQuota()}}});
 
 // Brand settings
-function loadBrands(){api('/admin/api/outreach/settings').then(function(d){var h='';d.settings.forEach(function(b){h+='<div class="brand-card"><div class="brand-header"><div><span class="brand-name">'+esc(b.brand_name)+'</span> <span class="brand-category">'+esc(b.product_category)+'</span></div><label class="toggle"><input type="checkbox" '+(b.enabled?'checked':'')+' data-brand="'+esc(b.brand_name)+'" class="enable-toggle"><span class="slider"></span></label></div><label style="font-weight:600;font-size:13px;color:#475569">发件身份（From 邮箱 / 显示名）</label><div style="display:flex;gap:8px;margin-top:4px"><input class="sender-email" data-brand="'+esc(b.brand_name)+'" placeholder="sender@yourdomain.com" value="'+esc(b.sender_email||'')+'" style="flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"><input class="sender-name" data-brand="'+esc(b.brand_name)+'" placeholder="Toby | Afarer Team" value="'+esc(b.sender_name||'')+'" style="flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"></div><label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件签名（原样附加在正文末尾）</label><textarea class="signature-textarea" data-brand="'+esc(b.brand_name)+'" style="width:100%;min-height:70px;margin-top:4px;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-family:monospace">'+esc(b.signature||'')+'</textarea><label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件附件（最多 5 个，每个 ≤4MB，发送时自动附带）</label><div class="att-list" data-brand="'+esc(b.brand_name)+'" style="margin-top:4px;font-size:13px;color:#334155">加载中…</div><div style="display:flex;gap:8px;margin-top:6px;align-items:center"><input type="file" class="att-file" data-brand="'+esc(b.brand_name)+'" style="font-size:13px"><button class="btn btn-sm btn-primary att-upload" data-brand="'+esc(b.brand_name)+'">⬆ 上传附件</button></div><label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">公司简介</label><textarea class="intro-textarea" data-brand="'+esc(b.brand_name)+'">'+esc(b.company_intro)+'</textarea><div style="margin-top:10px;text-align:right"><button class="btn btn-primary btn-sm save-brand" data-brand="'+esc(b.brand_name)+'">💾 保存配置</button></div></div>'});document.getElementById('brandsArea').innerHTML=h||'<p>暂无品牌配置</p>';document.querySelectorAll('.brand-card').forEach(function(card){var brand=card.querySelector('.enable-toggle').dataset.brand;loadAttachments(brand)});document.querySelectorAll('.enable-toggle').forEach(function(el){el.onchange=function(){var brand=el.dataset.brand;var enabled=el.checked;api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enabled})}).then(function(){showToast(brand+(enabled?' 已启用':' 已禁用'),true)}).catch(function(e){showToast(e.message,false);el.checked=!enabled)}}});document.querySelectorAll('.att-upload').forEach(function(el){el.onclick=function(){var brand=el.dataset.brand;var input=document.querySelector('.att-file[data-brand="'+brand+'"]');if(!input.files||!input.files[0]){showToast('请选择文件',false);return}var file=input.files[0];if(file.size>4*1024*1024){showToast('文件超过 4MB',false);return}var btn=el;btn.disabled=true;btn.textContent='⏳ 上传中…';var reader=new FileReader();reader.onload=function(){var b64=reader.result.split(',')[1];api('/admin/api/outreach/attachments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:brand,filename:file.name,mime_type:file.type||'application/octet-stream',content_base64:b64})}).then(function(){showToast('附件已上传',true);loadAttachments(brand)}).catch(function(e){showToast(e.message,false)}).finally(function(){btn.disabled=false;btn.textContent='⬆ 上传附件';input.value=''})};reader.readAsDataURL(file)}});document.querySelectorAll('.save-brand').forEach(function(el){el.onclick=function(){var brand=el.dataset.brand;var ta=document.querySelector('.intro-textarea[data-brand="'+brand+'"]');var se=document.querySelector('.sender-email[data-brand="'+brand+'"]');var sn=document.querySelector('.sender-name[data-brand="'+brand+'"]');var sg=document.querySelector('.signature-textarea[data-brand="'+brand+'"]');api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({company_intro:ta.value,sender_email:se.value,sender_name:sn.value,signature:sg.value})}).then(function(){showToast(brand+' 配置已保存（签名已更新）',true)}).catch(function(e){showToast(e.message,false)}})})}).catch(function(e){document.getElementById('brandsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>'})}
+function loadBrands(){api('/admin/api/outreach/settings').then(function(d){var h='';d.settings.forEach(function(b){h+='<div class="brand-card"><div class="brand-header"><div><span class="brand-name">'+esc(b.brand_name)+'</span> <span class="brand-category">'+esc(b.product_category)+'</span></div><label class="toggle"><input type="checkbox" '+(b.enabled?'checked':'')+' data-brand="'+esc(b.brand_name)+'" class="enable-toggle"><span class="slider"></span></label></div><label style="font-weight:600;font-size:13px;color:#475569">发件身份（From 邮箱 / 显示名）</label><div style="display:flex;gap:8px;margin-top:4px"><input class="sender-email" data-brand="'+esc(b.brand_name)+'" placeholder="sender@yourdomain.com" value="'+esc(b.sender_email||'')+'" style="flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"><input class="sender-name" data-brand="'+esc(b.brand_name)+'" placeholder="Toby | Afarer Team" value="'+esc(b.sender_name||'')+'" style="flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"></div><label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件签名（原样附加在正文末尾）</label><textarea class="signature-textarea" data-brand="'+esc(b.brand_name)+'" style="width:100%;min-height:70px;margin-top:4px;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-family:monospace">'+esc(b.signature||'')+'</textarea><label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件附件（最多 5 个，每个 ≤1.4MB，发送时自动附带）</label><div class="att-list" data-brand="'+esc(b.brand_name)+'" style="margin-top:4px;font-size:13px;color:#334155">加载中…</div><div style="display:flex;gap:8px;margin-top:6px;align-items:center"><input type="file" class="att-file" data-brand="'+esc(b.brand_name)+'" style="font-size:13px"><button class="btn btn-sm btn-primary att-upload" data-brand="'+esc(b.brand_name)+'">⬆ 上传附件</button></div><label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">公司简介</label><textarea class="intro-textarea" data-brand="'+esc(b.brand_name)+'">'+esc(b.company_intro)+'</textarea><div style="margin-top:10px;text-align:right"><button class="btn btn-primary btn-sm save-brand" data-brand="'+esc(b.brand_name)+'">💾 保存配置</button></div></div>'});document.getElementById('brandsArea').innerHTML=h||'<p>暂无品牌配置</p>';document.querySelectorAll('.brand-card').forEach(function(card){var brand=card.querySelector('.enable-toggle').dataset.brand;loadAttachments(brand)});document.querySelectorAll('.enable-toggle').forEach(function(el){el.onchange=function(){var brand=el.dataset.brand;var enabled=el.checked;api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enabled})}).then(function(){showToast(brand+(enabled?' 已启用':' 已禁用'),true)}).catch(function(e){showToast(e.message,false);el.checked=!enabled)}}});document.querySelectorAll('.att-upload').forEach(function(el){el.onclick=function(){var brand=el.dataset.brand;var input=document.querySelector('.att-file[data-brand="'+brand+'"]');if(!input.files||!input.files[0]){showToast('请选择文件',false);return}var file=input.files[0];if(file.size>1400000){showToast('文件超过 1.4MB（D1 存储限制）',false);return}var btn=el;btn.disabled=true;btn.textContent='⏳ 上传中…';var reader=new FileReader();reader.onload=function(){var b64=reader.result.split(',')[1];api('/admin/api/outreach/attachments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:brand,filename:file.name,mime_type:file.type||'application/octet-stream',content_base64:b64})}).then(function(){showToast('附件已上传',true);loadAttachments(brand)}).catch(function(e){showToast(e.message,false)}).finally(function(){btn.disabled=false;btn.textContent='⬆ 上传附件';input.value=''})};reader.readAsDataURL(file)}});document.querySelectorAll('.save-brand').forEach(function(el){el.onclick=function(){var brand=el.dataset.brand;var ta=document.querySelector('.intro-textarea[data-brand="'+brand+'"]');var se=document.querySelector('.sender-email[data-brand="'+brand+'"]');var sn=document.querySelector('.sender-name[data-brand="'+brand+'"]');var sg=document.querySelector('.signature-textarea[data-brand="'+brand+'"]');api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({company_intro:ta.value,sender_email:se.value,sender_name:sn.value,signature:sg.value})}).then(function(){showToast(brand+' 配置已保存（签名已更新）',true)}).catch(function(e){showToast(e.message,false)}})})}).catch(function(e){document.getElementById('brandsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>'})}
 
 function loadAttachments(brand){var box=document.querySelector('.att-list[data-brand="'+brand+'"]');if(!box)return;api('/admin/api/outreach/attachments?brand='+encodeURIComponent(brand)).then(function(d){if(!d.attachments.length){box.innerHTML='<span style="color:#6b7280">暂无附件</span>';return}box.innerHTML=d.attachments.map(function(a){return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0"><span>📄 '+esc(a.filename)+' ('+Math.round(a.size_bytes/1024)+' KB)</span><button class="btn btn-sm btn-danger att-del" data-id="'+a.id+'" data-brand="'+esc(brand)+'">删除</button></div>'}).join('');box.querySelectorAll('.att-del').forEach(function(btn){btn.onclick=function(){api('/admin/api/outreach/attachments/'+btn.dataset.id,{method:'DELETE'}).then(function(){showToast('附件已删除',true);loadAttachments(btn.dataset.brand)}).catch(function(e){showToast(e.message,false)})}})}).catch(function(){box.innerHTML='<span style="color:#6b7280">附件加载失败</span>'})}
 

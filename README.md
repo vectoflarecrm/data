@@ -490,6 +490,17 @@ npx wrangler d1 execute crm-ai-db --remote --command="SELECT COUNT(*) AS total F
    ```
 4. 推送后部署 workflow 自动同步到 Worker。
 
+#### 双品牌发件身份、签名和附件
+
+在管理面板的 **开发信管理 → 品牌配置** 中分别维护品牌设置：
+
+- **Afarer**：默认使用 `Toby | Afarer Team <toby@afarer.com>`，面向 SUP 客户；
+- **Neptunor**：默认使用 `Helen | Neptunor Team <helen@neptunor.com>`，面向 RIB Boats 和 Inflatable Boats 客户；
+- 可为每个品牌填写签名，生成开发信时会原样附加到正文末尾；
+- 可为每个品牌上传最多 5 个小型附件，每个不超过 1.4 MB。附件存储在 D1 中，因此不适合上传大型目录；发送草稿时会自动附加该品牌的附件。
+
+发送前建议先发送 1 封草稿验证发件身份、签名和附件是否符合预期。
+
 #### 面板操作
 
 在 `https://crm-ai-worker.<子域>.workers.dev/admin/outreach` 的 **开发信管理 → 邮件列表** 页：

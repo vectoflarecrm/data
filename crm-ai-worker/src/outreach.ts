@@ -329,8 +329,21 @@ export async function generateOutreachEmails(
     throw new Error(`Brand ${brandName} company intro not configured`);
   }
 
-  // Find companies that match this product category and have email
-  const productKeyword = brand.product_category.toLowerCase();
+  // Match each product family independently. Neptunor covers both RIB and
+  // inflatable boats, while the other brands keep their narrower category.
+  const productKeywords = brand.brand_name === "Neptunor"
+    ? ["rib", "inflatable boat", "inflatable boats"]
+    : brand.product_category.toLowerCase() === "sups"
+      ? ["sup", "sups", "stand up paddle", "paddleboard"]
+      : [brand.product_category.toLowerCase()];
+  const keywordClauses: string[] = [];
+  const keywordBinds: string[] = [];
+  for (const keyword of productKeywords) {
+    for (const column of ["products_services", "customer_segment", "business_tag", "description", "product_categories"]) {
+      keywordClauses.push(`LOWER(COALESCE(${column}, '')) LIKE '%' || ? || '%'`);
+      keywordBinds.push(keyword);
+    }
+  }
   const customers = await env.DB.prepare(`
     SELECT id, company_id, display_id, company_name, domain, first_name, last_name,
            title, email, products_services, business_tag, customer_segment, country,
@@ -338,19 +351,15 @@ export async function generateOutreachEmails(
     FROM customers
     WHERE status = 'completed'
       AND email IS NOT NULL AND email != ''
-      AND (
-        LOWER(products_services) LIKE '%' || ? || '%'
-        OR LOWER(customer_segment) LIKE '%' || ? || '%'
-        OR LOWER(business_tag) LIKE '%' || ? || '%'
-        OR LOWER(description) LIKE '%' || ? || '%'
-      )
+      AND (${keywordClauses.join(" OR ")})
       AND id NOT IN (
         SELECT customer_id FROM outreach_emails
         WHERE brand_name = ? AND customer_id IS NOT NULL
       )
+    ORDER BY id
     LIMIT ?
   `)
-    .bind(productKeyword, productKeyword, productKeyword, productKeyword, brandName, limit)
+    .bind(...keywordBinds, brandName, limit)
     .all<{
       id: number;
       company_id: string;
@@ -425,10 +434,15 @@ async function callAiForOutreach(
 
   // Try OpenAI-compatible APIs (Groq, Mistral, DeepSeek, OpenRouter)
   const openaiKeys = [
-    { key: env.GROQ_API_KEY, url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.1-70b-versatile" },
-    { key: env.MISTRAL_API_KEY, url: "https://api.mistral.ai/v1/chat/completions", model: "mistral-large-latest" },
-    { key: env.DEEPSEEK_API_KEY, url: "https://api.deepseek.com/v1/chat/completions", model: "deepseek-chat" },
+    { key: env.GROQ_API_KEY, url: "https://api.groq.com/openai/v1/chat/completions", model: env.GROQ_MODEL || "llama-3.1-70b-versatile" },
+    { key: env.GROQ_API_KEY_2, url: "https://api.groq.com/openai/v1/chat/completions", model: env.GROQ_MODEL || "llama-3.1-70b-versatile" },
+    { key: env.MISTRAL_API_KEY, url: "https://api.mistral.ai/v1/chat/completions", model: env.MISTRAL_MODEL || "mistral-large-latest" },
+    { key: env.MISTRAL_API_KEY_2, url: "https://api.mistral.ai/v1/chat/completions", model: env.MISTRAL_MODEL || "mistral-large-latest" },
+    { key: env.DEEPSEEK_API_KEY, url: "https://api.deepseek.com/v1/chat/completions", model: env.DEEPSEEK_MODEL || "deepseek-chat" },
+    { key: env.DEEPSEEK_API_KEY_2, url: "https://api.deepseek.com/v1/chat/completions", model: env.DEEPSEEK_MODEL || "deepseek-chat" },
     { key: env.OPENROUTER_API_KEY, url: "https://openrouter.ai/api/v1/chat/completions", model: env.OPENROUTER_MODEL || "google/gemini-2.5-flash" },
+    { key: env.OPENROUTER_API_KEY_2, url: "https://openrouter.ai/api/v1/chat/completions", model: env.OPENROUTER_MODEL || "google/gemini-2.5-flash" },
+    { key: env.OPENROUTER_API_KEY_3, url: "https://openrouter.ai/api/v1/chat/completions", model: env.OPENROUTER_MODEL || "google/gemini-2.5-flash" },
   ];
   for (const api of openaiKeys) {
     if (!api.key) continue;
