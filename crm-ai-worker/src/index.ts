@@ -1,7 +1,7 @@
 import { handleAdminRequest } from "./admin";
 import { rpmLimitFor, tryAcquireRpmSlot, rpmEnvOverride } from "./rate-limit";
 import { collectKeyPool, buildKeyOrder } from "./key-pool";
-import { getProviderState, isProviderUsable, noteProviderKeyError, noteProviderKeySuccess, keyHealthName } from "./provider-keys";
+import { getProviderState, isProviderUsable, noteProviderKeyError, noteProviderKeySuccess, noteKeyUsage, keyHealthName } from "./provider-keys";
 
 interface CustomerRow {
   id: number;
@@ -434,6 +434,7 @@ async function searloSearch(query: string, env: Env): Promise<GoogleSearchResult
       );
       if (!resp.ok) continue;
       const data = await resp.json() as { results?: Array<{ title: string; url: string; snippet: string }> };
+      await noteKeyUsage(env, "searlo", keyHealthName("searlo", { key: apiKey, model: null, rpmLimit: null, source: "env", keyId: 0 }));
       const items = (data.results ?? []).map((item) => ({
         title: item.title, link: item.url, snippet: item.snippet,
       }));
@@ -479,6 +480,7 @@ async function braveSearch(query: string, env: Env, taskKeyIndex = 0): Promise<G
       }
       if (!resp.ok) continue;
       const data = await resp.json() as { web?: { results?: Array<{ title: string; url: string; description: string }> } };
+      await noteKeyUsage(env, "brave", healthName); // successful call: count usage
       const items = (data.web?.results ?? [])
         .filter((item) => !isNoiseResult(item.url))
         .map((item) => ({
@@ -527,6 +529,7 @@ async function tavilySearch(query: string, env: Env, taskKeyIndex = 0): Promise<
       }
       if (!resp.ok) continue;
       const data = await resp.json() as { results?: Array<{ title: string; url: string; content: string; raw_content?: string | null }> };
+      await noteKeyUsage(env, "tavily", healthName); // successful call: count usage (advanced = 2 credits)
       const items = (data.results ?? [])
         .filter((item) => !isNoiseResult(item.url))
         .map((item) => ({
@@ -567,6 +570,7 @@ async function exaSearch(query: string, env: Env, taskKeyIndex = 0): Promise<Goo
       }
       if (!resp.ok) continue;
       const data = await resp.json() as { results?: Array<{ title: string; url: string; text: string }> };
+      await noteKeyUsage(env, "exa", healthName); // successful call: count usage
       const items = (data.results ?? []).map((item) => ({
         title: item.title, link: item.url, snippet: item.text?.slice(0, 200) || "",
       }));

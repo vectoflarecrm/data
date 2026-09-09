@@ -473,6 +473,56 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
     return jsonResponse({ ok: true, id: result.meta?.last_row_id ?? null });
   }
 
+  // GET /admin/api/keys/usage — per-provider monthly usage summary for the
+  // 📊 card: month/total calls, active keys, keys used this month, and
+  // theoretical monthly capacity from documented free tiers (search engines).
+  if (request.method === "GET" && path === "/admin/api/keys/usage") {
+    const [active, monthRows, totalRows, cooldowns] = await Promise.all([
+      env.DB.prepare(`SELECT provider, COUNT(*) AS n FROM api_configs WHERE is_active = 1 GROUP BY provider`)
+        .all<{ provider: string; n: number }>(),
+      env.DB.prepare(
+        `SELECT provider, SUM(success_count) AS calls, COUNT(DISTINCT key_index) AS keys_used
+         FROM api_key_usage WHERE day >= date('now', 'start of month') GROUP BY provider`,
+      ).all<{ provider: string; calls: number; keys_used: number }>(),
+      env.DB.prepare(`SELECT provider, SUM(success_count) AS calls FROM api_key_usage GROUP BY provider`)
+        .all<{ provider: string; calls: number }>(),
+      env.DB.prepare(
+        `SELECT provider, COUNT(*) AS n FROM api_key_health
+         WHERE exhausted_until IS NOT NULL AND exhausted_until > datetime('now') GROUP BY provider`,
+      ).all<{ provider: string; n: number }>(),
+    ]);
+    const activeMap = Object.fromEntries((active.results ?? []).map((r) => [r.provider, r.n]));
+    const monthMap = Object.fromEntries((monthRows.results ?? []).map((r) => [r.provider, r]));
+    const totalMap = Object.fromEntries((totalRows.results ?? []).map((r) => [r.provider, r.calls]));
+    const coolMap = Object.fromEntries((cooldowns.results ?? []).map((r) => [r.provider, r.n]));
+    // Documented per-key monthly capacities (search engines only; AI providers
+    // depend on model/token mix so no hard capacity is shown for them).
+    const monthlyCapacityPerKey: Record<string, number> = {
+      tavily: 500,  // 1,000 credits, advanced search = 2 credits
+      exa: 2000,    // ~$10 credits at ~$5/1k auto searches
+      brave: 2000,  // 2,000 searches/mo
+      searlo: 1000, // estimate
+    };
+    const providers = Array.from(new Set([
+      ...Object.keys(activeMap), ...Object.keys(monthMap), ...Object.keys(totalMap),
+    ])).sort();
+    const usage = providers.map((p) => {
+      const activeKeys = activeMap[p] ?? 0;
+      const m = monthMap[p];
+      const capacity = (monthlyCapacityPerKey[p] ?? 0) * activeKeys;
+      return {
+        provider: p,
+        active_keys: activeKeys,
+        cooling_keys: coolMap[p] ?? 0,
+        month_calls: m?.calls ?? 0,
+        keys_used_this_month: m?.keys_used ?? 0,
+        total_calls: totalMap[p] ?? 0,
+        monthly_capacity: capacity || null, // null = no documented capacity (AI providers)
+      };
+    });
+    return jsonResponse({ usage });
+  }
+
   // POST /admin/api/keys/bulk — bulk import keys.
   // Template format: one entry per line, "key,label" (label = 备注/账号).
   // Also accepts key<TAB>label, key|label, or bare keys (one per line).
@@ -1432,6 +1482,7 @@ tvly-zzzzzzzz,账号3"></textarea>
   <p><button class="btn on" id="bulkImport" style="padding:9px 22px">批量导入</button></p>
 </div>
 <div class="card"><h2>🗝 已配置 Keys</h2><div style="overflow-x:auto"><table id="keysTable"><thead><tr><th>平台</th><th>备注</th><th>Key</th><th>RPM</th><th>模型</th><th>状态</th><th>最近错误</th><th>操作</th></tr></thead><tbody></tbody></table></div></div>
+<div class="card"><h2>📊 本月用量（成功调用数，按自然月）</h2><div id="usageBox"><p style="color:#6b7280;margin:4px 0">加载中…</p></div></div>
 <div class="card"><h2>🧊 冷却中的 Key（429/限流自动暂停）</h2><div id="cooldownBox"></div></div>
 <div class="card"><h2>📜 冷却历史（最近 20 条）</h2><div id="historyBox"></div></div>
 <div class="card"><h2>⚙️ 平台设置（默认模型 / 总RPM / 启用）</h2><div id="settingsBox"></div></div>
@@ -1464,6 +1515,25 @@ function loadKeys(){
       del.onclick=function(){if(!confirm('确认删除该 Key？'))return;api('/admin/api/keys/'+k.id,{method:'DELETE'}).then(loadKeys).catch(function(e){toast(e.message,true)})};
       td.appendChild(tog);td.appendChild(del);tr.appendChild(td);tb.appendChild(tr);
     });
+    api('/admin/api/keys/usage').then(function(u){
+      var box=document.getElementById('usageBox');
+      var list=u.usage||[];
+      if(list.length===0){box.innerHTML='<p style="color:#6b7280;margin:4px 0">本月暂无调用记录</p>';return;}
+      var h='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'+
+        '<th style="text-align:left;padding:4px 8px">平台</th><th style="text-align:right;padding:4px 8px">本月</th><th style="text-align:right;padding:4px 8px">累计</th><th style="text-align:right;padding:4px 8px">活动Key</th><th style="text-align:right;padding:4px 8px">本月用过</th><th style="text-align:right;padding:4px 8px">月容量(估算)</th><th style="text-align:right;padding:4px 8px">消耗</th></tr></thead><tbody>';
+      list.forEach(function(r){
+        var pct=r.monthly_capacity?Math.min(100,Math.round(r.month_calls/r.monthly_capacity*100)):null;
+        var bar=pct===null?'<span style="color:#9ca3af">—</span>':'<div style="background:#e5e7eb;border-radius:6px;height:10px;width:110px;position:relative"><div style="background:'+(pct>80?'#dc2626':pct>50?'#f59e0b':'#16a34a')+';border-radius:6px;height:10px;width:'+pct+'%"></div></div><span style="font-size:11px;color:#6b7280">'+pct+'%</span>';
+        h+='<tr style="border-top:1px solid #f1f5f9"><td style="padding:4px 8px">'+PROVIDER_NAMES[r.provider]+'</td>'+
+          '<td style="text-align:right;padding:4px 8px">'+r.month_calls+'</td><td style="text-align:right;padding:4px 8px">'+r.total_calls+'</td>'+
+          '<td style="text-align:right;padding:4px 8px">'+r.active_keys+(r.cooling_keys?(' <span style="color:#dc2626;font-size:11px">(🧊'+r.cooling_keys+')</span>'):'')+'</td>'+
+          '<td style="text-align:right;padding:4px 8px">'+r.keys_used_this_month+'</td>'+
+          '<td style="text-align:right;padding:4px 8px">'+(r.monthly_capacity?r.monthly_capacity:'—')+'</td>'+
+          '<td style="padding:4px 8px">'+bar+'</td></tr>';
+      });
+      h+='</tbody></table></div><p style="font-size:12px;color:#6b7280;margin:6px 0 0">月容量按免费层估算：Tavily 500次深度搜索/Key、Exa ~2000次/Key、Brave 2000次/Key；AI 平台无固定容量（取决于 token 混合）。</p>';
+      box.innerHTML=h;
+    }).catch(function(){document.getElementById('usageBox').innerHTML='<p style="color:#6b7280;margin:4px 0">用量数据不可用</p>'});
     var cdBox=document.getElementById('cooldownBox');
     var cdList=d.cooldowns||[];
     if(cdList.length===0){cdBox.innerHTML='<p style="color:#16a34a;margin:4px 0">✓ 所有 Key 状态正常，无冷却中</p>';}

@@ -116,6 +116,17 @@ CREATE TABLE IF NOT EXISTS api_key_health (
   PRIMARY KEY (provider, key_index)
 );
 
+-- Per-key success counters (panel 📊 本月用量 card). key_index holds the
+-- health name "<provider>:<keyId>"; day is a UTC date. Idempotent table so
+-- CI can re-run schema.sql on every deploy.
+CREATE TABLE IF NOT EXISTS api_key_usage (
+  provider TEXT NOT NULL,
+  key_index TEXT NOT NULL,
+  day TEXT NOT NULL,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (provider, key_index, day)
+);
+
 -- Dynamic provider configuration (方案B): keys/models/RPM managed from the
 -- admin panel at runtime — no redeploy needed. D1 is the source of truth;
 -- env secrets remain a fallback/bootstrap source (see src/provider-keys.ts).
