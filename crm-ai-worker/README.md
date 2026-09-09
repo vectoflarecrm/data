@@ -171,7 +171,7 @@ GROQ_API_KEY, GROQ_API_KEY_2 … GROQ_API_KEY_40
 CEREBRAS_API_KEY, CEREBRAS_API_KEY_2 … CEREBRAS_API_KEY_40
 ZHIPU_API_KEY, ZHIPU_API_KEY_2 … ZHIPU_API_KEY_40
 NVIDIA_API_KEY, NVIDIA_API_KEY_2 … NVIDIA_API_KEY_40
-AMD_API_KEY, AMD_API_KEY_2 … AMD_API_KEY_40  (AMD Radeon Cloud, 默认模型 deepseek/deepseek-v4-flash-0731)
+AMD_API_KEY, AMD_API_KEY_2 … AMD_API_KEY_40  (AMD Radeon Cloud, 默认模型 DeepSeek-V4-Flash)
 MISTRAL_API_KEY, MISTRAL_API_KEY_2 … MISTRAL_API_KEY_40
 DEEPSEEK_API_KEY, DEEPSEEK_API_KEY_2 … DEEPSEEK_API_KEY_40
 OPENROUTER_API_KEY, OPENROUTER_API_KEY_2 … OPENROUTER_API_KEY_40
@@ -181,6 +181,16 @@ BRAVE_API_KEY, BRAVE_API_KEY_2  (备用搜索, https://brave.com/search/api/)
 FIRECRAWL_API_KEY  (可选, 反爬降级, https://www.firecrawl.dev/)
 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID  (面板引导凭据, 仅 Workers Scripts: Edit)
 ```
+
+### 搜索平台免费额度与重置（2026-09 核实）
+
+| 平台 | 免费额度 | 计费规则 | 重置时间 |
+|---|---|---|---|
+| Tavily | 1,000 Credits / 月/账号 | `basic` 搜索 1 Credit/次；`advanced` 搜索 2 Credits/次（即 500 次）；`extract` 每 5 个网页扣 1 Credit | 自然月每月 1 号 UTC 0:00，所有账号统一 |
+| Exa | **$10 额度 / 月/账号**（注册另送 $20，约 2,800 次搜索） | 按 $ 计费：搜索约 $5/千次（`auto`），抓取正文按结果条数另计 | 滚动账单周期：按各账号注册日每 30 天重置（Dashboard → Usage & Billing 显示 *Resets on 日期*） |
+| Brave Search | 2,000 次 / 月/账号 | 网页搜索 1 次/请求 | 自然月 1 号 |
+
+多账号（Key 池）额度线性叠加：例如 10 个 Tavily Key = 10,000 Credits/月；本项目 `advanced` 深度搜索为主，单个 Tavily Key 实际可用约 **500 次深度搜索/月**。Exa 按 $ 扣费且周期独立于自然月，适合作为 Tavily 额度耗尽后的接力层（面板冷却机制会在 429/额度耗尽时自动切换到下一个 Key/平台）。
 
 邮件发送还需要 Google Workspace Gmail 配置：
 
