@@ -1482,7 +1482,7 @@ tvly-zzzzzzzz,账号3"></textarea>
   <p><button class="btn on" id="bulkImport" style="padding:9px 22px">批量导入</button></p>
 </div>
 <div class="card"><h2>🗝 已配置 Keys</h2><div style="overflow-x:auto"><table id="keysTable"><thead><tr><th>平台</th><th>备注</th><th>Key</th><th>RPM</th><th>模型</th><th>状态</th><th>最近错误</th><th>操作</th></tr></thead><tbody></tbody></table></div></div>
-<div class="card"><h2>📊 本月用量（成功调用数，按自然月）</h2><div id="usageBox"><p style="color:#6b7280;margin:4px 0">加载中…</p></div></div>
+<div class="card"><h2>📊 本月用量（成功调用数，按自然月）<span style="font-size:11px;color:#94a3b8;font-weight:400"> v2026-09-09b</span></h2><div id="usageBox"><p style="color:#6b7280;margin:4px 0">加载中…</p></div></div>
 <div class="card"><h2>🧊 冷却中的 Key（429/限流自动暂停）</h2><div id="cooldownBox"></div></div>
 <div class="card"><h2>📜 冷却历史（最近 20 条）</h2><div id="historyBox"></div></div>
 <div class="card"><h2>⚙️ 平台设置（默认模型 / 总RPM / 启用）</h2><div id="settingsBox"></div></div>
@@ -1587,7 +1587,11 @@ document.querySelectorAll('.btn.tpl').forEach(function(b){
 });
 document.getElementById('bulkImport').onclick=function(){
   var btn=this;btn.disabled=true;
-  api('/admin/api/keys/bulk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:document.getElementById('bulkProvider').value,label_prefix:document.getElementById('bulkLabel').value,model:document.getElementById('bulkModel').value,rpm_limit:document.getElementById('bulkRpm').value||null,keys:document.getElementById('bulkKeys').value})})
+  var txt=document.getElementById('bulkKeys').value;
+  if(!txt.trim()){toast('请先粘贴 Key 列表（可点击上方模板按钮填充格式）',true);btn.disabled=false;return;}
+  if(txt.indexOf('你的APIKey')!==-1){toast('模板占位符未替换：请把 你的APIKey1 换成真实 Key 再导入',true);btn.disabled=false;return;}
+  toast('正在导入…');
+  api('/admin/api/keys/bulk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:document.getElementById('bulkProvider').value,label_prefix:document.getElementById('bulkLabel').value,model:document.getElementById('bulkModel').value,rpm_limit:document.getElementById('bulkRpm').value||null,keys:txt})})
   .then(function(r){toast('批量导入完成：新增 '+r.added+' 个'+(r.skipped?('，跳过重复 '+r.skipped+' 个'):''));document.getElementById('bulkKeys').value='';loadKeys()})
   .catch(function(e){toast(e.message,true)})
   .finally(function(){btn.disabled=false});

@@ -61,7 +61,7 @@ export function parseBulkKeyEntries(raw: string): BulkKeyEntry[] {
       continue;
     }
 
-    const key = (pieces[0] ?? "").trim();
+    const key = (pieces[0] ?? "").trim().replace(/^["']+|["']+$/g, "").trim();
     if (key.length < 8 || seen.has(key)) continue;
 
     // "key,label…": pieces[1..] form the label (re-joined so commas inside
