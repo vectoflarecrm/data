@@ -1350,7 +1350,7 @@ tr.inactive td{opacity:.5}
   <div class="grid">
     <div class="field"><label>平台</label><select id="nkProvider">
       <option value="gemini">Gemini</option><option value="groq">Groq</option><option value="cerebras">Cerebras</option>
-      <option value="zhipu">Zhipu GLM</option><option value="nvidia">NVIDIA NIM</option><option value="mistral">Mistral</option>
+      <option value="zhipu">Zhipu GLM</option><option value="nvidia">NVIDIA NIM</option><option value="amd">AMD Radeon</option><option value="mistral">Mistral</option>
       <option value="deepseek">DeepSeek</option><option value="openrouter">OpenRouter</option>
       <option value="tavily">Tavily 搜索</option><option value="exa">Exa 搜索</option><option value="brave">Brave 搜索</option><option value="searlo">Searlo 搜索</option>
     </select></div>
