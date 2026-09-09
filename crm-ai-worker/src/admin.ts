@@ -472,7 +472,9 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
     return jsonResponse({ ok: true, id: result.meta?.last_row_id ?? null });
   }
 
-  // POST /admin/api/keys/bulk — bulk import keys (one per line, or comma/semicolon/space separated).
+  // POST /admin/api/keys/bulk — bulk import keys.
+  // Template format: one entry per line, "key,label" (label = 备注/账号).
+  // Also accepts key<TAB>label, key|label, or bare keys (one per line).
   // Duplicates within the paste AND keys already stored for the provider are skipped.
   if (request.method === "POST" && path === "/admin/api/keys/bulk") {
     const body = await request.json() as Record<string, unknown>;
@@ -481,11 +483,21 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
       return jsonResponse({ detail: `provider 必须是: ${PANEL_PROVIDERS.join(", ")}` }, 400);
     }
     const raw = typeof body.keys === "string" ? body.keys : "";
-    const candidates = Array.from(new Set(
-      raw.split(/[\s,;]+/).map((k) => k.trim()).filter((k) => k.length >= 8),
-    ));
-    if (candidates.length === 0) {
-      return jsonResponse({ detail: "未解析到任何 Key（每行一个，也支持逗号/分号分隔）" }, 400);
+    const entries: Array<{ key: string; label: string | null }> = [];
+    const seenKeys = new Set<string>();
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      // Split key from label on tab / pipe / first comma (label keeps its commas)
+      const m = /^([^\t|,]+)(?:[\t|]+|,\s*)(.*)$/.exec(trimmed);
+      const key = (m ? m[1] : trimmed).trim();
+      const label = (m ? m[2] : "").trim().replace(/^["']+|["']+$/g, "").trim();
+      if (key.length < 8 || seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      entries.push({ key, label: label || null });
+    }
+    if (entries.length === 0) {
+      return jsonResponse({ detail: "未解析到任何 Key。模板格式：每行一条 `API Key,备注/账号`" }, 400);
     }
     const labelPrefix = typeof body.label_prefix === "string" ? body.label_prefix.trim().slice(0, 80) : "";
     const model = typeof body.model === "string" ? body.model.trim() || null : null;
@@ -497,14 +509,16 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
     const existing = new Set((existingRows.results ?? []).map((r) => r.api_key));
     let added = 0;
     let skipped = 0;
-    for (const key of candidates) {
-      if (existing.has(key)) {
+    for (const entry of entries) {
+      if (existing.has(entry.key)) {
         skipped++;
         continue;
       }
+      // Line-provided label wins; otherwise prefix + sequence (账号1, 账号2, …)
+      const label = entry.label ?? (labelPrefix ? `${labelPrefix}${added + 1}` : null);
       await env.DB.prepare(
         `INSERT INTO api_configs (provider, label, api_key, rpm_limit, model, is_active) VALUES (?, ?, ?, ?, ?, 1)`,
-      ).bind(provider, labelPrefix ? `${labelPrefix}${added + 1}` : null, key, rpmLimit, model).run();
+      ).bind(provider, label, entry.key, rpmLimit, model).run();
       added++;
     }
     invalidateProviderCache(provider);
@@ -1413,10 +1427,19 @@ tr.inactive td{opacity:.5}
     <div class="field"><label>统一模型覆盖 (留空=默认)</label><input id="bulkModel" placeholder="仅 AI 平台需要"></div>
     <div class="field"><label>统一单Key RPM (留空=默认)</label><input id="bulkRpm" type="number" min="1"></div>
   </div>
-  <div class="field"><label>Key 列表（每行一个，也支持逗号/分号/空格分隔；自动去重、跳过已存在）</label>
-    <textarea id="bulkKeys" rows="6" autocomplete="off" spellcheck="false" style="width:100%;font-family:monospace;font-size:13px" placeholder="tvly-key1
-tvly-key2
-tvly-key3"></textarea></div>
+  <div class="field"><label>导入模板（每行一条：<b>API Key,备注/账号</b>；也支持 Tab 或 | 分隔，纯 Key 也可以）</label>
+    <textarea id="bulkKeys" rows="8" autocomplete="off" spellcheck="false" style="width:100%;font-family:monospace;font-size:13px" placeholder="tvly-xxxxxxxx,账号1
+tvly-yyyyyyyy,账号2
+tvly-zzzzzzzz,账号3"></textarea>
+    <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <span style="font-size:12px;color:#6b7280">填充模板：</span>
+      <button class="btn tpl" data-tpl="tavily" type="button">Tavily</button>
+      <button class="btn tpl" data-tpl="exa" type="button">Exa</button>
+      <button class="btn tpl" data-tpl="brave" type="button">Brave</button>
+      <button class="btn tpl" data-tpl="generic" type="button">通用</button>
+      <span style="font-size:12px;color:#6b7280">（覆盖 textarea 内容；分隔符可用英文逗号、Tab 或 | ）</span>
+    </div>
+  </div>
   <p><button class="btn on" id="bulkImport" style="padding:9px 22px">批量导入</button></p>
 </div>
 <div class="card"><h2>🗝 已配置 Keys</h2><div style="overflow-x:auto"><table id="keysTable"><thead><tr><th>平台</th><th>备注</th><th>Key</th><th>RPM</th><th>模型</th><th>状态</th><th>最近错误</th><th>操作</th></tr></thead><tbody></tbody></table></div></div>
@@ -1494,6 +1517,15 @@ function loadKeys(){
     });
   }).catch(function(e){toast(e.message,true)});
 }
+var TPL={
+  tavily:'tvly-你的APIKey1,账号1\ntvly-你的APIKey2,账号2\ntvly-你的APIKey3,账号3',
+  exa:'exa-你的APIKey1,账号1\nexa-你的APIKey2,账号2\nexa-你的APIKey3,账号3',
+  brave:'Brave-APIKey1,账号1\nBrave-APIKey2,账号2\nBrave-APIKey3,账号3',
+  generic:'API-Key-1,账号1\nAPI-Key-2,账号2\nAPI-Key-3,账号3'
+};
+document.querySelectorAll('.btn.tpl').forEach(function(b){
+  b.onclick=function(){document.getElementById('bulkKeys').value=TPL[b.getAttribute('data-tpl')]||'';document.getElementById('bulkKeys').focus()};
+});
 document.getElementById('bulkImport').onclick=function(){
   var btn=this;btn.disabled=true;
   api('/admin/api/keys/bulk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:document.getElementById('bulkProvider').value,label_prefix:document.getElementById('bulkLabel').value,model:document.getElementById('bulkModel').value,rpm_limit:document.getElementById('bulkRpm').value||null,keys:document.getElementById('bulkKeys').value})})
