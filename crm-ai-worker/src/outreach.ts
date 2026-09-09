@@ -470,7 +470,7 @@ async function callAiForOutreach(
     { provider: "cerebras", url: "https://api.cerebras.ai/v1/chat/completions", fallbackModel: env.CEREBRAS_MODEL || "llama-3.3-70b" },
     { provider: "zhipu", url: "https://open.bigmodel.cn/api/paas/v4/chat/completions", fallbackModel: env.ZHIPU_MODEL || "glm-4.7-flash" },
     { provider: "nvidia", url: "https://integrate.api.nvidia.com/v1/chat/completions", fallbackModel: env.NVIDIA_MODEL || "meta/llama-3.3-70b-instruct" },
-    { provider: "amd", url: "https://developer.amd.com.cn/radeon/api/v1/chat/completions", fallbackModel: env.AMD_MODEL || "deepseek/deepseek-v4-flash-0731" },
+    { provider: "amd", url: "https://developer.amd.com.cn/radeon/api/v1/chat/completions", fallbackModel: env.AMD_MODEL || "DeepSeek-V4-Flash" },
     { provider: "mistral", url: "https://api.mistral.ai/v1/chat/completions", fallbackModel: env.MISTRAL_MODEL || "mistral-large-latest" },
     { provider: "deepseek", url: "https://api.deepseek.com/v1/chat/completions", fallbackModel: env.DEEPSEEK_MODEL || "deepseek-chat" },
     { provider: "openrouter", url: "https://openrouter.ai/api/v1/chat/completions", fallbackModel: env.OPENROUTER_MODEL || "google/gemini-2.5-flash" },

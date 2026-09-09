@@ -1303,7 +1303,7 @@ async function analyzeWithAmd(
 ): Promise<CustomerAnalysis | null> {
   // AMD Radeon Cloud free model APIs (OpenAI-compatible). Registration:
   // https://developer.amd.com.cn/radeon/tokenfactory (GitHub login, no card).
-  const fallbackModel = env.AMD_MODEL || "deepseek/deepseek-v4-flash-0731";
+  const fallbackModel = env.AMD_MODEL || "DeepSeek-V4-Flash";
   const state = await getProviderState(env, "amd");
   if (!isProviderUsable(state)) return null;
   const amdRpmLimit = state.rpmTotal ?? rpmLimitFor("amd", state.keys.length, rpmEnvOverride(env, "amd"));

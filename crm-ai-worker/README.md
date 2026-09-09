@@ -91,14 +91,14 @@ DeepSeek:   https://platform.deepseek.com/
 OpenRouter: https://openrouter.ai/         (带 :free 后缀的模型免费)
 ```
 
-AMD Radeon Cloud 免费模型目录（可在面板按 Key 覆盖模型 ID，默认使用第一个）：
+AMD Radeon Cloud 免费模型目录（以 API `/models` 实测为准，可在面板按 Key 覆盖模型 ID）：
 
 ```text
-deepseek/deepseek-v4-flash-0731        DeepSeek-V4-Flash, 1M 上下文（默认）
-deepseek/deepseek-v4-flash-vision-exp  DeepSeek-V4-Flash Vision（多模态）
-alibaba/qwen3.8-flash-next             Qwen3.8-Flash-Next, 262K 上下文
-openbmb/minicpm5-1b                    MiniCPM5-1B（轻量）
+DeepSeek-V4-Flash                DeepSeek-V4-Flash, 1M 上下文（默认）
+DeepSeek-V4-Flash-Vision-Exp     DeepSeek-V4-Flash Vision（多模态）
 ```
+
+注意：模型 ID 不带 `deepseek/` 等命名空间前缀（models.dev 等第三方目录的前缀写法在该端点会 404）。全局并发上限约 80（所有用户共享），高峰期常见 429；`response_format` JSON 模式在该后端偶发失效，代码已对其禁用（提示词约束 + 解析校验兜底）。限流默认 20 RPM/Key，可在面板调整。
 
 注意：AMD 公共免费端点为体验级（无 SLA），高峰期可能 429/503；`response_format` JSON 模式在该后端不可靠，代码已对其禁用（提示词约束 + 解析校验兜底）。限流默认 20 RPM/Key，可在面板调整。
 
