@@ -163,11 +163,15 @@ function extractContactEvidence(text: string): { emails: string[]; phones: strin
 }
 // 2026-09: the gemini-2.5 family is no longer available to new Google
 // accounts (chat call returns 404). Official current endpoints per AI Studio:
-// gemini-3.5-flash-lite (30 RPM/key, high TPM — bulk extraction primary) and
-// gemini-3.8-flash (15 RPM/key — deeper reasoning fallback). Both verified
+// gemini-3.5-flash-lite only (30 RPM/key, high TPM — bulk extraction primary).
+// gemini-3.8-flash was dropped: live tests showed 503 high-demand on most keys
+// while lite answered instantly — lite is sufficient for crawl/extract tasks.
 // working on legacy AIzaSy… and new AQ.Ab8… key formats.
 const DEFAULT_MODEL = "gemini-3.5-flash-lite";
-const FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-flash-latest"];
+// Stay on lite-class models: 3.5-flash-lite is sufficient for the extraction
+// workload and 3.8-flash is intentionally NOT in the chain (higher cost/
+// latency; only reachable if explicitly set via GEMINI_MODEL or per-key model).
+const FALLBACK_MODELS = ["gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-flash-latest"];
 const STALE_PROCESSING_MINUTES = 30;
 const RETRYABLE_WEBSITE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const AI_RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
