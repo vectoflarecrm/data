@@ -472,6 +472,45 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
     return jsonResponse({ ok: true, id: result.meta?.last_row_id ?? null });
   }
 
+  // POST /admin/api/keys/bulk — bulk import keys (one per line, or comma/semicolon/space separated).
+  // Duplicates within the paste AND keys already stored for the provider are skipped.
+  if (request.method === "POST" && path === "/admin/api/keys/bulk") {
+    const body = await request.json() as Record<string, unknown>;
+    const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
+    if (!PANEL_PROVIDERS.includes(provider as typeof PANEL_PROVIDERS[number])) {
+      return jsonResponse({ detail: `provider 必须是: ${PANEL_PROVIDERS.join(", ")}` }, 400);
+    }
+    const raw = typeof body.keys === "string" ? body.keys : "";
+    const candidates = Array.from(new Set(
+      raw.split(/[\s,;]+/).map((k) => k.trim()).filter((k) => k.length >= 8),
+    ));
+    if (candidates.length === 0) {
+      return jsonResponse({ detail: "未解析到任何 Key（每行一个，也支持逗号/分号分隔）" }, 400);
+    }
+    const labelPrefix = typeof body.label_prefix === "string" ? body.label_prefix.trim().slice(0, 80) : "";
+    const model = typeof body.model === "string" ? body.model.trim() || null : null;
+    const rpmRaw = Number(body.rpm_limit);
+    const rpmLimit = Number.isFinite(rpmRaw) && rpmRaw > 0 ? Math.floor(rpmRaw) : null;
+
+    const existingRows = await env.DB.prepare(`SELECT api_key FROM api_configs WHERE provider = ?`)
+      .bind(provider).all<{ api_key: string }>();
+    const existing = new Set((existingRows.results ?? []).map((r) => r.api_key));
+    let added = 0;
+    let skipped = 0;
+    for (const key of candidates) {
+      if (existing.has(key)) {
+        skipped++;
+        continue;
+      }
+      await env.DB.prepare(
+        `INSERT INTO api_configs (provider, label, api_key, rpm_limit, model, is_active) VALUES (?, ?, ?, ?, ?, 1)`,
+      ).bind(provider, labelPrefix ? `${labelPrefix}${added + 1}` : null, key, rpmLimit, model).run();
+      added++;
+    }
+    invalidateProviderCache(provider);
+    return jsonResponse({ ok: true, added, skipped });
+  }
+
   // PATCH /admin/api/keys/:id — update label/rpm/model/is_active (NOT the key itself)
   const keyIdMatch = path.match(/^\/admin\/api\/keys\/(\d+)$/);
   if (keyIdMatch) {
@@ -1362,6 +1401,24 @@ tr.inactive td{opacity:.5}
   <p><button class="btn on" id="addKey" style="padding:9px 22px">添加 Key</button></p>
   <p class="hint">Key 池按 D1 优先解析：此处添加的 Key 立即生效（30 秒内全节点刷新）；env Secrets 仅作为引导后备。</p>
 </div>
+<div class="card"><h2>📦 批量导入（适合 Tavily/Exa 等大量 Key）</h2>
+  <div class="grid">
+    <div class="field"><label>平台</label><select id="bulkProvider">
+      <option value="tavily">Tavily 搜索</option><option value="exa">Exa 搜索</option><option value="brave">Brave 搜索</option><option value="searlo">Searlo 搜索</option>
+      <option value="gemini">Gemini</option><option value="groq">Groq</option><option value="cerebras">Cerebras</option>
+      <option value="zhipu">Zhipu GLM</option><option value="nvidia">NVIDIA NIM</option><option value="amd">AMD Radeon</option><option value="mistral">Mistral</option>
+      <option value="deepseek">DeepSeek</option><option value="openrouter">OpenRouter</option>
+    </select></div>
+    <div class="field"><label>备注前缀（自动编号）</label><input id="bulkLabel" placeholder="如: 账号 → 账号1、账号2…"></div>
+    <div class="field"><label>统一模型覆盖 (留空=默认)</label><input id="bulkModel" placeholder="仅 AI 平台需要"></div>
+    <div class="field"><label>统一单Key RPM (留空=默认)</label><input id="bulkRpm" type="number" min="1"></div>
+  </div>
+  <div class="field"><label>Key 列表（每行一个，也支持逗号/分号/空格分隔；自动去重、跳过已存在）</label>
+    <textarea id="bulkKeys" rows="6" autocomplete="off" spellcheck="false" style="width:100%;font-family:monospace;font-size:13px" placeholder="tvly-key1
+tvly-key2
+tvly-key3"></textarea></div>
+  <p><button class="btn on" id="bulkImport" style="padding:9px 22px">批量导入</button></p>
+</div>
 <div class="card"><h2>🗝 已配置 Keys</h2><div style="overflow-x:auto"><table id="keysTable"><thead><tr><th>平台</th><th>备注</th><th>Key</th><th>RPM</th><th>模型</th><th>状态</th><th>最近错误</th><th>操作</th></tr></thead><tbody></tbody></table></div></div>
 <div class="card"><h2>🧊 冷却中的 Key（429/限流自动暂停）</h2><div id="cooldownBox"></div></div>
 <div class="card"><h2>📜 冷却历史（最近 20 条）</h2><div id="historyBox"></div></div>
@@ -1437,6 +1494,13 @@ function loadKeys(){
     });
   }).catch(function(e){toast(e.message,true)});
 }
+document.getElementById('bulkImport').onclick=function(){
+  var btn=this;btn.disabled=true;
+  api('/admin/api/keys/bulk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:document.getElementById('bulkProvider').value,label_prefix:document.getElementById('bulkLabel').value,model:document.getElementById('bulkModel').value,rpm_limit:document.getElementById('bulkRpm').value||null,keys:document.getElementById('bulkKeys').value})})
+  .then(function(r){toast('批量导入完成：新增 '+r.added+' 个'+(r.skipped?('，跳过重复 '+r.skipped+' 个'):''));document.getElementById('bulkKeys').value='';loadKeys()})
+  .catch(function(e){toast(e.message,true)})
+  .finally(function(){btn.disabled=false});
+};
 document.getElementById('addKey').onclick=function(){
   var btn=this;btn.disabled=true;
   api('/admin/api/keys',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:document.getElementById('nkProvider').value,label:document.getElementById('nkLabel').value,api_key:document.getElementById('nkKey').value,rpm_limit:document.getElementById('nkRpm').value||null,model:document.getElementById('nkModel').value})})
