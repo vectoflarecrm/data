@@ -161,8 +161,13 @@ function extractContactEvidence(text: string): { emails: string[]; phones: strin
     .slice(0, 8);
   return { emails, phones };
 }
-const DEFAULT_MODEL = "gemini-2.5-flash-lite";
-const FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash"];
+// 2026-09: the gemini-2.5 family is no longer available to new Google
+// accounts (chat call returns 404). Official current endpoints per AI Studio:
+// gemini-3.5-flash-lite (30 RPM/key, high TPM — bulk extraction primary) and
+// gemini-3.8-flash (15 RPM/key — deeper reasoning fallback). Both verified
+// working on legacy AIzaSy… and new AQ.Ab8… key formats.
+const DEFAULT_MODEL = "gemini-3.5-flash-lite";
+const FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-flash-latest"];
 const STALE_PROCESSING_MINUTES = 30;
 const RETRYABLE_WEBSITE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const AI_RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
@@ -521,9 +526,11 @@ async function tavilySearch(query: string, env: Env, taskKeyIndex = 0): Promise<
           }),
         },
       );
-      if (resp.status === 429 || resp.status === 401 || resp.status === 403) {
+      if (resp.status === 429 || resp.status === 401 || resp.status === 403 || resp.status === 432) {
         // Quota used up / key rejected: disable the key for the cooldown period
         // so no later task calls it again, then fall back to the next key.
+        // 432 is Tavily's nonstandard "plan usage limit exceeded" — treated
+        // the same as 429 (monthly quota gone until reset).
         await markKeyExhausted(env, "tavily", healthName, SEARCH_KEY_COOLDOWN_MS, `HTTP ${resp.status}`);
         continue;
       }

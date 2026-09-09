@@ -29,7 +29,8 @@ export type ProviderId =
 
 // Conservative per-key free-tier RPM (well below the official caps so brief
 // bursts never hard-hit the upstream limit):
-// - gemini: flash-lite 15 RPM, flash 10 RPM -> use the stricter one
+// - gemini: 3.5-flash-lite 30 RPM official (burst-sensitive, keep ≥2s spacing),
+//   3.8-flash 15 RPM -> 12 keeps a safe margin under both
 // - groq: 30 RPM official -> 25
 // - cerebras: 30 RPM official free tier -> 25
 // - mistral: free tier allows ~1 req/s -> 20 keeps a wide margin
@@ -40,7 +41,7 @@ export type ProviderId =
 // - amd: Radeon Cloud free model APIs (no documented RPM cap yet) -> 20
 // - openrouter: :free models ~20 RPM -> 15
 export const PER_KEY_RPM: Record<ProviderId, number> = {
-  gemini: 10,
+  gemini: 12,
   groq: 25,
   cerebras: 25,
   mistral: 20,

@@ -525,7 +525,7 @@ async function callGeminiOutreach(
   prompt: string,
   key: string
 ): Promise<{ subject: string; body: string }> {
-  const model = env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+  const model = env.GEMINI_MODEL || "gemini-3.5-flash-lite";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
 
   const response = await fetch(url, {
