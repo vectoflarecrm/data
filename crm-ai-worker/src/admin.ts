@@ -1358,7 +1358,65 @@ function api(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){loca
 document.querySelectorAll('.tab').forEach(function(tab){tab.onclick=function(){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tab-content').forEach(function(c){c.style.display='none'});tab.classList.add('active');document.getElementById('tab-'+tab.dataset.tab).style.display='block';if(tab.dataset.tab==='settings')loadBrands();if(tab.dataset.tab==='emails'){loadStats();loadEmails();loadQuota()}}});
 
 // Brand settings
-function loadBrands(){api('/admin/api/outreach/settings').then(function(d){var h='';d.settings.forEach(function(b){h+='<div class="brand-card"><div class="brand-header"><div><span class="brand-name">'+esc(b.brand_name)+'</span> <span class="brand-category">'+esc(b.product_category)+'</span></div><label class="toggle"><input type="checkbox" '+(b.enabled?'checked':'')+' data-brand="'+esc(b.brand_name)+'" class="enable-toggle"><span class="slider"></span></label></div><label style="font-weight:600;font-size:13px;color:#475569">发件身份（From 邮箱 / 显示名）</label><div style="display:flex;gap:8px;margin-top:4px"><input class="sender-email" data-brand="'+esc(b.brand_name)+'" placeholder="sender@yourdomain.com" value="'+esc(b.sender_email||'')+'" style="flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"><input class="sender-name" data-brand="'+esc(b.brand_name)+'" placeholder="Toby | Afarer Team" value="'+esc(b.sender_name||'')+'" style="flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"></div><label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件签名（原样附加在正文末尾）</label><textarea class="signature-textarea" data-brand="'+esc(b.brand_name)+'" style="width:100%;min-height:70px;margin-top:4px;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-family:monospace">'+esc(b.signature||'')+'</textarea><label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件附件（最多 5 个，每个 ≤1.4MB，发送时自动附带）</label><div class="att-list" data-brand="'+esc(b.brand_name)+'" style="margin-top:4px;font-size:13px;color:#334155">加载中…</div><div style="display:flex;gap:8px;margin-top:6px;align-items:center"><input type="file" class="att-file" data-brand="'+esc(b.brand_name)+'" style="font-size:13px"><button class="btn btn-sm btn-primary att-upload" data-brand="'+esc(b.brand_name)+'">⬆ 上传附件</button></div><label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">公司简介</label><textarea class="intro-textarea" data-brand="'+esc(b.brand_name)+'">'+esc(b.company_intro)+'</textarea><div style="margin-top:10px;text-align:right"><button class="btn btn-primary btn-sm save-brand" data-brand="'+esc(b.brand_name)+'">💾 保存配置</button></div></div>'});document.getElementById('brandsArea').innerHTML=h||'<p>暂无品牌配置</p>';document.querySelectorAll('.brand-card').forEach(function(card){var brand=card.querySelector('.enable-toggle').dataset.brand;loadAttachments(brand)});document.querySelectorAll('.enable-toggle').forEach(function(el){el.onchange=function(){var brand=el.dataset.brand;var enabled=el.checked;api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enabled})}).then(function(){showToast(brand+(enabled?' 已启用':' 已禁用'),true)}).catch(function(e){showToast(e.message,false);el.checked=!enabled)}}});document.querySelectorAll('.att-upload').forEach(function(el){el.onclick=function(){var brand=el.dataset.brand;var input=document.querySelector('.att-file[data-brand="'+brand+'"]');if(!input.files||!input.files[0]){showToast('请选择文件',false);return}var file=input.files[0];if(file.size>1400000){showToast('文件超过 1.4MB（D1 存储限制）',false);return}var btn=el;btn.disabled=true;btn.textContent='⏳ 上传中…';var reader=new FileReader();reader.onload=function(){var b64=reader.result.split(',')[1];api('/admin/api/outreach/attachments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:brand,filename:file.name,mime_type:file.type||'application/octet-stream',content_base64:b64})}).then(function(){showToast('附件已上传',true);loadAttachments(brand)}).catch(function(e){showToast(e.message,false)}).finally(function(){btn.disabled=false;btn.textContent='⬆ 上传附件';input.value=''})};reader.readAsDataURL(file)}});document.querySelectorAll('.save-brand').forEach(function(el){el.onclick=function(){var brand=el.dataset.brand;var ta=document.querySelector('.intro-textarea[data-brand="'+brand+'"]');var se=document.querySelector('.sender-email[data-brand="'+brand+'"]');var sn=document.querySelector('.sender-name[data-brand="'+brand+'"]');var sg=document.querySelector('.signature-textarea[data-brand="'+brand+'"]');api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({company_intro:ta.value,sender_email:se.value,sender_name:sn.value,signature:sg.value})}).then(function(){showToast(brand+' 配置已保存（签名已更新）',true)}).catch(function(e){showToast(e.message,false)}})})}).catch(function(e){document.getElementById('brandsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>'})}
+function loadBrands(){
+  api('/admin/api/outreach/settings').then(function(d){
+    var h='';
+    d.settings.forEach(function(b){
+      h+='<div class="brand-card"><div class="brand-header"><div><span class="brand-name">'+esc(b.brand_name)+'</span> <span class="brand-category">'+esc(b.product_category)+'</span></div><label class="toggle"><input type="checkbox" '+(b.enabled?'checked':'')+' data-brand="'+esc(b.brand_name)+'" class="enable-toggle"><span class="slider"></span></label></div>'+
+        '<label style="font-weight:600;font-size:13px;color:#475569">发件身份（From 邮箱 / 显示名）</label><div style="display:flex;gap:8px;margin-top:4px"><input class="sender-email" data-brand="'+esc(b.brand_name)+'" placeholder="sender@yourdomain.com" value="'+esc(b.sender_email||'')+'" style="flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"><input class="sender-name" data-brand="'+esc(b.brand_name)+'" placeholder="Toby | Afarer Team" value="'+esc(b.sender_name||'')+'" style="flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"></div>'+
+        '<label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件签名（原样附加在正文末尾）</label><textarea class="signature-textarea" data-brand="'+esc(b.brand_name)+'" style="width:100%;min-height:70px;margin-top:4px;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-family:monospace">'+esc(b.signature||'')+'</textarea>'+
+        '<label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件附件（最多 5 个，每个 ≤1.4MB，发送时自动附带）</label><div class="att-list" data-brand="'+esc(b.brand_name)+'" style="margin-top:4px;font-size:13px;color:#334155">加载中…</div><div style="display:flex;gap:8px;margin-top:6px;align-items:center"><input type="file" class="att-file" data-brand="'+esc(b.brand_name)+'" style="font-size:13px"><button class="btn btn-sm btn-primary att-upload" data-brand="'+esc(b.brand_name)+'">⬆ 上传附件</button></div>'+
+        '<label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">公司简介</label><textarea class="intro-textarea" data-brand="'+esc(b.brand_name)+'">'+esc(b.company_intro)+'</textarea><div style="margin-top:10px;text-align:right"><button class="btn btn-primary btn-sm save-brand" data-brand="'+esc(b.brand_name)+'">💾 保存配置</button></div></div>';
+    });
+    document.getElementById('brandsArea').innerHTML=h||'<p>暂无品牌配置</p>';
+    document.querySelectorAll('.brand-card').forEach(function(card){
+      var brand=card.querySelector('.enable-toggle').dataset.brand;
+      loadAttachments(brand);
+    });
+    document.querySelectorAll('.enable-toggle').forEach(function(el){
+      el.onchange=function(){
+        var brand=el.dataset.brand;
+        var enabled=el.checked;
+        api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enabled})})
+          .then(function(){showToast(brand+(enabled?' 已启用':' 已禁用'),true)})
+          .catch(function(e){showToast(e.message,false);el.checked=!enabled});
+      };
+    });
+    document.querySelectorAll('.att-upload').forEach(function(el){
+      el.onclick=function(){
+        var brand=el.dataset.brand;
+        var input=document.querySelector('.att-file[data-brand="'+brand+'"]');
+        if(!input.files||!input.files[0]){showToast('请选择文件',false);return}
+        var file=input.files[0];
+        if(file.size>1400000){showToast('文件超过 1.4MB（D1 存储限制）',false);return}
+        var btn=el;btn.disabled=true;btn.textContent='⏳ 上传中…';
+        var reader=new FileReader();
+        reader.onload=function(){
+          var b64=reader.result.split(',')[1];
+          api('/admin/api/outreach/attachments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:brand,filename:file.name,mime_type:file.type||'application/octet-stream',content_base64:b64})})
+            .then(function(){showToast('附件已上传',true);loadAttachments(brand)})
+            .catch(function(e){showToast(e.message,false)})
+            .finally(function(){btn.disabled=false;btn.textContent='⬆ 上传附件';input.value=''});
+        };
+        reader.readAsDataURL(file);
+      };
+    });
+    document.querySelectorAll('.save-brand').forEach(function(el){
+      el.onclick=function(){
+        var brand=el.dataset.brand;
+        var ta=document.querySelector('.intro-textarea[data-brand="'+brand+'"]');
+        var se=document.querySelector('.sender-email[data-brand="'+brand+'"]');
+        var sn=document.querySelector('.sender-name[data-brand="'+brand+'"]');
+        var sg=document.querySelector('.signature-textarea[data-brand="'+brand+'"]');
+        api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({company_intro:ta.value,sender_email:se.value,sender_name:sn.value,signature:sg.value})})
+          .then(function(){showToast(brand+' 配置已保存（签名已更新）',true)})
+          .catch(function(e){showToast(e.message,false)});
+      };
+    });
+  }).catch(function(e){
+    document.getElementById('brandsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>';
+  });
+}
 
 function loadAttachments(brand){var box=document.querySelector('.att-list[data-brand="'+brand+'"]');if(!box)return;api('/admin/api/outreach/attachments?brand='+encodeURIComponent(brand)).then(function(d){if(!d.attachments.length){box.innerHTML='<span style="color:#6b7280">暂无附件</span>';return}box.innerHTML=d.attachments.map(function(a){return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0"><span>📄 '+esc(a.filename)+' ('+Math.round(a.size_bytes/1024)+' KB)</span><button class="btn btn-sm btn-danger att-del" data-id="'+a.id+'" data-brand="'+esc(brand)+'">删除</button></div>'}).join('');box.querySelectorAll('.att-del').forEach(function(btn){btn.onclick=function(){api('/admin/api/outreach/attachments/'+btn.dataset.id,{method:'DELETE'}).then(function(){showToast('附件已删除',true);loadAttachments(btn.dataset.brand)}).catch(function(e){showToast(e.message,false)})}})}).catch(function(){box.innerHTML='<span style="color:#6b7280">附件加载失败</span>'})}
 
@@ -1371,18 +1429,49 @@ function showMsg(id,t,g){var e=document.getElementById(id);if(!e)return;e.textCo
 // Email list
 var emailState={offset:0,limit:20,total:0};
 function loadStats(){api('/admin/api/outreach/stats').then(function(s){var h='<div class="stat-card"><div class="stat-value">'+s.total+'</div><div class="stat-label">总计</div></div><div class="stat-card"><div class="stat-value">'+s.draft+'</div><div class="stat-label">草稿</div></div><div class="stat-card"><div class="stat-value">'+s.sent+'</div><div class="stat-label">已发送</div></div>';s.by_brand.forEach(function(b){h+='<div class="stat-card"><div class="stat-value">'+b.count+'</div><div class="stat-label">'+esc(b.brand_name)+'</div></div>'});document.getElementById('statsArea').innerHTML=h}).catch(function(){})}
-function loadEmails(){var brand=document.getElementById('filterBrand').value;var status=document.getElementById('filterStatus').value;var p=new URLSearchParams({limit:String(emailState.limit),offset:String(emailState.offset)});if(brand)p.set('brand',brand);if(status)p.set('status',status);
-api('/admin/api/outreach/emails?'+p.toString()).then(function(d){emailState.total=d.total;var h='';d.items.forEach(function(e){h+='<div class="email-card"><div class="email-header"><span class="email-subject">'+esc(e.subject||'(无主题)')+'</span><div><span class="badge badge-'+esc(e.status)+'">'+(e.status==='sent'?'已发送':'草稿')+'</span> <button class="btn btn-sm btn-danger del-email" data-id="'+e.id+'">删除</button>'+(e.status==='draft'?' <button class="btn btn-sm btn-primary send-one" data-id="'+e.id+'">📧 发送</button>':'')+'</div></div><div class="email-meta">'+esc(e.brand_name||'')+' → '+esc(e.company_name||'')+' ('+esc(e.display_id||'')+') | 收件人: '+esc(e.email_to||'未知')+' | '+esc(e.created_at||'')+'</div><div class="email-body">'+esc(e.body||'')+'</div></div>'});if(!d.items.length)h='<p style="color:#6b7280;text-align:center;padding:20px">暂无开发信</p>';
-emailState.total=d.total;document.getElementById('emailsArea').innerHTML=h;document.getElementById('emailPageInfo').textContent=(d.total?emailState.offset+1:0)+'-'+Math.min(emailState.offset+emailState.limit,d.total)+' / '+d.total;
-document.getElementById('emailPrev').disabled=emailState.offset===0;document.getElementById('emailNext').disabled=emailState.offset+emailState.limit>=d.total;
-document.querySelectorAll('.del-email').forEach(function(b){b.onclick=function(){if(!confirm('确定删除？'))return;api('/admin/api/outreach/emails/'+b.dataset.id,{method:'DELETE'}).then(function(){showToast('已删除',true);loadEmails();loadStats()}).catch(function(e){showToast(e.message,false)}}});
-document.querySelectorAll('.send-one').forEach(function(b){b.onclick=function(){
-if(b.disabled)return;b.disabled=true;b.textContent='⏳…';
-api('/admin/api/outreach/emails/'+b.dataset.id+'/send',{method:'POST'}).then(function(d){
-if(d.ok){showToast('已通过 Gmail 发送（今日 '+d.quota.sent_today+'/'+d.quota.daily_limit+'）',true)}
-else{showToast('发送失败：'+(d.error||'未知错误'),false)}
-loadQuota();loadStats();loadEmails()}).catch(function(e){showToast(e.message,false);b.disabled=false;b.textContent='📧 发送'}}})}).catch(function(e){document.getElementById('emailsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>'})}
-
+function loadEmails(){
+  var brand=document.getElementById('filterBrand').value;
+  var status=document.getElementById('filterStatus').value;
+  var p=new URLSearchParams({limit:String(emailState.limit),offset:String(emailState.offset)});
+  if(brand)p.set('brand',brand);
+  if(status)p.set('status',status);
+  api('/admin/api/outreach/emails?'+p.toString()).then(function(d){
+    emailState.total=d.total;
+    var h='';
+    d.items.forEach(function(e){
+      h+='<div class="email-card"><div class="email-header"><span class="email-subject">'+esc(e.subject||'(无主题)')+'</span><div><span class="badge badge-'+esc(e.status)+'">'+(e.status==='sent'?'已发送':'草稿')+'</span> <button class="btn btn-sm btn-danger del-email" data-id="'+e.id+'">删除</button>'+(e.status==='draft'?' <button class="btn btn-sm btn-primary send-one" data-id="'+e.id+'">📧 发送</button>':'')+'</div></div><div class="email-meta">'+esc(e.brand_name||'')+' → '+esc(e.company_name||'')+' ('+esc(e.display_id||'')+') | 收件人: '+esc(e.email_to||'未知')+' | '+esc(e.created_at||'')+'</div><div class="email-body">'+esc(e.body||'')+'</div></div>';
+    });
+    if(!d.items.length)h='<p style="color:#6b7280;text-align:center;padding:20px">暂无开发信</p>';
+    emailState.total=d.total;
+    document.getElementById('emailsArea').innerHTML=h;
+    document.getElementById('emailPageInfo').textContent=(d.total?emailState.offset+1:0)+'-'+Math.min(emailState.offset+emailState.limit,d.total)+' / '+d.total;
+    document.getElementById('emailPrev').disabled=emailState.offset===0;
+    document.getElementById('emailNext').disabled=emailState.offset+emailState.limit>=d.total;
+    document.querySelectorAll('.del-email').forEach(function(b){
+      b.onclick=function(){
+        if(!confirm('确定删除？'))return;
+        api('/admin/api/outreach/emails/'+b.dataset.id,{method:'DELETE'})
+          .then(function(){showToast('已删除',true);loadEmails();loadStats()})
+          .catch(function(e){showToast(e.message,false)});
+      };
+    });
+    document.querySelectorAll('.send-one').forEach(function(b){
+      b.onclick=function(){
+        if(b.disabled)return;
+        b.disabled=true;b.textContent='⏳…';
+        api('/admin/api/outreach/emails/'+b.dataset.id+'/send',{method:'POST'})
+          .then(function(d){
+            if(d.ok){showToast('已通过 Gmail 发送（今日 '+d.quota.sent_today+'/'+d.quota.daily_limit+'）',true)}
+            else{showToast('发送失败：'+(d.error||'未知错误'),false)}
+            loadQuota();loadStats();loadEmails();
+          })
+          .catch(function(e){showToast(e.message,false);b.disabled=false;b.textContent='📧 发送'});
+      };
+    });
+  }).catch(function(e){
+    document.getElementById('emailsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>';
+  });
+}
 document.getElementById('refreshEmails').onclick=function(){emailState.offset=0;loadEmails()};
 
 function loadQuota(){api('/admin/api/outreach/quota').then(function(q){document.getElementById('quotaInfo').textContent='📧 Gmail 今日 '+q.sent_today+'/'+q.daily_limit+' 剩余 '+q.remaining}).catch(function(){document.getElementById('quotaInfo').textContent='📧 Gmail 未配置'})}
@@ -1399,7 +1488,7 @@ showToast('开始批量发送，每封间隔几秒，请勿关闭页面',true);
 api('/admin/api/outreach/send-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:brand||undefined,limit:Number(n)||10})}).then(function(d){
 var fails=d.results.filter(function(r){return !r.ok});
 showToast('发送完成：成功 '+d.sent+' 封，失败 '+d.failed+' 封（今日 '+d.quota.sent_today+'/'+d.quota.daily_limit+'）',d.failed===0);
-if(fails.length){console.log('发送失败明细',fails);alert('前3条失败原因：\n'+fails.slice(0,3).map(function(f){return '#'+f.id+': '+f.error}).join('\n'))}
+if(fails.length){console.log('发送失败明细',fails);alert('前3条失败原因：\\n'+fails.slice(0,3).map(function(f){return '#'+f.id+': '+f.error}).join('\\n'))}
 }).catch(function(e){showToast(e.message,false)}).finally(function(){sending=false;btn.textContent='📤 批量发送草稿';loadQuota();loadEmails();loadStats()})};
 document.getElementById('filterBrand').onchange=function(){emailState.offset=0;loadEmails()};
 document.getElementById('filterStatus').onchange=function(){emailState.offset=0;loadEmails()};
@@ -1577,10 +1666,10 @@ function loadKeys(){
   }).catch(function(e){toast(e.message,true)});
 }
 var TPL={
-  tavily:'tvly-你的APIKey1,账号1\ntvly-你的APIKey2,账号2\ntvly-你的APIKey3,账号3',
-  exa:'exa-你的APIKey1,账号1\nexa-你的APIKey2,账号2\nexa-你的APIKey3,账号3',
-  brave:'Brave-APIKey1,账号1\nBrave-APIKey2,账号2\nBrave-APIKey3,账号3',
-  generic:'API-Key-1,账号1\nAPI-Key-2,账号2\nAPI-Key-3,账号3'
+  tavily:'tvly-你的APIKey1,账号1\\ntvly-你的APIKey2,账号2\\ntvly-你的APIKey3,账号3',
+  exa:'exa-你的APIKey1,账号1\\nexa-你的APIKey2,账号2\\nexa-你的APIKey3,账号3',
+  brave:'Brave-APIKey1,账号1\\nBrave-APIKey2,账号2\\nBrave-APIKey3,账号3',
+  generic:'API-Key-1,账号1\\nAPI-Key-2,账号2\\nAPI-Key-3,账号3'
 };
 document.querySelectorAll('.btn.tpl').forEach(function(b){
   b.onclick=function(){document.getElementById('bulkKeys').value=TPL[b.getAttribute('data-tpl')]||'';document.getElementById('bulkKeys').focus()};
