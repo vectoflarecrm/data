@@ -59,6 +59,7 @@ npx wrangler d1 execute crm-ai-db --local --file=./schema.sql
 - 在网页上直接添加/停用/删除任意平台的 Key，可设置单 Key RPM、模型覆盖；
 - 平台级设置支持默认模型、总 RPM 上限和一键启用/停用整个平台；
 - 🧊 冷却监控：被 429/401/403 暂停的 Key 实时显示剩余冷却时间，可一键清除；过期冷却保留在 📜 历史列表（最近 20 条）；页面每 30 秒自动刷新（输入时暂停）；
+- 📦 批量导入（适合 Tavily/Exa/Brave 等大量 Key）：模板格式**每行一条 `API Key,备注/账号`**，也支持 Tab 或 | 分隔（可直接从 Excel/Google Sheets 复制两列粘贴），纯 Key（逗号/分号/空格分隔）也可；面板内置 Tavily/Exa/Brave/通用 一键填充模板；自动去重、跳过已存在的 Key（部分重贴安全）；
 - 数据存于 D1 `api_configs` / `provider_settings` 表，下一个请求即生效（同节点即时，全网 30 秒内刷新），**不需要重新部署，也不需要 GitHub 或命令行**；
 - Worker 按「D1 优先、env Secrets 兑底」解析 Key，面板清空后自动回退到 Secret 池。
 

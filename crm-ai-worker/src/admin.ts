@@ -15,6 +15,7 @@ import {
   GmailConfigError,
 } from "./gmail";
 import { invalidateProviderCache } from "./provider-keys";
+import { parseBulkKeyEntries } from "./bulk-keys";
 
 export interface AdminEnv extends GmailEnv {
   DB: D1Database;
@@ -483,19 +484,7 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
       return jsonResponse({ detail: `provider 必须是: ${PANEL_PROVIDERS.join(", ")}` }, 400);
     }
     const raw = typeof body.keys === "string" ? body.keys : "";
-    const entries: Array<{ key: string; label: string | null }> = [];
-    const seenKeys = new Set<string>();
-    for (const line of raw.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      // Split key from label on tab / pipe / first comma (label keeps its commas)
-      const m = /^([^\t|,]+)(?:[\t|]+|,\s*)(.*)$/.exec(trimmed);
-      const key = (m ? m[1] : trimmed).trim();
-      const label = (m ? m[2] : "").trim().replace(/^["']+|["']+$/g, "").trim();
-      if (key.length < 8 || seenKeys.has(key)) continue;
-      seenKeys.add(key);
-      entries.push({ key, label: label || null });
-    }
+    const entries = parseBulkKeyEntries(raw);
     if (entries.length === 0) {
       return jsonResponse({ detail: "未解析到任何 Key。模板格式：每行一条 `API Key,备注/账号`" }, 400);
     }
