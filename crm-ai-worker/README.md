@@ -85,11 +85,22 @@ Groq:       https://console.groq.com/      (免绑卡, ~30 RPM)
 Cerebras:   https://cloud.cerebras.ai/     (免绑卡, ~30 RPM, 极速, 70B 级模型)
 Zhipu:      https://open.bigmodel.cn/      (GLM-4.7-Flash 永久免费, 200K 上下文)
 NVIDIA NIM: https://build.nvidia.com/      (免费额度, ~40 RPM)
-AMD Radeon: https://developer.amd.com.cn/radeon/tokenfactory  (免费模型 API, DeepSeek-V4-Flash 等, GitHub 登录免绑卡)
+AMD Radeon: https://developer.amd.com.cn/radeon/tokenfactory  (免费模型 API, GitHub 登录免绑卡)
 Mistral:    https://console.mistral.ai/
 DeepSeek:   https://platform.deepseek.com/
 OpenRouter: https://openrouter.ai/         (带 :free 后缀的模型免费)
 ```
+
+AMD Radeon Cloud 免费模型目录（可在面板按 Key 覆盖模型 ID，默认使用第一个）：
+
+```text
+deepseek/deepseek-v4-flash-0731        DeepSeek-V4-Flash, 1M 上下文（默认）
+deepseek/deepseek-v4-flash-vision-exp  DeepSeek-V4-Flash Vision（多模态）
+alibaba/qwen3.8-flash-next             Qwen3.8-Flash-Next, 262K 上下文
+openbmb/minicpm5-1b                    MiniCPM5-1B（轻量）
+```
+
+注意：AMD 公共免费端点为体验级（无 SLA），高峰期可能 429/503；`response_format` JSON 模式在该后端不可靠，代码已对其禁用（提示词约束 + 解析校验兜底）。限流默认 20 RPM/Key，可在面板调整。
 
 可选模型配置：
 
