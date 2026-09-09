@@ -1,4 +1,7 @@
 import { AdminEnv } from "./admin";
+import { rpmLimitFor, tryAcquireRpmSlot, rpmEnvOverride } from "./rate-limit";
+import { collectKeyPool } from "./key-pool";
+import { getProviderState, isProviderUsable, noteProviderKeyError, noteProviderKeySuccess, type ProviderKeyEntry } from "./provider-keys";
 
 /* ── Brand definitions ── */
 export interface BrandConfig {
@@ -384,7 +387,9 @@ export async function generateOutreachEmails(
   for (const customer of customers.results) {
     try {
       const prompt = buildOutreachPrompt(brand, customer);
-      const result = await callAiForOutreach(env, prompt);
+      // Deterministic key per company: customer.id picks the start key so load
+      // spreads across the Gemini pool; rotation only happens on failure.
+      const result = await callAiForOutreach(env, prompt, customer.id);
       if (!result) {
         errors.push(`${customer.display_id || customer.company_id}: AI returned empty`);
         continue;
@@ -421,34 +426,92 @@ export async function generateOutreachEmails(
 }
 
 /* ── Call AI to generate outreach email ── */
+async function getGeminiOutreachKeys(env: AdminEnv): Promise<ProviderKeyEntry[]> {
+  const state = await getProviderState(env, "gemini");
+  return isProviderUsable(state) ? state.keys : [];
+}
+
 async function callAiForOutreach(
   env: AdminEnv,
-  prompt: string
+  prompt: string,
+  customerSeed: number = 0
 ): Promise<{ subject: string; body: string } | null> {
-  // Try Gemini first
-  if (env.GEMINI_API_KEY) {
-    try {
-      return await callGeminiOutreach(env, prompt);
-    } catch { /* try next */ }
+  // Try Gemini first — deterministic start key per company so the pool is
+  // spread evenly; only rotate to the next key on failure (429 etc).
+  const geminiKeys = await getGeminiOutreachKeys(env);
+  if (geminiKeys.length > 0) {
+    const geminiState = await getProviderState(env, "gemini");
+    const geminiRpmLimit = geminiState.rpmTotal ?? rpmLimitFor("gemini", geminiKeys.length, rpmEnvOverride(env, "gemini"));
+    const start = ((customerSeed % geminiKeys.length) + geminiKeys.length) % geminiKeys.length;
+    for (let i = 0; i < geminiKeys.length; i++) {
+      const entry = geminiKeys[(start + i) % geminiKeys.length];
+      // Proactive RPM guard: when the per-minute cap is consumed, stop calling
+      // Gemini entirely and let the fallback providers take over.
+      if (!tryAcquireRpmSlot("gemini", geminiRpmLimit)) break;
+      try {
+        const result = await callGeminiOutreach(env, prompt, entry.key);
+        await noteProviderKeySuccess(env, "gemini", entry);
+        return result;
+      } catch (e) {
+        await noteProviderKeyError(env, "gemini", entry, e instanceof Error ? e.message : String(e));
+      }
+    }
   }
 
-  // Try OpenAI-compatible APIs (Groq, Mistral, DeepSeek, OpenRouter)
-  const openaiKeys = [
-    { key: env.GROQ_API_KEY, url: "https://api.groq.com/openai/v1/chat/completions", model: env.GROQ_MODEL || "llama-3.1-70b-versatile" },
-    { key: env.GROQ_API_KEY_2, url: "https://api.groq.com/openai/v1/chat/completions", model: env.GROQ_MODEL || "llama-3.1-70b-versatile" },
-    { key: env.MISTRAL_API_KEY, url: "https://api.mistral.ai/v1/chat/completions", model: env.MISTRAL_MODEL || "mistral-large-latest" },
-    { key: env.MISTRAL_API_KEY_2, url: "https://api.mistral.ai/v1/chat/completions", model: env.MISTRAL_MODEL || "mistral-large-latest" },
-    { key: env.DEEPSEEK_API_KEY, url: "https://api.deepseek.com/v1/chat/completions", model: env.DEEPSEEK_MODEL || "deepseek-chat" },
-    { key: env.DEEPSEEK_API_KEY_2, url: "https://api.deepseek.com/v1/chat/completions", model: env.DEEPSEEK_MODEL || "deepseek-chat" },
-    { key: env.OPENROUTER_API_KEY, url: "https://openrouter.ai/api/v1/chat/completions", model: env.OPENROUTER_MODEL || "google/gemini-2.5-flash" },
-    { key: env.OPENROUTER_API_KEY_2, url: "https://openrouter.ai/api/v1/chat/completions", model: env.OPENROUTER_MODEL || "google/gemini-2.5-flash" },
-    { key: env.OPENROUTER_API_KEY_3, url: "https://openrouter.ai/api/v1/chat/completions", model: env.OPENROUTER_MODEL || "google/gemini-2.5-flash" },
+  // Try OpenAI-compatible APIs (Groq, Cerebras, Zhipu, NVIDIA, Mistral,
+  // DeepSeek, OpenRouter). Key pools resolve D1-first (panel-managed api_configs
+  // rows), with env secrets as bootstrap fallback.
+  const providerDefs: Array<{
+    provider: "groq" | "cerebras" | "mistral" | "deepseek" | "zhipu" | "nvidia" | "openrouter";
+    url: string;
+    fallbackModel: string;
+  }> = [
+    { provider: "groq", url: "https://api.groq.com/openai/v1/chat/completions", fallbackModel: env.GROQ_MODEL || "llama-3.1-70b-versatile" },
+    { provider: "cerebras", url: "https://api.cerebras.ai/v1/chat/completions", fallbackModel: env.CEREBRAS_MODEL || "llama-3.3-70b" },
+    { provider: "zhipu", url: "https://open.bigmodel.cn/api/paas/v4/chat/completions", fallbackModel: env.ZHIPU_MODEL || "glm-4.7-flash" },
+    { provider: "nvidia", url: "https://integrate.api.nvidia.com/v1/chat/completions", fallbackModel: env.NVIDIA_MODEL || "meta/llama-3.3-70b-instruct" },
+    { provider: "mistral", url: "https://api.mistral.ai/v1/chat/completions", fallbackModel: env.MISTRAL_MODEL || "mistral-large-latest" },
+    { provider: "deepseek", url: "https://api.deepseek.com/v1/chat/completions", fallbackModel: env.DEEPSEEK_MODEL || "deepseek-chat" },
+    { provider: "openrouter", url: "https://openrouter.ai/api/v1/chat/completions", fallbackModel: env.OPENROUTER_MODEL || "google/gemini-2.5-flash" },
   ];
+  const providerSpecs: Array<{
+    provider: "groq" | "cerebras" | "mistral" | "deepseek" | "zhipu" | "nvidia" | "openrouter";
+    url: string;
+    model: string;
+    keys: ProviderKeyEntry[];
+    rpmTotal: number | null;
+  }> = [];
+  for (const def of providerDefs) {
+    const state = await getProviderState(env, def.provider);
+    if (!isProviderUsable(state)) continue;
+    providerSpecs.push({
+      provider: def.provider,
+      url: def.url,
+      model: state.defaultModel || def.fallbackModel,
+      keys: state.keys,
+      rpmTotal: state.rpmTotal,
+    });
+  }
+  const openaiKeys: Array<{ provider: "groq" | "cerebras" | "mistral" | "deepseek" | "zhipu" | "nvidia" | "openrouter"; entry: ProviderKeyEntry; url: string; model: string }> = [];
+  for (const spec of providerSpecs) {
+    for (const entry of spec.keys) {
+      openaiKeys.push({ provider: spec.provider, entry, url: spec.url, model: spec.model });
+    }
+  }
+  const openaiRpmLimits: Record<string, number> = {};
+  for (const spec of providerSpecs) {
+    openaiRpmLimits[spec.provider] = spec.rpmTotal ?? rpmLimitFor(spec.provider, spec.keys.length, rpmEnvOverride(env, spec.provider));
+  }
   for (const api of openaiKeys) {
-    if (!api.key) continue;
+    if (!api.entry.key) continue;
+    if (!tryAcquireRpmSlot(api.provider, openaiRpmLimits[api.provider])) continue;
     try {
-      return await callOpenAIOutreach(api.url, api.key, api.model, prompt);
-    } catch { /* try next */ }
+      const result = await callOpenAIOutreach(api.url, api.entry.key, api.model, prompt);
+      await noteProviderKeySuccess(env, api.provider, api.entry);
+      return result;
+    } catch (e) {
+      await noteProviderKeyError(env, api.provider, api.entry, e instanceof Error ? e.message : String(e));
+    }
   }
 
   return null;
@@ -456,9 +519,9 @@ async function callAiForOutreach(
 
 async function callGeminiOutreach(
   env: AdminEnv,
-  prompt: string
+  prompt: string,
+  key: string
 ): Promise<{ subject: string; body: string }> {
-  const key = env.GEMINI_API_KEY!;
   const model = env.GEMINI_MODEL || "gemini-2.5-flash-lite";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
 

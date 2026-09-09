@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   deploy:
-    name: Typecheck and deploy Worker
+    name: Test, typecheck and deploy Worker
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -70,6 +70,15 @@ jobs:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
       GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
+      CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+      CEREBRAS_API_KEY_2: ${{ secrets.CEREBRAS_API_KEY_2 }}
+      CEREBRAS_MODEL: ${{ secrets.CEREBRAS_MODEL }}
+      ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+      ZHIPU_API_KEY_2: ${{ secrets.ZHIPU_API_KEY_2 }}
+      ZHIPU_MODEL: ${{ secrets.ZHIPU_MODEL }}
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      NVIDIA_API_KEY_2: ${{ secrets.NVIDIA_API_KEY_2 }}
+      NVIDIA_MODEL: ${{ secrets.NVIDIA_MODEL }}
       MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
       MISTRAL_API_KEY_2: ${{ secrets.MISTRAL_API_KEY_2 }}
       MISTRAL_MODEL: ${{ secrets.MISTRAL_MODEL }}
@@ -80,8 +89,19 @@ jobs:
       OPENROUTER_API_KEY_2: ${{ secrets.OPENROUTER_API_KEY_2 }}
       OPENROUTER_API_KEY_3: ${{ secrets.OPENROUTER_API_KEY_3 }}
       OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
+      GEMINI_RPM: ${{ secrets.GEMINI_RPM }}
+      GROQ_RPM: ${{ secrets.GROQ_RPM }}
+      CEREBRAS_RPM: ${{ secrets.CEREBRAS_RPM }}
+      MISTRAL_RPM: ${{ secrets.MISTRAL_RPM }}
+      DEEPSEEK_RPM: ${{ secrets.DEEPSEEK_RPM }}
+      ZHIPU_RPM: ${{ secrets.ZHIPU_RPM }}
+      NVIDIA_RPM: ${{ secrets.NVIDIA_RPM }}
+      OPENROUTER_RPM: ${{ secrets.OPENROUTER_RPM }}
       SEARLO_API_KEY: ${{ secrets.SEARLO_API_KEY }}
       SEARLO_API_KEY_2: ${{ secrets.SEARLO_API_KEY_2 }}
+      BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+      BRAVE_API_KEY_2: ${{ secrets.BRAVE_API_KEY_2 }}
+      FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       TAVILY_API_KEY_1: ${{ secrets.TAVILY_API_KEY_1 }}
       TAVILY_API_KEY_2: ${{ secrets.TAVILY_API_KEY_2 }}
@@ -211,6 +231,9 @@ jobs:
       GMAIL_SEND_DELAY_MS: ${{ secrets.GMAIL_SEND_DELAY_MS }}
       CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
       ADMIN_PANEL_TOKEN: ${{ secrets.ADMIN_PANEL_TOKEN }}
+      # Secret sync from GitHub is now OPT-IN: keys are managed in the admin
+      # panel (/admin/secrets, direct Cloudflare API writes). Set this repo
+      # secret to 'true' only if you want CI to force-sync keys from GitHub.
 
     steps:
       - name: Check out repository
@@ -294,10 +317,16 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Unit tests
+        run: npm test
+
       - name: Deploy Worker
         run: npx wrangler deploy
 
       - name: Sync Worker secrets
+        if: env.SYNC_SECRETS_FROM_GITHUB == 'true'
+        env:
+          SYNC_SECRETS_FROM_GITHUB: ${{ secrets.SYNC_SECRETS_FROM_GITHUB }}
         run: |
           printf '%s' "$GEMINI_API_KEY" | npx wrangler secret put GEMINI_API_KEY
           # Sync extra Gemini keys (up to 40; one fixed key per company task)
@@ -316,6 +345,36 @@ jobs:
           fi
           # Sync Groq keys
           for var_name in GROQ_API_KEY GROQ_API_KEY_2 GROQ_MODEL; do
+            val="${!var_name:-}"
+            if [ -n "$val" ]; then
+              printf '%s' "$val" | npx wrangler secret put "$var_name"
+              echo "Synced $var_name"
+            else
+              npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
+            fi
+          done
+          # Sync Cerebras keys
+          for var_name in CEREBRAS_API_KEY CEREBRAS_API_KEY_2 CEREBRAS_MODEL; do
+            val="${!var_name:-}"
+            if [ -n "$val" ]; then
+              printf '%s' "$val" | npx wrangler secret put "$var_name"
+              echo "Synced $var_name"
+            else
+              npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
+            fi
+          done
+          # Sync Zhipu keys
+          for var_name in ZHIPU_API_KEY ZHIPU_API_KEY_2 ZHIPU_MODEL; do
+            val="${!var_name:-}"
+            if [ -n "$val" ]; then
+              printf '%s' "$val" | npx wrangler secret put "$var_name"
+              echo "Synced $var_name"
+            else
+              npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
+            fi
+          done
+          # Sync NVIDIA NIM keys
+          for var_name in NVIDIA_API_KEY NVIDIA_API_KEY_2 NVIDIA_MODEL; do
             val="${!var_name:-}"
             if [ -n "$val" ]; then
               printf '%s' "$val" | npx wrangler secret put "$var_name"
@@ -346,6 +405,16 @@ jobs:
           done
           # Sync OpenRouter keys
           for var_name in OPENROUTER_API_KEY OPENROUTER_API_KEY_2 OPENROUTER_API_KEY_3 OPENROUTER_MODEL; do
+            val="${!var_name:-}"
+            if [ -n "$val" ]; then
+              printf '%s' "$val" | npx wrangler secret put "$var_name"
+              echo "Synced $var_name"
+            else
+              npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
+            fi
+          done
+          # Sync optional RPM limiter overrides (total RPM per provider)
+          for var_name in GEMINI_RPM GROQ_RPM CEREBRAS_RPM MISTRAL_RPM DEEPSEEK_RPM ZHIPU_RPM NVIDIA_RPM OPENROUTER_RPM; do
             val="${!var_name:-}"
             if [ -n "$val" ]; then
               printf '%s' "$val" | npx wrangler secret put "$var_name"
@@ -394,6 +463,23 @@ jobs:
               npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
             fi
           done
+          # Sync Brave Search keys (free tier ~2,000 queries/month)
+          for var_name in BRAVE_API_KEY BRAVE_API_KEY_2; do
+            val="${!var_name:-}"
+            if [ -n "$val" ]; then
+              printf '%s' "$val" | npx wrangler secret put "$var_name"
+              echo "Synced $var_name"
+            else
+              npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
+            fi
+          done
+          # Sync optional Firecrawl key (fallback scrape for bot-blocked sites)
+          if [ -n "$FIRECRAWL_API_KEY" ]; then
+            printf '%s' "$FIRECRAWL_API_KEY" | npx wrangler secret put FIRECRAWL_API_KEY
+            echo "Synced FIRECRAWL_API_KEY"
+          else
+            npx wrangler secret delete FIRECRAWL_API_KEY --name crm-ai-worker 2>/dev/null || true
+          fi
           # Sync Tavily keys (up to 60; one fixed key per company task)
           # Key #1 accepts both TAVILY_API_KEY and TAVILY_API_KEY_1 naming
           for i in $(seq 1 60); do

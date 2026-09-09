@@ -116,6 +116,34 @@ CREATE TABLE IF NOT EXISTS api_key_health (
   PRIMARY KEY (provider, key_index)
 );
 
+-- Dynamic provider configuration (方案B): keys/models/RPM managed from the
+-- admin panel at runtime — no redeploy needed. D1 is the source of truth;
+-- env secrets remain a fallback/bootstrap source (see src/provider-keys.ts).
+CREATE TABLE IF NOT EXISTS api_configs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider TEXT NOT NULL,             -- gemini | groq | cerebras | zhipu | nvidia | mistral | deepseek | openrouter | tavily | exa | brave | searlo
+  label TEXT,
+  api_key TEXT NOT NULL,
+  rpm_limit INTEGER,                  -- NULL = use default per-key RPM
+  is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+  model TEXT,                         -- optional per-key model override
+  last_error TEXT,
+  last_used_at TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_configs_provider ON api_configs(provider, is_active);
+
+-- Provider-level settings (default model, total RPM override, enabled flag)
+CREATE TABLE IF NOT EXISTS provider_settings (
+  provider TEXT PRIMARY KEY,
+  default_model TEXT,
+  rpm_total INTEGER,                  -- NULL = derive from per-key RPM x key count
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Gmail send log (daily quota tracking + delivery audit for outreach emails)
 CREATE TABLE IF NOT EXISTS gmail_send_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

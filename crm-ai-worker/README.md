@@ -8,7 +8,8 @@ D1 pending customers
 processing
   ↓ 10 秒网页抓取 + HTMLRewriter
 网页纯文本
-  ↓ 15 秒 Gemini AI 分析
+  ↓ 本地数据清洗（免费、零 token）：去重菜单/页脚/样板文字 + 截断到 token 预算
+  ↓ AI 分析（回退链 + RPM 主动限流）
 completed / failed
   ↓ D1 batch 一次性写回
 ```
@@ -49,31 +50,97 @@ npx wrangler d1 execute crm-ai-db --remote --file=./schema.sql
 npx wrangler d1 execute crm-ai-db --local --file=./schema.sql
 ```
 
-写入 AI API Key（不要写入源码或提交到 Git）：
+写入 AI API Key（不要写入源码或提交到 Git）——三种方式：
+
+**方式 A（推荐）：管理面板动态 Key 池（D1 即时生效）**
+
+打开面板 `https://<worker>/admin/keys`（用 ADMIN_PANEL_TOKEN 登录）：
+
+- 在网页上直接添加/停用/删除任意平台的 Key，可设置单 Key RPM、模型覆盖；
+- 平台级设置支持默认模型、总 RPM 上限和一键启用/停用整个平台；
+- 🧊 冷却监控：被 429/401/403 暂停的 Key 实时显示剩余冷却时间，可一键清除；过期冷却保留在 📜 历史列表（最近 20 条）；页面每 30 秒自动刷新（输入时暂停）；
+- 数据存于 D1 `api_configs` / `provider_settings` 表，下一个请求即生效（同节点即时，全网 30 秒内刷新），**不需要重新部署，也不需要 GitHub 或命令行**；
+- Worker 按「D1 优先、env Secrets 兑底」解析 Key，面板清空后自动回退到 Secret 池。
+
+**方式 B：面板直写 Cloudflare Secrets（方案A）**
+
+`https://<worker>/admin/secrets` 页面首次会显示引导表单：粘贴一个仅有 `Workers Scripts: Edit` 权限的 [Cloudflare API Token](https://dash.cloudflare.com/profile/api-tokens) 与 Account ID，面板自动验证并写入自身凭据；之后可在页面上轮换各平台最多 40 个 Key 槽位。
+
+**方式 C：命令行 / GitHub Secrets**
 
 ```bash
-npx wrangler secret put GEMINI_API_KEY
-npx wrangler secret put GROQ_API_KEY
-npx wrangler secret put OPENROUTER_API_KEY
+npx wrangler secret put CLOUDFLARE_API_TOKEN   # 仅方式B引导需要
+npx wrangler secret put CLOUDFLARE_ACCOUNT_ID
+npx wrangler secret put GEMINI_API_KEY         # 直接写入单条
 ```
 
-Gemini 是首选 Provider；Groq、Mistral、DeepSeek 和 OpenRouter 按顺序作为备用 Provider。可为每个 Provider 配置多个 Key，限流或服务异常时自动切换，并在恢复前冷却受限 Key。
+在 GitHub 仓库 Secrets 中配置各平台 Key 后，默认 CI **不再**覆盖面板写入的 Key；只有在仓库 Secrets 额外设置 `SYNC_SECRETS_FROM_GITHUB=true` 时，CI 才会强制用 GitHub 侧的值同步覆盖。
+
+Gemini 是首选 Provider；Groq、Cerebras、Zhipu、NVIDIA、Mistral、DeepSeek 和 OpenRouter 按顺序作为备用 Provider。可为每个 Provider 配置多个 Key，限流或服务异常时自动切换，并在恢复前冷却受限 Key。
+
+各 Provider 免费档注册地址：
+
+```text
+Groq:       https://console.groq.com/      (免绑卡, ~30 RPM)
+Cerebras:   https://cloud.cerebras.ai/     (免绑卡, ~30 RPM, 极速, 70B 级模型)
+Zhipu:      https://open.bigmodel.cn/      (GLM-4.7-Flash 永久免费, 200K 上下文)
+NVIDIA NIM: https://build.nvidia.com/      (免费额度, ~40 RPM)
+Mistral:    https://console.mistral.ai/
+DeepSeek:   https://platform.deepseek.com/
+OpenRouter: https://openrouter.ai/         (带 :free 后缀的模型免费)
+```
 
 可选模型配置：
 
 ```bash
 npx wrangler secret put GEMINI_MODEL
 npx wrangler secret put GROQ_MODEL
+npx wrangler secret put CEREBRAS_MODEL
+npx wrangler secret put ZHIPU_MODEL
+npx wrangler secret put NVIDIA_MODEL
 npx wrangler secret put MISTRAL_MODEL
 npx wrangler secret put DEEPSEEK_MODEL
 npx wrangler secret put OPENROUTER_MODEL
 ```
+
+### RPM 主动限流
+
+Worker 在发起每一次 AI 调用前会先经过本地滑动窗口限流器（`src/rate-limit.ts`）：
+
+- 每家 Provider 的默认上限 = 单 Key 免费档 RPM × 已配置 Key 数量：
+
+```text
+Gemini: 10 RPM/Key, Groq: 25 RPM/Key, Cerebras: 25 RPM/Key,
+Zhipu: 15 RPM/Key, NVIDIA: 30 RPM/Key, Mistral: 20 RPM/Key,
+DeepSeek: 100 RPM/Key（无公开限制）, OpenRouter: 15 RPM/Key
+```
+
+- 达到上限时不再硬撞上游 429，而是直接切到回退链中的下一家 Provider；
+- 配合既有机制：上游返回 429 时自动故障转移，受限 Key 通过 D1 `api_key_health` 表冷却；
+- 限流窗口按 Worker isolate 记账，Cron 任务为单并发顺序执行，足以保护免费档账号；
+- 如需覆盖某家 Provider 的总 RPM，可配置可选 Secret（每家一个，值为数字）：
+
+```bash
+npx wrangler secret put GEMINI_RPM
+npx wrangler secret put GROQ_RPM
+npx wrangler secret put CEREBRAS_RPM
+npx wrangler secret put ZHIPU_RPM
+npx wrangler secret put NVIDIA_RPM
+npx wrangler secret put MISTRAL_RPM
+npx wrangler secret put DEEPSEEK_RPM
+npx wrangler secret put OPENROUTER_RPM
+```
+
+这些 `*_RPM` 变量是普通配置（非敏感），CI 会自动同步；不设置时使用默认值。
 
 默认模型为：
 
 ```text
 Gemini: gemini-2.5-flash-lite
 Groq: llama-3.1-70b-versatile
+Cerebras: llama-3.3-70b
+Zhipu: glm-4.7-flash
+NVIDIA: meta/llama-3.3-70b-instruct
 Mistral: mistral-large-latest
 DeepSeek: deepseek-chat
 OpenRouter: google/gemini-2.5-flash
@@ -83,12 +150,22 @@ OpenRouter: google/gemini-2.5-flash
 
 可用的 Worker Secret：
 
+每家 AI 平台均支持 **40 个 Key** 的运行时 Key 池（搜索类 Tavily/Exa 为 60 个），命名规则 `<平台>_API_KEY`、`<平台>_API_KEY_2` … `<平台>_API_KEY_40`，按序轮询使用，受限 Key 自动冷却；面板 `/admin/secrets` 可直接在线维护全部 Key 槽位。
+
 ```text
 GEMINI_API_KEY, GEMINI_API_KEY_2 … GEMINI_API_KEY_40
-GROQ_API_KEY, GROQ_API_KEY_2, GROQ_MODEL
-MISTRAL_API_KEY, MISTRAL_API_KEY_2, MISTRAL_MODEL
-DEEPSEEK_API_KEY, DEEPSEEK_API_KEY_2, DEEPSEEK_MODEL
-OPENROUTER_API_KEY, OPENROUTER_API_KEY_2, OPENROUTER_API_KEY_3, OPENROUTER_MODEL
+GROQ_API_KEY, GROQ_API_KEY_2 … GROQ_API_KEY_40
+CEREBRAS_API_KEY, CEREBRAS_API_KEY_2 … CEREBRAS_API_KEY_40
+ZHIPU_API_KEY, ZHIPU_API_KEY_2 … ZHIPU_API_KEY_40
+NVIDIA_API_KEY, NVIDIA_API_KEY_2 … NVIDIA_API_KEY_40
+MISTRAL_API_KEY, MISTRAL_API_KEY_2 … MISTRAL_API_KEY_40
+DEEPSEEK_API_KEY, DEEPSEEK_API_KEY_2 … DEEPSEEK_API_KEY_40
+OPENROUTER_API_KEY, OPENROUTER_API_KEY_2 … OPENROUTER_API_KEY_40
+TAVILY_API_KEY, TAVILY_API_KEY_2 … TAVILY_API_KEY_60  (主搜索)
+EXA_API_KEY, EXA_API_KEY_2 … EXA_API_KEY_60
+BRAVE_API_KEY, BRAVE_API_KEY_2  (备用搜索, https://brave.com/search/api/)
+FIRECRAWL_API_KEY  (可选, 反爬降级, https://www.firecrawl.dev/)
+CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID  (面板引导凭据, 仅 Workers Scripts: Edit)
 ```
 
 邮件发送还需要 Google Workspace Gmail 配置：
@@ -210,7 +287,7 @@ GitHub Actions 手动部署步骤：
 npx wrangler d1 execute crm-ai-db --remote --file=./schema.sql
 ```
 
-workflow 会在部署前检查远程 D1 是否存在 `customers` 表，并通过并发锁避免 push 与手动部署同时修改同一个数据库。
+workflow 会在部署前检查远程 D1 是否存在 `customers` 表，并通过并发锁避免 push 与手动部署同时修改同一个数据库。部署后（或手动）执行一次 `npx wrangler d1 execute crm-ai-db --remote --file=./schema.sql` 以创建 `api_configs` / `provider_settings` 动态 Key 池表。
 
 ### D1 客户管理面板
 
@@ -247,6 +324,10 @@ pending → processing → completed
 
 - 使用单条 `UPDATE ... RETURNING` 原子认领 3 条 pending 记录，避免 Cron 并发重复处理；
 - 网页请求超时为 10 秒；
+- AI 分析前会先执行本地数据清洗（`cleanResearchContextForAi`）：剔除导航/页脚/cookie 横幅等样板行、跨来源去重、并按块与全局预算截断（单块 4.5K 字符，总量 30K 字符），显著降低 AI token 消耗；原始研究全文仍保留在 `full_research_text` 供审计；
+- 搜索引擎回退链：Tavily → Brave → Searlo → Exa → DuckDuckGo。Brave Search 免费档约 2,000 次/月（无需信用卡），Key 池支持 `BRAVE_API_KEY`、`BRAVE_API_KEY_2`；
+- 主网站被反爬拦截（HTTP 403/503）或需 JS 渲染时，自动降级用 Firecrawl 无头渲染抓取一次（可选 Key `FIRECRAWL_API_KEY`，未配置时自动跳过）；
+- 确认被反爬拦截且降级失败的客户标记为「需人工复审」并归入 failed，不消耗重试次数；修复后可在管理面板重新置为 pending；
 - Gemini 请求超时为 15 秒；
 - 单个客户失败不会影响同批其他客户；
 - 所有成功或失败结果通过一次 `env.DB.batch()` 批量写回；
@@ -257,7 +338,7 @@ pending → processing → completed
 【合并数据公司ID: 对应的company_id】
 ```
 
-- AI 使用 Gemini → Groq → Mistral → DeepSeek → OpenRouter 的回退链，Key 被限流时进入冷却，避免重复调用受限 Key；
+- AI 使用 Gemini → Groq → Cerebras → Zhipu → NVIDIA → Mistral → DeepSeek → OpenRouter 的回退链，Key 被限流时进入冷却，避免重复调用受限 Key；
 - AI 只能处理网页文本并写入画像字段，不能执行任意 SQL；
 - outreach 面板支持 Afarer（SUPs）和 Neptunor（RIB Boats + Inflatable Boats）两种品牌身份，可分别设置发件人、签名和附件；
 - D1 写回使用 `WHERE id = ? AND status = 'processing'`，避免过期任务覆盖新状态。

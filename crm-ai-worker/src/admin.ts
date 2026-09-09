@@ -14,15 +14,64 @@ import {
   GmailEnv,
   GmailConfigError,
 } from "./gmail";
+import { invalidateProviderCache } from "./provider-keys";
 
 export interface AdminEnv extends GmailEnv {
   DB: D1Database;
   ADMIN_PANEL_TOKEN?: string;
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
+  GEMINI_API_KEY_2?: string;
+  GEMINI_API_KEY_3?: string;
+  GEMINI_API_KEY_4?: string;
+  GEMINI_API_KEY_5?: string;
+  GEMINI_API_KEY_6?: string;
+  GEMINI_API_KEY_7?: string;
+  GEMINI_API_KEY_8?: string;
+  GEMINI_API_KEY_9?: string;
+  GEMINI_API_KEY_10?: string;
+  GEMINI_API_KEY_11?: string;
+  GEMINI_API_KEY_12?: string;
+  GEMINI_API_KEY_13?: string;
+  GEMINI_API_KEY_14?: string;
+  GEMINI_API_KEY_15?: string;
+  GEMINI_API_KEY_16?: string;
+  GEMINI_API_KEY_17?: string;
+  GEMINI_API_KEY_18?: string;
+  GEMINI_API_KEY_19?: string;
+  GEMINI_API_KEY_20?: string;
+  GEMINI_API_KEY_21?: string;
+  GEMINI_API_KEY_22?: string;
+  GEMINI_API_KEY_23?: string;
+  GEMINI_API_KEY_24?: string;
+  GEMINI_API_KEY_25?: string;
+  GEMINI_API_KEY_26?: string;
+  GEMINI_API_KEY_27?: string;
+  GEMINI_API_KEY_28?: string;
+  GEMINI_API_KEY_29?: string;
+  GEMINI_API_KEY_30?: string;
+  GEMINI_API_KEY_31?: string;
+  GEMINI_API_KEY_32?: string;
+  GEMINI_API_KEY_33?: string;
+  GEMINI_API_KEY_34?: string;
+  GEMINI_API_KEY_35?: string;
+  GEMINI_API_KEY_36?: string;
+  GEMINI_API_KEY_37?: string;
+  GEMINI_API_KEY_38?: string;
+  GEMINI_API_KEY_39?: string;
+  GEMINI_API_KEY_40?: string;
   GROQ_API_KEY?: string;
   GROQ_API_KEY_2?: string;
   GROQ_MODEL?: string;
+  CEREBRAS_API_KEY?: string;
+  CEREBRAS_API_KEY_2?: string;
+  CEREBRAS_MODEL?: string;
+  ZHIPU_API_KEY?: string;
+  ZHIPU_API_KEY_2?: string;
+  ZHIPU_MODEL?: string;
+  NVIDIA_API_KEY?: string;
+  NVIDIA_API_KEY_2?: string;
+  NVIDIA_MODEL?: string;
   MISTRAL_API_KEY?: string;
   MISTRAL_API_KEY_2?: string;
   MISTRAL_MODEL?: string;
@@ -33,6 +82,23 @@ export interface AdminEnv extends GmailEnv {
   OPENROUTER_API_KEY_2?: string;
   OPENROUTER_API_KEY_3?: string;
   OPENROUTER_MODEL?: string;
+  BRAVE_API_KEY?: string;
+  BRAVE_API_KEY_2?: string;
+  FIRECRAWL_API_KEY?: string;
+  // Optional total-RPM limiter overrides (see src/rate-limit.ts)
+  GEMINI_RPM?: string;
+  GROQ_RPM?: string;
+  CEREBRAS_RPM?: string;
+  MISTRAL_RPM?: string;
+  DEEPSEEK_RPM?: string;
+  ZHIPU_RPM?: string;
+  NVIDIA_RPM?: string;
+  OPENROUTER_RPM?: string;
+  // Cloudflare API credentials for the panel's secret-management page
+  // (bootstrap once via CI/`wrangler secret put`; keys then rotate in-panel)
+  CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  WORKER_SCRIPT_NAME?: string;
 }
 
 interface AdminCustomer {
@@ -336,6 +402,337 @@ async function updateCustomer(request: Request, env: AdminEnv, id: number): Prom
   }
 }
 
+/* ── Dynamic provider key management (方案B: D1 api_configs, no deploy needed) ── */
+
+const PANEL_PROVIDERS = [
+  "gemini", "groq", "cerebras", "zhipu", "nvidia", "mistral", "deepseek", "openrouter",
+  "tavily", "exa", "brave", "searlo",
+] as const;
+
+async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<Response> {
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  // GET /admin/api/keys — list all provider keys + settings
+  if (request.method === "GET" && path === "/admin/api/keys") {
+    const [keys, settings, cooldowns, history] = await Promise.all([
+      env.DB.prepare(
+        `SELECT id, provider, label, api_key, rpm_limit, is_active, model, last_error, last_used_at, created_at
+         FROM api_configs ORDER BY provider, id`,
+      ).all<Record<string, unknown>>(),
+      env.DB.prepare(`SELECT provider, default_model, rpm_total, enabled FROM provider_settings ORDER BY provider`)
+        .all<Record<string, unknown>>(),
+      // Active cooldowns (api_key_health rows written by the runtime when a
+      // key returns 429/401/403). key_index holds the health name
+      // "<provider>:<keyId>" so it maps directly onto api_configs row ids.
+      env.DB.prepare(
+        `SELECT provider, key_index, exhausted_until, last_error FROM api_key_health
+         WHERE exhausted_until IS NOT NULL AND exhausted_until > datetime('now')
+         ORDER BY provider, key_index`,
+      ).all<Record<string, unknown>>(),
+      // Expired cooldowns stay in the table (rows are upserted, never pruned
+      // on expiry) — surface the most recent 20 as a lightweight history log.
+      env.DB.prepare(
+        `SELECT provider, key_index, exhausted_until, last_error, updated_at FROM api_key_health
+         WHERE exhausted_until IS NOT NULL AND exhausted_until <= datetime('now')
+         ORDER BY updated_at DESC LIMIT 20`,
+      ).all<Record<string, unknown>>(),
+    ]);
+    // Mask keys: show only a short prefix for identification
+    const rows = (keys.results ?? []).map((row) => ({
+      ...row,
+      api_key: typeof row.api_key === "string" && row.api_key.length > 10
+        ? `${row.api_key.slice(0, 6)}…${row.api_key.slice(-4)}`
+        : "…",
+    }));
+    return jsonResponse({ keys: rows, settings: settings.results ?? [], cooldowns: cooldowns.results ?? [], history: history.results ?? [] });
+  }
+
+  // POST /admin/api/keys — add a new key
+  if (request.method === "POST" && path === "/admin/api/keys") {
+    const body = await request.json() as Record<string, unknown>;
+    const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
+    const apiKey = typeof body.api_key === "string" ? body.api_key.trim() : "";
+    if (!PANEL_PROVIDERS.includes(provider as typeof PANEL_PROVIDERS[number])) {
+      return jsonResponse({ detail: `provider 必须是: ${PANEL_PROVIDERS.join(", ")}` }, 400);
+    }
+    if (!apiKey) return jsonResponse({ detail: "api_key 不能为空" }, 400);
+    const label = typeof body.label === "string" ? body.label.trim().slice(0, 100) || null : null;
+    const model = typeof body.model === "string" ? body.model.trim() || null : null;
+    const rpmRaw = Number(body.rpm_limit);
+    const rpmLimit = Number.isFinite(rpmRaw) && rpmRaw > 0 ? Math.floor(rpmRaw) : null;
+    const result = await env.DB.prepare(
+      `INSERT INTO api_configs (provider, label, api_key, rpm_limit, model, is_active) VALUES (?, ?, ?, ?, ?, 1)`,
+    ).bind(provider, label, apiKey, rpmLimit, model).run();
+    invalidateProviderCache(provider);
+    return jsonResponse({ ok: true, id: result.meta?.last_row_id ?? null });
+  }
+
+  // PATCH /admin/api/keys/:id — update label/rpm/model/is_active (NOT the key itself)
+  const keyIdMatch = path.match(/^\/admin\/api\/keys\/(\d+)$/);
+  if (keyIdMatch) {
+    const id = Number(keyIdMatch[1]);
+    const existing = await env.DB.prepare(`SELECT provider FROM api_configs WHERE id = ?`).bind(id)
+      .first<{ provider: string }>();
+    if (!existing) return jsonResponse({ detail: "Key 不存在" }, 404);
+
+    if (request.method === "PATCH") {
+      const body = await request.json() as Record<string, unknown>;
+      const sets: string[] = ["updated_at = CURRENT_TIMESTAMP"];
+      const binds: unknown[] = [];
+      if (body.label !== undefined) {
+        sets.push("label = ?");
+        binds.push(typeof body.label === "string" ? body.label.trim().slice(0, 100) || null : null);
+      }
+      if (body.rpm_limit !== undefined) {
+        const rpm = Number(body.rpm_limit);
+        sets.push("rpm_limit = ?");
+        binds.push(Number.isFinite(rpm) && rpm > 0 ? Math.floor(rpm) : null);
+      }
+      if (body.model !== undefined) {
+        sets.push("model = ?");
+        binds.push(typeof body.model === "string" ? body.model.trim() || null : null);
+      }
+      if (body.is_active !== undefined) {
+        sets.push("is_active = ?");
+        binds.push(body.is_active ? 1 : 0);
+      }
+      if (sets.length > 1) {
+        binds.push(id);
+        await env.DB.prepare(`UPDATE api_configs SET ${sets.join(", ")} WHERE id = ?`).bind(...binds).run();
+        invalidateProviderCache(existing.provider);
+      }
+      return jsonResponse({ ok: true });
+    }
+
+    if (request.method === "DELETE") {
+      await env.DB.prepare(`DELETE FROM api_configs WHERE id = ?`).bind(id).run();
+      // Also drop any cooldown rows for this key so a re-added key starts fresh
+      await env.DB.prepare(
+        `DELETE FROM api_key_health WHERE provider = ? AND key_index = ?`,
+      ).bind(existing.provider, `${existing.provider}:${id}`).run();
+      invalidateProviderCache(existing.provider);
+      return jsonResponse({ ok: true });
+    }
+  }
+
+  // DELETE /admin/api/keys/cooldowns/:provider — manually clear active
+  // cooldowns (e.g. after fixing a key or when a quota resets early)
+  const cooldownMatch = path.match(/^\/admin\/api\/keys\/cooldowns\/([a-z]+)$/);
+  if (cooldownMatch && request.method === "DELETE") {
+    const provider = cooldownMatch[1];
+    if (!PANEL_PROVIDERS.includes(provider as typeof PANEL_PROVIDERS[number])) {
+      return jsonResponse({ detail: "unknown provider" }, 400);
+    }
+    await env.DB.prepare(`DELETE FROM api_key_health WHERE provider = ?`).bind(provider).run();
+    return jsonResponse({ ok: true });
+  }
+
+  // GET/PUT /admin/api/keys/settings/:provider — provider-level settings
+  const settingsMatch = path.match(/^\/admin\/api\/keys\/settings\/([a-z]+)$/);
+  if (settingsMatch) {
+    const provider = settingsMatch[1];
+    if (!PANEL_PROVIDERS.includes(provider as typeof PANEL_PROVIDERS[number])) {
+      return jsonResponse({ detail: "unknown provider" }, 400);
+    }
+    if (request.method === "PUT") {
+      const body = await request.json() as Record<string, unknown>;
+      const defaultModel = typeof body.default_model === "string" ? body.default_model.trim() || null : null;
+      const rpmRaw = Number(body.rpm_total);
+      const rpmTotal = Number.isFinite(rpmRaw) && rpmRaw > 0 ? Math.floor(rpmRaw) : null;
+      const enabled = body.enabled === undefined ? 1 : (body.enabled ? 1 : 0);
+      await env.DB.prepare(
+        `INSERT INTO provider_settings (provider, default_model, rpm_total, enabled, updated_at)
+         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (provider) DO UPDATE SET
+           default_model = excluded.default_model,
+           rpm_total = excluded.rpm_total,
+           enabled = excluded.enabled,
+           updated_at = CURRENT_TIMESTAMP`,
+      ).bind(provider, defaultModel, rpmTotal, enabled).run();
+      invalidateProviderCache(provider);
+      return jsonResponse({ ok: true });
+    }
+  }
+
+  return jsonResponse({ detail: "Not Found" }, 404);
+}
+
+/* ── Worker secret management (方案A: panel writes directly to Cloudflare API) ── */
+
+interface SecretDefinition {
+  name: string;
+  label: string;
+  group: string;
+  indexed?: boolean; // *_2 … *_40 suffixes generated automatically
+}
+
+// Provider pools share one definition with indexed: true (40 keys each).
+// Searlo/Tavily/Exa keep their historical pool sizes.
+const SECRET_DEFINITIONS: SecretDefinition[] = [
+  { name: "GEMINI_API_KEY", label: "Gemini", group: "AI Provider Keys", indexed: true },
+  { name: "GROQ_API_KEY", label: "Groq", group: "AI Provider Keys", indexed: true },
+  { name: "CEREBRAS_API_KEY", label: "Cerebras", group: "AI Provider Keys", indexed: true },
+  { name: "ZHIPU_API_KEY", label: "Zhipu GLM", group: "AI Provider Keys", indexed: true },
+  { name: "NVIDIA_API_KEY", label: "NVIDIA NIM", group: "AI Provider Keys", indexed: true },
+  { name: "MISTRAL_API_KEY", label: "Mistral", group: "AI Provider Keys", indexed: true },
+  { name: "DEEPSEEK_API_KEY", label: "DeepSeek", group: "AI Provider Keys", indexed: true },
+  { name: "OPENROUTER_API_KEY", label: "OpenRouter", group: "AI Provider Keys", indexed: true },
+  { name: "TAVILY_API_KEY", label: "Tavily (搜索)", group: "Search Keys", indexed: true },
+  { name: "EXA_API_KEY", label: "Exa (搜索)", group: "Search Keys", indexed: true },
+  { name: "BRAVE_API_KEY", label: "Brave (搜索)", group: "Search Keys", indexed: true },
+  { name: "SEARLO_API_KEY", label: "Searlo (搜索)", group: "Search Keys", indexed: true },
+  { name: "FIRECRAWL_API_KEY", label: "Firecrawl (反爬降级)", group: "Search Keys" },
+  { name: "GEMINI_MODEL", label: "Gemini 模型", group: "Model Overrides" },
+  { name: "GROQ_MODEL", label: "Groq 模型", group: "Model Overrides" },
+  { name: "CEREBRAS_MODEL", label: "Cerebras 模型", group: "Model Overrides" },
+  { name: "ZHIPU_MODEL", label: "Zhipu 模型", group: "Model Overrides" },
+  { name: "NVIDIA_MODEL", label: "NVIDIA 模型", group: "Model Overrides" },
+  { name: "MISTRAL_MODEL", label: "Mistral 模型", group: "Model Overrides" },
+  { name: "DEEPSEEK_MODEL", label: "DeepSeek 模型", group: "Model Overrides" },
+  { name: "OPENROUTER_MODEL", label: "OpenRouter 模型", group: "Model Overrides" },
+  { name: "GEMINI_RPM", label: "Gemini 总RPM", group: "RPM Overrides" },
+  { name: "GROQ_RPM", label: "Groq 总RPM", group: "RPM Overrides" },
+  { name: "CEREBRAS_RPM", label: "Cerebras 总RPM", group: "RPM Overrides" },
+  { name: "ZHIPU_RPM", label: "Zhipu 总RPM", group: "RPM Overrides" },
+  { name: "NVIDIA_RPM", label: "NVIDIA 总RPM", group: "RPM Overrides" },
+  { name: "MISTRAL_RPM", label: "Mistral 总RPM", group: "RPM Overrides" },
+  { name: "DEEPSEEK_RPM", label: "DeepSeek 总RPM", group: "RPM Overrides" },
+  { name: "OPENROUTER_RPM", label: "OpenRouter 总RPM", group: "RPM Overrides" },
+  { name: "CLOUDFLARE_API_TOKEN", label: "Cloudflare API Token (面板引导)", group: "Panel Config" },
+  { name: "CLOUDFLARE_ACCOUNT_ID", label: "Cloudflare Account ID", group: "Panel Config" },
+  { name: "WORKER_SCRIPT_NAME", label: "Worker 脚本名 (默认 crm-ai-worker)", group: "Panel Config" },
+  { name: "ADMIN_PANEL_TOKEN", label: "面板登录 Token (改后需重新登录)", group: "Panel Config" },
+];
+
+const INDEXED_SECRET_MAX = 40;
+
+function secretDefinitionsExpanded(): SecretDefinition[] {
+  const expanded: SecretDefinition[] = [];
+  for (const def of SECRET_DEFINITIONS) {
+    if (!def.indexed) {
+      expanded.push(def);
+      continue;
+    }
+    const max = def.name === "TAVILY_API_KEY" || def.name === "EXA_API_KEY" ? 60 : INDEXED_SECRET_MAX;
+    expanded.push({ ...def, name: def.name, label: `${def.label} #1` });
+    for (let i = 2; i <= max; i++) {
+      expanded.push({ name: `${def.name}_${i}`, label: `${def.label} #${i}`, group: def.group });
+    }
+  }
+  return expanded;
+}
+
+/**
+ * Bootstrap check: the panel can only manage secrets when the Worker itself
+ * was granted a Cloudflare API token with Workers Scripts: Edit scope.
+ * Set once via `npx wrangler secret put CLOUDFLARE_API_TOKEN` (plus
+ * CLOUDFLARE_ACCOUNT_ID); afterwards keys rotate from the panel directly.
+ */
+function secretApiConfig(env: AdminEnv): { accountTag: string; scriptName: string; apiToken: string } | null {
+  if (!env.CLOUDFLARE_API_TOKEN || !env.CLOUDFLARE_ACCOUNT_ID) return null;
+  return {
+    accountTag: env.CLOUDFLARE_ACCOUNT_ID,
+    scriptName: env.WORKER_SCRIPT_NAME || "crm-ai-worker",
+    apiToken: env.CLOUDFLARE_API_TOKEN,
+  };
+}
+
+async function cfPutWorkerSecret(
+  config: { accountTag: string; scriptName: string; apiToken: string },
+  secretName: string,
+  secretValue: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${config.accountTag}/workers/scripts/${config.scriptName}/secrets`;
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: {
+      "Authorization": `Bearer ${config.apiToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name: secretName, text: secretValue, type: "secret_text" }),
+  });
+  if (response.ok) return { ok: true };
+  let detail = `HTTP ${response.status}`;
+  try {
+    const payload = await response.json() as { errors?: Array<{ message?: string }> };
+    const first = payload.errors?.[0]?.message;
+    if (first) detail = `${detail}: ${first}`;
+  } catch { /* keep status-only detail */ }
+  return { ok: false, error: detail };
+}
+
+async function handleSecretsApi(request: Request, env: AdminEnv): Promise<Response> {
+  const url = new URL(request.url);
+
+  // One-time bootstrap: the admin pastes a Cloudflare API token + account ID
+  // in the panel; the panel uses THAT token to write the credentials onto the
+  // Worker itself. Afterwards all key management happens in-panel with no CLI.
+  if (request.method === "POST" && url.pathname === "/admin/api/secrets/bootstrap") {
+    const body = await request.json() as { api_token?: unknown; account_id?: unknown };
+    const apiToken = typeof body.api_token === "string" ? body.api_token.trim() : "";
+    const accountId = typeof body.account_id === "string" ? body.account_id.trim() : "";
+    if (!apiToken || !accountId) {
+      return jsonResponse({ detail: "api_token 和 account_id 均为必填" }, 400);
+    }
+    // Validate before saving: the token must at least be able to read scripts
+    // in the given account — a wrong-but-saved token would brick the panel.
+    const probe = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts`,
+      { headers: { "Authorization": `Bearer ${apiToken}` } },
+    );
+    if (!probe.ok) {
+      const status = probe.status;
+      const hint = status === 403 || status === 401
+        ? "Token 无效或缺少 Workers Scripts: Edit 权限"
+        : `Cloudflare API 返回 HTTP ${status}`;
+      return jsonResponse({ detail: `验证失败：${hint}` }, 400);
+    }
+    const config = { accountTag: accountId, scriptName: env.WORKER_SCRIPT_NAME || "crm-ai-worker", apiToken };
+    const putToken = await cfPutWorkerSecret(config, "CLOUDFLARE_API_TOKEN", apiToken);
+    if (!putToken.ok) return jsonResponse({ detail: `保存 CLOUDFLARE_API_TOKEN 失败：${putToken.error}` }, 500);
+    const putAccount = await cfPutWorkerSecret(config, "CLOUDFLARE_ACCOUNT_ID", accountId);
+    if (!putAccount.ok) return jsonResponse({ detail: `保存 CLOUDFLARE_ACCOUNT_ID 失败：${putAccount.error}` }, 500);
+    return jsonResponse({ ok: true, applied: ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"] });
+  }
+
+  const config = secretApiConfig(env);
+  if (!config) {
+    return jsonResponse({
+      detail: "Secret management is not bootstrapped. Submit a Cloudflare API token below, or run: npx wrangler secret put CLOUDFLARE_API_TOKEN",
+    }, 503);
+  }
+
+  if (request.method === "GET" && url.pathname === "/admin/api/secrets") {
+    // Metadata only — secret VALUES are never readable back from Cloudflare.
+    return jsonResponse({ definitions: secretDefinitionsExpanded() });
+  }
+
+  if (request.method === "POST" && url.pathname === "/admin/api/secrets/update") {
+    const body = await request.json() as { updates?: Array<{ name?: unknown; value?: unknown }> };
+    const updates = Array.isArray(body.updates) ? body.updates : [];
+    if (updates.length === 0) return jsonResponse({ detail: "updates is required" }, 400);
+    const validNames = new Set(secretDefinitionsExpanded().map((d) => d.name));
+    const applied: string[] = [];
+    const failed: Array<{ name: string; error: string }> = [];
+    for (const update of updates) {
+      const name = typeof update.name === "string" ? update.name.trim() : "";
+      const value = typeof update.value === "string" ? update.value.trim() : "";
+      if (!name || !validNames.has(name)) {
+        failed.push({ name: name || "(empty)", error: "unknown secret name" });
+        continue;
+      }
+      if (!value) continue; // empty input = leave unchanged
+      const result = await cfPutWorkerSecret(config, name, value);
+      if (result.ok) applied.push(name);
+      else failed.push({ name, error: result.error || "unknown error" });
+    }
+    return jsonResponse({ applied, failed });
+  }
+
+  return jsonResponse({ detail: "Not Found" }, 404);
+}
+
 async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Response> {
   try {
     const url = new URL(request.url);
@@ -533,7 +930,6 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
         "SELECT id, email_to, subject, body, status, brand_name FROM outreach_emails WHERE id = ?",
       ).bind(id).first<{ id: number; email_to: string; subject: string | null; body: string | null; status: string; brand_name: string | null }>();
       if (!row) return jsonResponse({ detail: "Email not found" }, 404);
-      if (!row) return jsonResponse({ detail: "Email not found" }, 404);
       if (row.status !== "draft") return jsonResponse({ detail: "只有草稿可以发送" }, 400);
       // Resolve the sending identity from the email's brand (falls back to
       // the global GMAIL_SENDER_EMAIL when the brand has none).
@@ -640,6 +1036,30 @@ export async function handleAdminRequest(
       : htmlResponse(ADMIN_LOGIN_HTML);
   }
 
+  if (url.pathname === "/admin/secrets") {
+    if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
+    return (await isAuthenticated(request, env))
+      ? htmlResponse(SECRETS_PANEL_HTML)
+      : htmlResponse(ADMIN_LOGIN_HTML);
+  }
+
+  if (url.pathname === "/admin/keys") {
+    if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
+    return (await isAuthenticated(request, env))
+      ? htmlResponse(KEYS_PANEL_HTML)
+      : htmlResponse(ADMIN_LOGIN_HTML);
+  }
+
+  if (url.pathname.startsWith("/admin/api/keys")) {
+    if (!(await isAuthenticated(request, env))) return authFailure(request);
+    return handleProviderKeysApi(request, env);
+  }
+
+  if (url.pathname.startsWith("/admin/api/secrets")) {
+    if (!(await isAuthenticated(request, env))) return authFailure(request);
+    return handleSecretsApi(request, env);
+  }
+
   if (url.pathname.startsWith("/admin/api/outreach")) {
     if (!(await isAuthenticated(request, env))) return authFailure(request);
     return handleOutreachApi(request, env);
@@ -670,7 +1090,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 .field-row{display:flex;align-items:stretch;border-bottom:1px solid #e2e8f0;min-height:48px}.field-row:last-child{border-bottom:none}.field-label{width:180px;min-width:180px;padding:12px 16px;background:#f8fafc;font-weight:600;font-size:13px;color:#475569;display:flex;align-items:center;border-right:1px solid #e2e8f0}.field-content{flex:1;padding:12px 16px;display:flex;align-items:center;gap:8px;min-height:48px}.field-value{flex:1;font-size:14px;word-break:break-word;line-height:1.5}.field-value a{color:#1677d2;text-decoration:none}.field-value a:hover{text-decoration:underline}.field-input{flex:1;display:none;gap:8px;align-items:center}.field-input input,.field-input select,.field-input textarea{font:inherit;padding:8px 12px;border:1px solid #cbd5e1;border-radius:6px;width:100%}.field-input textarea{min-height:80px;resize:vertical}.field-input input,.field-input select{max-width:100%}.field-row.editing .field-value{display:none}.field-row.editing .field-input{display:flex}.field-row.readonly .field-label{color:#94a3b8}
 .persona-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin-bottom:10px}.persona-card h4{margin:0 0 8px;font-size:14px;color:#1e293b}.persona-card ul{margin:0;padding-left:18px;font-size:13px;color:#475569}.solution-card{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px;margin-bottom:10px}.solution-card h4{margin:0 0 6px;font-size:14px;color:#1e40af}.solution-card p{margin:0;font-size:13px;color:#1e3a5f}.section-title{font-size:15px;font-weight:600;color:#123b68;margin:18px 0 10px;padding-bottom:6px;border-bottom:2px solid #123b68}
 @media(max-width:700px){.top{align-items:flex-start;flex-direction:column}table{display:block;overflow-x:auto;white-space:nowrap}.field-row{flex-direction:column}.field-label{width:100%;min-width:0;border-right:none;border-bottom:1px solid #e2e8f0}.modal-body{padding:16px}}
-</style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div style="display:flex;gap:12px;align-items:center"><a href="/admin/outreach" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">📧 开发信管理</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
+</style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div style="display:flex;gap:12px;align-items:center"><a href="/admin/outreach" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">📧 开发信管理</a><a href="/admin/secrets" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">🔑 AI Key 管理</a><a href="/admin/keys" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
 <section class="panel"><h2>客户列表</h2><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
 </main>
 <div class="modal-overlay" id="modal"><div class="modal"><div class="modal-header"><h2 id="modalTitle">客户详情</h2><button class="button secondary small" id="closeModal">✕ 关闭</button></div><div class="modal-body" id="modalBody"></div><div class="modal-footer"><span id="modalMsg" class="notice hidden" style="margin-right:auto"></span><button class="button danger small" id="requeueBtn">设为 pending 重新处理</button><button class="button" id="submitBtn">提交修改</button></div></div></div>
@@ -891,5 +1311,234 @@ document.getElementById('emailNext').onclick=function(){if(emailState.offset+ema
 
 // Init
 loadBrands();
+})();
+</script></body></html>`;
+
+/* ── Dynamic key-pool panel (方案B: D1 api_configs CRUD) ── */
+const KEYS_PANEL_HTML = `<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>动态 Key 池 - CRM</title><style>
+body{font-family:system-ui,sans-serif;margin:0;background:#f3f5f9;color:#1f2430}
+.top{background:#1f2430;color:#fff;padding:14px 24px;display:flex;justify-content:space-between;align-items:center}
+.top h1{font-size:18px;margin:0}
+.top a{color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 14px;border-radius:8px;font-weight:600;font-size:14px}
+.wrap{max-width:960px;margin:24px auto;padding:0 16px}
+.card{background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:20px;margin-bottom:20px}
+h2{font-size:16px;margin:0 0 12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.field label{font-size:12px;color:#5a6270;display:block;margin-bottom:3px}
+.field input,.field select{width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #ccd2dd;border-radius:6px;font-size:13px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:#f0f2f7;padding:8px;text-align:left;font-size:12px;color:#5a6270}
+td{padding:8px;border-bottom:1px solid #eef1f6}
+tr.inactive td{opacity:.5}
+.cdtag{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:10px;background:#fef3c7;color:#92400e;font-size:12px}
+.btn{border:0;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:12px;font-weight:600}
+.btn.on{background:#3f9d63;color:#fff}.btn.off{background:#8b93a3;color:#fff}.btn.del{background:#fde8e8;color:#b23b3b}
+#toast{position:fixed;top:18px;right:18px;background:#1f2430;color:#fff;padding:10px 16px;border-radius:8px;font-size:14px;display:none;max-width:420px;z-index:9}
+#toast.err{background:#b23b3b}
+.hint{font-size:12px;color:#7a8291;margin-top:6px}
+</style></head><body>
+<header class="top"><h1>⚡ 动态 Key 池（D1 即时生效，无需部署）</h1><a href="/admin">← 返回客户管理</a></header>
+<div class="wrap">
+<div class="card"><h2>➕ 添加 Key</h2>
+  <div class="grid">
+    <div class="field"><label>平台</label><select id="nkProvider">
+      <option value="gemini">Gemini</option><option value="groq">Groq</option><option value="cerebras">Cerebras</option>
+      <option value="zhipu">Zhipu GLM</option><option value="nvidia">NVIDIA NIM</option><option value="mistral">Mistral</option>
+      <option value="deepseek">DeepSeek</option><option value="openrouter">OpenRouter</option>
+      <option value="tavily">Tavily 搜索</option><option value="exa">Exa 搜索</option><option value="brave">Brave 搜索</option><option value="searlo">Searlo 搜索</option>
+    </select></div>
+    <div class="field"><label>备注</label><input id="nkLabel" placeholder="如: 账号2"></div>
+    <div class="field"><label>API Key</label><input id="nkKey" autocomplete="off"></div>
+    <div class="field"><label>单Key RPM (留空=默认)</label><input id="nkRpm" type="number" min="1"></div>
+    <div class="field"><label>模型覆盖 (留空=默认)</label><input id="nkModel" placeholder="如 llama-3.3-70b"></div>
+  </div>
+  <p><button class="btn on" id="addKey" style="padding:9px 22px">添加 Key</button></p>
+  <p class="hint">Key 池按 D1 优先解析：此处添加的 Key 立即生效（30 秒内全节点刷新）；env Secrets 仅作为引导后备。</p>
+</div>
+<div class="card"><h2>🗝 已配置 Keys</h2><div style="overflow-x:auto"><table id="keysTable"><thead><tr><th>平台</th><th>备注</th><th>Key</th><th>RPM</th><th>模型</th><th>状态</th><th>最近错误</th><th>操作</th></tr></thead><tbody></tbody></table></div></div>
+<div class="card"><h2>🧊 冷却中的 Key（429/限流自动暂停）</h2><div id="cooldownBox"></div></div>
+<div class="card"><h2>📜 冷却历史（最近 20 条）</h2><div id="historyBox"></div></div>
+<div class="card"><h2>⚙️ 平台设置（默认模型 / 总RPM / 启用）</h2><div id="settingsBox"></div></div>
+</div>
+<div id="toast"></div>
+<script>
+(function(){
+var toastEl=document.getElementById('toast');
+function toast(msg,err){toastEl.textContent=msg;toastEl.className=err?'err':'';toastEl.style.display='block';setTimeout(function(){toastEl.style.display='none'},4000)}
+function api(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin';throw new Error('登录过期')}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败');return d})})}
+var PROVIDER_NAMES={gemini:'Gemini',groq:'Groq',cerebras:'Cerebras',zhipu:'Zhipu',nvidia:'NVIDIA',mistral:'Mistral',deepseek:'DeepSeek',openrouter:'OpenRouter',tavily:'Tavily',exa:'Exa',brave:'Brave',searlo:'Searlo'};
+function loadKeys(){
+  api('/admin/api/keys').then(function(d){
+    var tb=document.querySelector('#keysTable tbody');tb.innerHTML='';
+    var cdMap={};
+    (d.cooldowns||[]).forEach(function(c){
+      var m=/^([a-z]+):(\d+)$/.exec(c.key_index||'');
+      if(m&&m[1]===c.provider)cdMap[Number(m[2])]=c;
+    });
+    d.keys.forEach(function(k){
+      var tr=document.createElement('tr');if(!k.is_active)tr.className='inactive';
+      var cd=cdMap[k.id];
+      var status=k.is_active?'启用':'停用';
+      if(cd){var mins=Math.max(1,Math.round((new Date(cd.exhausted_until.replace(' ','T')+'Z')-Date.now())/60000));status+='<span class="cdtag">冷却中 ~'+mins+'分钟</span>';}
+      tr.innerHTML='<td>'+PROVIDER_NAMES[k.provider]+'</td><td>'+(k.label||'-')+'</td><td><code>'+k.api_key+'</code></td><td>'+(k.rpm_limit||'默认')+'</td><td>'+(k.model||'-')+'</td><td>'+status+'</td><td>'+(k.last_error||'-')+'</td>';
+      var td=document.createElement('td');
+      var tog=document.createElement('button');tog.className='btn '+(k.is_active?'off':'on');tog.textContent=k.is_active?'停用':'启用';
+      tog.onclick=function(){api('/admin/api/keys/'+k.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({is_active:!k.is_active})}).then(loadKeys).catch(function(e){toast(e.message,true)})};
+      var del=document.createElement('button');del.className='btn del';del.textContent='删除';del.style.marginLeft='6px';
+      del.onclick=function(){if(!confirm('确认删除该 Key？'))return;api('/admin/api/keys/'+k.id,{method:'DELETE'}).then(loadKeys).catch(function(e){toast(e.message,true)})};
+      td.appendChild(tog);td.appendChild(del);tr.appendChild(td);tb.appendChild(tr);
+    });
+    var cdBox=document.getElementById('cooldownBox');
+    var cdList=d.cooldowns||[];
+    if(cdList.length===0){cdBox.innerHTML='<p style="color:#16a34a;margin:4px 0">✓ 所有 Key 状态正常，无冷却中</p>';}
+    else{
+      cdBox.innerHTML='';
+      cdList.forEach(function(c){
+        var row=document.createElement('div');row.style.cssText='display:flex;gap:10px;align-items:center;margin:4px 0';
+        var mins=Math.max(1,Math.round((new Date(c.exhausted_until.replace(' ','T')+'Z')-Date.now())/60000));
+        row.innerHTML='<span style="min-width:90px">'+PROVIDER_NAMES[c.provider]+'</span><code style="min-width:130px">'+(c.key_index||'')+'</code><span style="color:#dc2626">'+(c.last_error||'限流')+'</span><span>剩余 ~'+mins+' 分钟</span>';
+        var clr=document.createElement('button');clr.className='btn on';clr.textContent='清除';
+        clr.onclick=function(){api('/admin/api/keys/cooldowns/'+c.provider,{method:'DELETE'}).then(loadKeys).catch(function(e){toast(e.message,true)})};
+        row.appendChild(clr);cdBox.appendChild(row);
+      });
+    }
+    var histBox=document.getElementById('historyBox');
+    var histList=d.history||[];
+    if(histList.length===0){histBox.innerHTML='<p style="color:#6b7280;margin:4px 0">暂无历史记录</p>';}
+    else{
+      histBox.innerHTML='';
+      histList.forEach(function(c){
+        var row=document.createElement('div');row.style.cssText='display:flex;gap:10px;align-items:center;margin:4px 0;color:#6b7280;font-size:13px';
+        var until='';
+        try{until=new Date(c.exhausted_until.replace(' ','T')+'Z').toLocaleString();}catch(e){until=c.exhausted_until||'';}
+        row.innerHTML='<span style="min-width:90px">'+PROVIDER_NAMES[c.provider]+'</span><code style="min-width:130px">'+(c.key_index||'')+'</code><span style="color:#dc2626">'+(c.last_error||'限流')+'</span><span>冷却至 '+until+'</span>';
+        histBox.appendChild(row);
+      });
+    }
+    var sb=document.getElementById('settingsBox');sb.innerHTML='';
+    var sMap={};(d.settings||[]).forEach(function(s){sMap[s.provider]=s});
+    Object.keys(PROVIDER_NAMES).forEach(function(p){
+      var s=sMap[p]||{};
+      var row=document.createElement('div');row.style.cssText='display:flex;gap:10px;align-items:end;margin-bottom:8px;flex-wrap:wrap';
+      row.innerHTML='<div class="field"><label>'+PROVIDER_NAMES[p]+' 默认模型</label><input id="m_'+p+'" value="'+(s.default_model||'')+'" style="width:200px"></div>'+
+        '<div class="field"><label>总RPM (留空=按Key数推算)</label><input id="r_'+p+'" type="number" min="1" value="'+(s.rpm_total||'')+'" style="width:160px"></div>';
+      var en=document.createElement('div');en.className='field';en.innerHTML='<label>启用</label>';
+      var cb=document.createElement('input');cb.type='checkbox';cb.id='e_'+p;cb.checked=s.enabled===undefined?true:!!s.enabled;en.appendChild(cb);row.appendChild(en);
+      var btn=document.createElement('button');btn.className='btn on';btn.textContent='保存';
+      btn.onclick=function(){api('/admin/api/keys/settings/'+p,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({default_model:document.getElementById('m_'+p).value,rpm_total:document.getElementById('r_'+p).value||null,enabled:cb.checked})}).then(function(){toast(PROVIDER_NAMES[p]+' 设置已保存')}).catch(function(e){toast(e.message,true)})};
+      row.appendChild(btn);sb.appendChild(row);
+    });
+  }).catch(function(e){toast(e.message,true)});
+}
+document.getElementById('addKey').onclick=function(){
+  var btn=this;btn.disabled=true;
+  api('/admin/api/keys',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:document.getElementById('nkProvider').value,label:document.getElementById('nkLabel').value,api_key:document.getElementById('nkKey').value,rpm_limit:document.getElementById('nkRpm').value||null,model:document.getElementById('nkModel').value})})
+  .then(function(){toast('Key 已添加并生效');['nkLabel','nkKey','nkRpm','nkModel'].forEach(function(i){document.getElementById(i).value=''});loadKeys()})
+  .catch(function(e){toast(e.message,true)})
+  .finally(function(){btn.disabled=false});
+};
+loadKeys();
+// Auto-refresh every 30s so cooldown timers tick down live. Skipped while a
+// form field has focus (typing a new key) and while the tab is hidden.
+var _focusCount=0;
+document.addEventListener('focusin',function(e){if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')_focusCount++});
+document.addEventListener('focusout',function(e){if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')_focusCount=Math.max(0,_focusCount-1)});
+setInterval(function(){if(_focusCount===0&&!document.hidden)loadKeys()},30000);
+})();
+</script></body></html>`;
+
+/* ── AI Key / secrets management panel (方案A: 直写 Cloudflare API) ── */
+const SECRETS_PANEL_HTML = `<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Key 管理 - CRM</title><style>
+body{font-family:system-ui,sans-serif;margin:0;background:#f3f5f9;color:#1f2430}
+.top{background:#1f2430;color:#fff;padding:14px 24px;display:flex;justify-content:space-between;align-items:center}
+.top h1{font-size:18px;margin:0}
+.top a{color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 14px;border-radius:8px;font-weight:600;font-size:14px}
+.wrap{max-width:860px;margin:24px auto;padding:0 16px}
+.card{background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:20px;margin-bottom:20px}
+.notice{background:#fff8e1;border:1px solid #f0d264;border-radius:8px;padding:10px 14px;font-size:14px;margin-bottom:16px}
+.group{margin-bottom:24px}
+.group h2{font-size:16px;border-bottom:2px solid #e8ebf1;padding-bottom:6px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.field label{font-size:12px;color:#5a6270;display:block;margin-bottom:3px}
+.field input{width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #ccd2dd;border-radius:6px;font-size:13px}
+.field input:focus{outline:2px solid #4f7cf0;border-color:#4f7cf0}
+.bar{display:flex;gap:10px;align-items:center;position:sticky;bottom:12px;background:#1f2430;padding:12px 16px;border-radius:10px}
+.bar button{background:#4f7cf0;color:#fff;border:0;padding:9px 22px;border-radius:8px;font-weight:600;cursor:pointer}
+.bar button:disabled{opacity:.6;cursor:wait}
+.bar span{color:#cfd6e4;font-size:13px}
+#toast{position:fixed;top:18px;right:18px;background:#1f2430;color:#fff;padding:10px 16px;border-radius:8px;font-size:14px;display:none;max-width:420px}
+#toast.err{background:#b23b3b}.ok{border-color:#3f9d63!important}.err{border-color:#b23b3b!important}
+details{margin:6px 0}summary{cursor:pointer;font-weight:600;font-size:13px;color:#3b4456}
+</style></head><body>
+<header class="top"><h1>🔑 AI Key 管理（直写 Cloudflare Secrets）</h1><a href="/admin">← 返回客户管理</a></header>
+<div class="wrap">
+<div class="notice" id="bootNotice">加载中…</div>
+<div id="content"></div>
+<div class="bar"><button id="saveAll">💾 保存全部修改</button><span>留空的字段不会改动；保存后秒级生效，无需重新部署。</span></div>
+</div>
+<div id="toast"></div>
+<script>
+(function(){
+var toastEl=document.getElementById('toast');
+function toast(msg,err){toastEl.textContent=msg;toastEl.className=err?'err':'';toastEl.style.display='block';setTimeout(function(){toastEl.style.display='none'},5000)}
+function api(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin';throw new Error('登录过期')}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败');return d})})}
+var dirty={};
+function inputId(n){return 'f_'+n}
+function renderBootstrapForm(msg){
+  var notice=document.getElementById('bootNotice');
+  notice.innerHTML='<b>尚未引导：</b>'+(msg||'')+'<br>粘贴一个仅有 <code>Workers Scripts: Edit</code> 权限的 Cloudflare API Token 与 Account ID，面板会用它写入自身凭据，此后即可在页面内管理全部 Key。';
+  notice.style.display='block';
+  var card=document.createElement('div');card.className='card';
+  card.innerHTML='<h2>🔑 Cloudflare API Token 引导</h2>'+
+    '<div class="grid">'+
+    '<div class="field"><label>API Token (https://dash.cloudflare.com/profile/api-tokens)</label><input type="password" id="bootToken" autocomplete="off"></div>'+
+    '<div class="field"><label>Account ID (域名概览页右侧)</label><input type="text" id="bootAccount" autocomplete="off"></div>'+
+    '</div><p><button id="bootSave" style="background:#4f7cf0;color:#fff;border:0;padding:9px 22px;border-radius:8px;font-weight:600;cursor:pointer">验证并保存</button> <span id="bootMsg" style="font-size:13px;color:#5a6270"></span></p>';
+  document.getElementById('content').appendChild(card);
+  document.getElementById('bootSave').onclick=function(){
+    var btn=this;btn.disabled=true;btn.textContent='验证中…';
+    api('/admin/api/secrets/bootstrap',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({api_token:document.getElementById('bootToken').value.trim(),account_id:document.getElementById('bootAccount').value.trim()})})
+    .then(function(){toast('引导成功，正在加载 Key 列表…');setTimeout(function(){location.reload()},800)})
+    .catch(function(e){document.getElementById('bootMsg').textContent=e.message;btn.disabled=false;btn.textContent='验证并保存'})
+  };
+}
+api('/admin/api/secrets').then(function(data){
+  document.getElementById('bootNotice').style.display='none';
+  var root=document.getElementById('content');
+  var groups={};
+  data.definitions.forEach(function(d){(groups[d.group]=groups[d.group]||[]).push(d)});
+  Object.keys(groups).forEach(function(g){
+    var sec=document.createElement('div');sec.className='card group';
+    var h=document.createElement('h2');h.textContent=g+'（'+groups[g].length+' 项）';sec.appendChild(h);
+    var grid=document.createElement('div');grid.className='grid';
+    groups[g].forEach(function(d){
+      var f=document.createElement('div');f.className='field';
+      var l=document.createElement('label');l.textContent=d.label+' ('+d.name+')';
+      var inp=document.createElement('input');inp.type='password';inp.id=inputId(d.name);inp.name=d.name;
+      inp.placeholder='未修改';inp.autocomplete='off';
+      inp.addEventListener('input',function(){dirty[d.name]=inp.value;inp.classList.add('ok')});
+      f.appendChild(l);f.appendChild(inp);grid.appendChild(f);
+    });
+    sec.appendChild(grid);root.appendChild(sec);
+  });
+}).catch(function(e){
+  renderBootstrapForm(e.message);
+});
+document.getElementById('saveAll').onclick=function(){
+  var btn=this;var updates=Object.keys(dirty).filter(function(k){return dirty[k]&&dirty[k].trim()}).map(function(k){return {name:k,value:dirty[k].trim()}});
+  if(!updates.length){toast('没有需要保存的修改',true);return}
+  btn.disabled=true;btn.textContent='保存中…';
+  api('/admin/api/secrets/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({updates:updates})})
+  .then(function(r){
+    if(r.failed&&r.failed.length){toast('成功 '+r.applied.length+' 项；失败: '+r.failed.map(function(f){return f.name+' ('+f.error+')'}).join(', '),true)}
+    else{toast('已保存并生效: '+r.applied.join(', '));Object.keys(dirty).forEach(function(k){var el=document.getElementById(inputId(k));if(el){el.value='';el.classList.remove('ok')}});dirty={}}
+  })
+  .catch(function(e){toast(e.message,true)})
+  .finally(function(){btn.disabled=false;btn.textContent='💾 保存全部修改'})
+};
 })();
 </script></body></html>`;

@@ -1,4 +1,7 @@
 import { handleAdminRequest } from "./admin";
+import { rpmLimitFor, tryAcquireRpmSlot, rpmEnvOverride } from "./rate-limit";
+import { collectKeyPool, buildKeyOrder } from "./key-pool";
+import { getProviderState, isProviderUsable, noteProviderKeyError, noteProviderKeySuccess, keyHealthName } from "./provider-keys";
 
 interface CustomerRow {
   id: number;
@@ -17,181 +20,33 @@ interface Env {
   DB: D1Database;
   GEMINI_API_KEY: string;
   GEMINI_MODEL?: string;
-  GEMINI_API_KEY_2?: string;
-  GEMINI_API_KEY_3?: string;
-  GEMINI_API_KEY_4?: string;
-  GEMINI_API_KEY_5?: string;
-  GEMINI_API_KEY_6?: string;
-  GEMINI_API_KEY_7?: string;
-  GEMINI_API_KEY_8?: string;
-  GEMINI_API_KEY_9?: string;
-  GEMINI_API_KEY_10?: string;
-  GEMINI_API_KEY_11?: string;
-  GEMINI_API_KEY_12?: string;
-  GEMINI_API_KEY_13?: string;
-  GEMINI_API_KEY_14?: string;
-  GEMINI_API_KEY_15?: string;
-  GEMINI_API_KEY_16?: string;
-  GEMINI_API_KEY_17?: string;
-  GEMINI_API_KEY_18?: string;
-  GEMINI_API_KEY_19?: string;
-  GEMINI_API_KEY_20?: string;
-  GEMINI_API_KEY_21?: string;
-  GEMINI_API_KEY_22?: string;
-  GEMINI_API_KEY_23?: string;
-  GEMINI_API_KEY_24?: string;
-  GEMINI_API_KEY_25?: string;
-  GEMINI_API_KEY_26?: string;
-  GEMINI_API_KEY_27?: string;
-  GEMINI_API_KEY_28?: string;
-  GEMINI_API_KEY_29?: string;
-  GEMINI_API_KEY_30?: string;
-  GEMINI_API_KEY_31?: string;
-  GEMINI_API_KEY_32?: string;
-  GEMINI_API_KEY_33?: string;
-  GEMINI_API_KEY_34?: string;
-  GEMINI_API_KEY_35?: string;
-  GEMINI_API_KEY_36?: string;
-  GEMINI_API_KEY_37?: string;
-  GEMINI_API_KEY_38?: string;
-  GEMINI_API_KEY_39?: string;
-  GEMINI_API_KEY_40?: string;
-  GROQ_API_KEY?: string;
-  GROQ_API_KEY_2?: string;
   GROQ_MODEL?: string;
-  MISTRAL_API_KEY?: string;
-  MISTRAL_API_KEY_2?: string;
+  CEREBRAS_MODEL?: string;
   MISTRAL_MODEL?: string;
-  DEEPSEEK_API_KEY?: string;
-  DEEPSEEK_API_KEY_2?: string;
   DEEPSEEK_MODEL?: string;
-  OPENROUTER_API_KEY?: string;
-  OPENROUTER_API_KEY_2?: string;
-  OPENROUTER_API_KEY_3?: string;
   OPENROUTER_MODEL?: string;
+  ZHIPU_MODEL?: string;
+  NVIDIA_MODEL?: string;
+  // Per-key pool secrets (<PROVIDER>_API_KEY, _2 … _40) are injected onto env
+  // by Cloudflare and collected at runtime via collectKeyPool(); the indexed
+  // fields are intentionally NOT enumerated here (see key-pool.ts).
+  // Optional total-RPM overrides (per provider, not per key). When unset the
+  // limiter derives the cap from per-key free-tier defaults x key-pool size.
+  GEMINI_RPM?: string;
+  GROQ_RPM?: string;
+  CEREBRAS_RPM?: string;
+  MISTRAL_RPM?: string;
+  DEEPSEEK_RPM?: string;
+  ZHIPU_RPM?: string;
+  NVIDIA_RPM?: string;
+  OPENROUTER_RPM?: string;
   SEARLO_API_KEY?: string;
   SEARLO_API_KEY_2?: string;
-  TAVILY_API_KEY?: string;
-  TAVILY_API_KEY_2?: string;
-  TAVILY_API_KEY_3?: string;
-  TAVILY_API_KEY_4?: string;
-  TAVILY_API_KEY_5?: string;
-  TAVILY_API_KEY_6?: string;
-  TAVILY_API_KEY_7?: string;
-  TAVILY_API_KEY_8?: string;
-  TAVILY_API_KEY_9?: string;
-  TAVILY_API_KEY_10?: string;
-  TAVILY_API_KEY_11?: string;
-  TAVILY_API_KEY_12?: string;
-  TAVILY_API_KEY_13?: string;
-  TAVILY_API_KEY_14?: string;
-  TAVILY_API_KEY_15?: string;
-  TAVILY_API_KEY_16?: string;
-  TAVILY_API_KEY_17?: string;
-  TAVILY_API_KEY_18?: string;
-  TAVILY_API_KEY_19?: string;
-  TAVILY_API_KEY_20?: string;
-  TAVILY_API_KEY_21?: string;
-  TAVILY_API_KEY_22?: string;
-  TAVILY_API_KEY_23?: string;
-  TAVILY_API_KEY_24?: string;
-  TAVILY_API_KEY_25?: string;
-  TAVILY_API_KEY_26?: string;
-  TAVILY_API_KEY_27?: string;
-  TAVILY_API_KEY_28?: string;
-  TAVILY_API_KEY_29?: string;
-  TAVILY_API_KEY_30?: string;
-  TAVILY_API_KEY_31?: string;
-  TAVILY_API_KEY_32?: string;
-  TAVILY_API_KEY_33?: string;
-  TAVILY_API_KEY_34?: string;
-  TAVILY_API_KEY_35?: string;
-  TAVILY_API_KEY_36?: string;
-  TAVILY_API_KEY_37?: string;
-  TAVILY_API_KEY_38?: string;
-  TAVILY_API_KEY_39?: string;
-  TAVILY_API_KEY_40?: string;
-  TAVILY_API_KEY_41?: string;
-  TAVILY_API_KEY_42?: string;
-  TAVILY_API_KEY_43?: string;
-  TAVILY_API_KEY_44?: string;
-  TAVILY_API_KEY_45?: string;
-  TAVILY_API_KEY_46?: string;
-  TAVILY_API_KEY_47?: string;
-  TAVILY_API_KEY_48?: string;
-  TAVILY_API_KEY_49?: string;
-  TAVILY_API_KEY_50?: string;
-  TAVILY_API_KEY_51?: string;
-  TAVILY_API_KEY_52?: string;
-  TAVILY_API_KEY_53?: string;
-  TAVILY_API_KEY_54?: string;
-  TAVILY_API_KEY_55?: string;
-  TAVILY_API_KEY_56?: string;
-  TAVILY_API_KEY_57?: string;
-  TAVILY_API_KEY_58?: string;
-  TAVILY_API_KEY_59?: string;
-  TAVILY_API_KEY_60?: string;
-  EXA_API_KEY?: string;
-  EXA_API_KEY_2?: string;
-  EXA_API_KEY_3?: string;
-  EXA_API_KEY_4?: string;
-  EXA_API_KEY_5?: string;
-  EXA_API_KEY_6?: string;
-  EXA_API_KEY_7?: string;
-  EXA_API_KEY_8?: string;
-  EXA_API_KEY_9?: string;
-  EXA_API_KEY_10?: string;
-  EXA_API_KEY_11?: string;
-  EXA_API_KEY_12?: string;
-  EXA_API_KEY_13?: string;
-  EXA_API_KEY_14?: string;
-  EXA_API_KEY_15?: string;
-  EXA_API_KEY_16?: string;
-  EXA_API_KEY_17?: string;
-  EXA_API_KEY_18?: string;
-  EXA_API_KEY_19?: string;
-  EXA_API_KEY_20?: string;
-  EXA_API_KEY_21?: string;
-  EXA_API_KEY_22?: string;
-  EXA_API_KEY_23?: string;
-  EXA_API_KEY_24?: string;
-  EXA_API_KEY_25?: string;
-  EXA_API_KEY_26?: string;
-  EXA_API_KEY_27?: string;
-  EXA_API_KEY_28?: string;
-  EXA_API_KEY_29?: string;
-  EXA_API_KEY_30?: string;
-  EXA_API_KEY_31?: string;
-  EXA_API_KEY_32?: string;
-  EXA_API_KEY_33?: string;
-  EXA_API_KEY_34?: string;
-  EXA_API_KEY_35?: string;
-  EXA_API_KEY_36?: string;
-  EXA_API_KEY_37?: string;
-  EXA_API_KEY_38?: string;
-  EXA_API_KEY_39?: string;
-  EXA_API_KEY_40?: string;
-  EXA_API_KEY_41?: string;
-  EXA_API_KEY_42?: string;
-  EXA_API_KEY_43?: string;
-  EXA_API_KEY_44?: string;
-  EXA_API_KEY_45?: string;
-  EXA_API_KEY_46?: string;
-  EXA_API_KEY_47?: string;
-  EXA_API_KEY_48?: string;
-  EXA_API_KEY_49?: string;
-  EXA_API_KEY_50?: string;
-  EXA_API_KEY_51?: string;
-  EXA_API_KEY_52?: string;
-  EXA_API_KEY_53?: string;
-  EXA_API_KEY_54?: string;
-  EXA_API_KEY_55?: string;
-  EXA_API_KEY_56?: string;
-  EXA_API_KEY_57?: string;
-  EXA_API_KEY_58?: string;
-  EXA_API_KEY_59?: string;
-  EXA_API_KEY_60?: string;
+  BRAVE_API_KEY?: string;
+  BRAVE_API_KEY_2?: string;
+  FIRECRAWL_API_KEY?: string;
   ADMIN_PANEL_TOKEN?: string;
+  [key: string]: unknown;
 }
 
 interface GoogleSearchResult {
@@ -376,6 +231,35 @@ function websiteError(response: Response): Error {
   return new Error(`website HTTP ${response.status}${detail}`);
 }
 
+// Statuses that usually mean a bot-block/JS-rendered page (Cloudflare challenge,
+// WAF, etc.) rather than a genuinely broken site — worth one Firecrawl retry.
+const BLOCKED_WEBSITE_STATUSES = new Set([403, 503]);
+
+/**
+ * Firecrawl fallback (环节1 降级回退): when the direct fetch is bot-blocked or
+ * the page needs JS rendering, Firecrawl's headless renderer returns clean
+ * LLM-oriented markdown. Optional — the pipeline works without it; with it,
+ * hard-blocked sites become analyzable instead of failed.
+ */
+async function firecrawlScrape(url: string, env: Env): Promise<string> {
+  if (!env.FIRECRAWL_API_KEY) return "";
+  try {
+    const resp = await fetchWithTimeout("https://api.firecrawl.dev/v1/scrape", FETCH_TIMEOUT_MS, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${env.FIRECRAWL_API_KEY}`,
+      },
+      body: JSON.stringify({ url, formats: ["markdown"], waitFor: 3_000 }),
+    });
+    if (!resp.ok) return "";
+    const data = await resp.json() as { data?: { markdown?: string } };
+    return data.data?.markdown ?? "";
+  } catch {
+    return ""; // Firecrawl is best-effort: never block the pipeline on it
+  }
+}
+
 async function extractPageText(response: Response): Promise<string> {
   const parts: string[] = [];
   const addText = (text: string) => {
@@ -489,76 +373,9 @@ async function verifySocialMedia(links: string[]): Promise<SocialMediaLink[]> {
   return verified;
 }
 
-function getTavilyKeys(env: Env): string[] {
-  const keys: string[] = [];
-  for (const apiKey of [
-    env.TAVILY_API_KEY,
-    env.TAVILY_API_KEY_2,
-    env.TAVILY_API_KEY_3,
-    env.TAVILY_API_KEY_4,
-    env.TAVILY_API_KEY_5,
-    env.TAVILY_API_KEY_6,
-    env.TAVILY_API_KEY_7,
-    env.TAVILY_API_KEY_8,
-    env.TAVILY_API_KEY_9,
-    env.TAVILY_API_KEY_10,
-    env.TAVILY_API_KEY_11,
-    env.TAVILY_API_KEY_12,
-    env.TAVILY_API_KEY_13,
-    env.TAVILY_API_KEY_14,
-    env.TAVILY_API_KEY_15,
-    env.TAVILY_API_KEY_16,
-    env.TAVILY_API_KEY_17,
-    env.TAVILY_API_KEY_18,
-    env.TAVILY_API_KEY_19,
-    env.TAVILY_API_KEY_20,
-    env.TAVILY_API_KEY_21,
-    env.TAVILY_API_KEY_22,
-    env.TAVILY_API_KEY_23,
-    env.TAVILY_API_KEY_24,
-    env.TAVILY_API_KEY_25,
-    env.TAVILY_API_KEY_26,
-    env.TAVILY_API_KEY_27,
-    env.TAVILY_API_KEY_28,
-    env.TAVILY_API_KEY_29,
-    env.TAVILY_API_KEY_30,
-    env.TAVILY_API_KEY_31,
-    env.TAVILY_API_KEY_32,
-    env.TAVILY_API_KEY_33,
-    env.TAVILY_API_KEY_34,
-    env.TAVILY_API_KEY_35,
-    env.TAVILY_API_KEY_36,
-    env.TAVILY_API_KEY_37,
-    env.TAVILY_API_KEY_38,
-    env.TAVILY_API_KEY_39,
-    env.TAVILY_API_KEY_40,
-    env.TAVILY_API_KEY_41,
-    env.TAVILY_API_KEY_42,
-    env.TAVILY_API_KEY_43,
-    env.TAVILY_API_KEY_44,
-    env.TAVILY_API_KEY_45,
-    env.TAVILY_API_KEY_46,
-    env.TAVILY_API_KEY_47,
-    env.TAVILY_API_KEY_48,
-    env.TAVILY_API_KEY_49,
-    env.TAVILY_API_KEY_50,
-    env.TAVILY_API_KEY_51,
-    env.TAVILY_API_KEY_52,
-    env.TAVILY_API_KEY_53,
-    env.TAVILY_API_KEY_54,
-    env.TAVILY_API_KEY_55,
-    env.TAVILY_API_KEY_56,
-    env.TAVILY_API_KEY_57,
-    env.TAVILY_API_KEY_58,
-    env.TAVILY_API_KEY_59,
-    env.TAVILY_API_KEY_60,
-  ]) {
-    if (apiKey) keys.push(apiKey);
-  }
-  return keys;
-}
+
 interface KeyHealthRow {
-  key_index: number;
+  key_index: string;
   exhausted_until: string | null;
 }
 
@@ -569,7 +386,10 @@ interface KeyHealthRow {
 const SEARCH_KEY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const GEMINI_KEY_COOLDOWN_MS = 60 * 1000;
 
-async function loadExhaustedKeyIndexes(env: Env, provider: string): Promise<Set<number>> {
+// api_key_health rows are keyed by keyHealthName() — "<provider>:<keyId>"
+// where keyId is a stable D1 row id (or env pool position). Panel edits that
+// reorder/delete rows therefore never misalign cooldown state.
+async function loadExhaustedHealthKeys(env: Env, provider: string): Promise<Set<string>> {
   try {
     const result = await env.DB.prepare(
       `SELECT key_index, exhausted_until FROM api_key_health
@@ -581,84 +401,15 @@ async function loadExhaustedKeyIndexes(env: Env, provider: string): Promise<Set<
   }
 }
 
-async function markKeyExhausted(env: Env, provider: string, keyIndex: number, cooldownMs: number, reason: string): Promise<void> {
+async function markKeyExhausted(env: Env, provider: string, healthName: string, cooldownMs: number, reason: string): Promise<void> {
   try {
     await env.DB.prepare(
       `INSERT INTO api_key_health (provider, key_index, exhausted_until, last_error, updated_at)
        VALUES (?, ?, datetime('now', ?), ?, CURRENT_TIMESTAMP)
        ON CONFLICT (provider, key_index)
        DO UPDATE SET exhausted_until = datetime('now', ?), last_error = excluded.last_error, updated_at = CURRENT_TIMESTAMP`,
-    ).bind(provider, keyIndex, `+${Math.round(cooldownMs / 1000)} seconds`, reason.slice(0, 200), `+${Math.round(cooldownMs / 1000)} seconds`).run();
+    ).bind(provider, healthName, `+${Math.round(cooldownMs / 1000)} seconds`, reason.slice(0, 200), `+${Math.round(cooldownMs / 1000)} seconds`).run();
   } catch { /* best effort */ }
-}
-
-interface KeyPoolAttempt {
-  apiKey: string;
-  keyIndex: number;
-}
-
-// Build the per-task key order for a provider:
-// - ONE fixed key per company task (start index derived from customer id), so a
-//   single task never hops between accounts (anti-ban).
-// - Keys known to be exhausted (D1 health table) are excluded entirely.
-// - The remaining keys follow in rotation order as rare fallbacks.
-function buildKeyOrder(keys: string[], startIndex: number, exhausted: Set<number>): KeyPoolAttempt[] {
-  const healthy = keys
-    .map((apiKey, keyIndex) => ({ apiKey, keyIndex }))
-    .filter((k) => !exhausted.has(k.keyIndex));
-  if (healthy.length === 0) return [];
-  const start = ((startIndex % healthy.length) + healthy.length) % healthy.length;
-  return [...healthy.slice(start), ...healthy.slice(0, start)];
-}
-
-function getGeminiKeys(env: Env): Array<{ key: string; keyIndex: number }> {
-  const keys: Array<{ key: string; keyIndex: number }> = [];
-  const raw = [
-    env.GEMINI_API_KEY,
-    env.GEMINI_API_KEY_2,
-    env.GEMINI_API_KEY_3,
-    env.GEMINI_API_KEY_4,
-    env.GEMINI_API_KEY_5,
-    env.GEMINI_API_KEY_6,
-    env.GEMINI_API_KEY_7,
-    env.GEMINI_API_KEY_8,
-    env.GEMINI_API_KEY_9,
-    env.GEMINI_API_KEY_10,
-    env.GEMINI_API_KEY_11,
-    env.GEMINI_API_KEY_12,
-    env.GEMINI_API_KEY_13,
-    env.GEMINI_API_KEY_14,
-    env.GEMINI_API_KEY_15,
-    env.GEMINI_API_KEY_16,
-    env.GEMINI_API_KEY_17,
-    env.GEMINI_API_KEY_18,
-    env.GEMINI_API_KEY_19,
-    env.GEMINI_API_KEY_20,
-    env.GEMINI_API_KEY_21,
-    env.GEMINI_API_KEY_22,
-    env.GEMINI_API_KEY_23,
-    env.GEMINI_API_KEY_24,
-    env.GEMINI_API_KEY_25,
-    env.GEMINI_API_KEY_26,
-    env.GEMINI_API_KEY_27,
-    env.GEMINI_API_KEY_28,
-    env.GEMINI_API_KEY_29,
-    env.GEMINI_API_KEY_30,
-    env.GEMINI_API_KEY_31,
-    env.GEMINI_API_KEY_32,
-    env.GEMINI_API_KEY_33,
-    env.GEMINI_API_KEY_34,
-    env.GEMINI_API_KEY_35,
-    env.GEMINI_API_KEY_36,
-    env.GEMINI_API_KEY_37,
-    env.GEMINI_API_KEY_38,
-    env.GEMINI_API_KEY_39,
-    env.GEMINI_API_KEY_40,
-  ];
-  raw.forEach((key, keyIndex) => {
-    if (key) keys.push({ key, keyIndex });
-  });
-  return keys;
 }
 
 function getSearloKeys(env: Env): string[] {
@@ -668,77 +419,11 @@ function getSearloKeys(env: Env): string[] {
   return keys;
 }
 
-function getExaKeys(env: Env): string[] {
-  const keys: string[] = [];
-  for (const apiKey of [
-    env.EXA_API_KEY,
-    env.EXA_API_KEY_2,
-    env.EXA_API_KEY_3,
-    env.EXA_API_KEY_4,
-    env.EXA_API_KEY_5,
-    env.EXA_API_KEY_6,
-    env.EXA_API_KEY_7,
-    env.EXA_API_KEY_8,
-    env.EXA_API_KEY_9,
-    env.EXA_API_KEY_10,
-    env.EXA_API_KEY_11,
-    env.EXA_API_KEY_12,
-    env.EXA_API_KEY_13,
-    env.EXA_API_KEY_14,
-    env.EXA_API_KEY_15,
-    env.EXA_API_KEY_16,
-    env.EXA_API_KEY_17,
-    env.EXA_API_KEY_18,
-    env.EXA_API_KEY_19,
-    env.EXA_API_KEY_20,
-    env.EXA_API_KEY_21,
-    env.EXA_API_KEY_22,
-    env.EXA_API_KEY_23,
-    env.EXA_API_KEY_24,
-    env.EXA_API_KEY_25,
-    env.EXA_API_KEY_26,
-    env.EXA_API_KEY_27,
-    env.EXA_API_KEY_28,
-    env.EXA_API_KEY_29,
-    env.EXA_API_KEY_30,
-    env.EXA_API_KEY_31,
-    env.EXA_API_KEY_32,
-    env.EXA_API_KEY_33,
-    env.EXA_API_KEY_34,
-    env.EXA_API_KEY_35,
-    env.EXA_API_KEY_36,
-    env.EXA_API_KEY_37,
-    env.EXA_API_KEY_38,
-    env.EXA_API_KEY_39,
-    env.EXA_API_KEY_40,
-    env.EXA_API_KEY_41,
-    env.EXA_API_KEY_42,
-    env.EXA_API_KEY_43,
-    env.EXA_API_KEY_44,
-    env.EXA_API_KEY_45,
-    env.EXA_API_KEY_46,
-    env.EXA_API_KEY_47,
-    env.EXA_API_KEY_48,
-    env.EXA_API_KEY_49,
-    env.EXA_API_KEY_50,
-    env.EXA_API_KEY_51,
-    env.EXA_API_KEY_52,
-    env.EXA_API_KEY_53,
-    env.EXA_API_KEY_54,
-    env.EXA_API_KEY_55,
-    env.EXA_API_KEY_56,
-    env.EXA_API_KEY_57,
-    env.EXA_API_KEY_58,
-    env.EXA_API_KEY_59,
-    env.EXA_API_KEY_60,
-  ]) {
-    if (apiKey) keys.push(apiKey);
-  }
-  return keys;
-}
-
 async function searloSearch(query: string, env: Env): Promise<GoogleSearchResult[]> {
-  const keys = getSearloKeys(env);
+  // Searlo supports D1 panel config too, env secrets as fallback
+  const searloState = await getProviderState(env, "searlo");
+  const d1Keys = isProviderUsable(searloState) ? searloState.keys.map((k) => k.key) : [];
+  const keys = d1Keys.length > 0 ? d1Keys : getSearloKeys(env);
   for (const apiKey of keys) {
     try {
       const resp = await fetchWithTimeout(
@@ -757,15 +442,66 @@ async function searloSearch(query: string, env: Env): Promise<GoogleSearchResult
   return [];
 }
 
-async function tavilySearch(query: string, env: Env, taskKeyIndex = 0): Promise<GoogleSearchResult[]> {
-  const keys = getTavilyKeys(env);
+function getBraveKeys(env: Env): string[] {
+  const keys: string[] = [];
+  if (env.BRAVE_API_KEY) keys.push(env.BRAVE_API_KEY);
+  if (env.BRAVE_API_KEY_2) keys.push(env.BRAVE_API_KEY_2);
+  return keys;
+}
+
+// Brave Search API (free tier ~2,000 queries/month, no credit card):
+// independent web index, good at surfacing official homepages and LinkedIn
+// pages for company-name queries.
+async function braveSearch(query: string, env: Env, taskKeyIndex = 0): Promise<GoogleSearchResult[]> {
+  const braveState = await getProviderState(env, "brave");
+  const keys = isProviderUsable(braveState) ? braveState.keys : [];
   if (keys.length === 0) return [];
-  const exhausted = await loadExhaustedKeyIndexes(env, "tavily");
-  const order = buildKeyOrder(keys, taskKeyIndex, exhausted);
+  const exhausted = await loadExhaustedHealthKeys(env, "brave");
+  const order = buildKeyOrder(keys, keys.map((k) => keyHealthName("brave", k)), taskKeyIndex, exhausted);
+  if (order.length === 0) return [];
+  for (const { apiKey, healthName } of order) {
+    try {
+      const resp = await fetchWithTimeout(
+        `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${MAX_SEARCH_RESULTS}`,
+        FETCH_TIMEOUT_MS,
+        {
+          headers: {
+            "X-Subscription-Token": apiKey,
+            "Accept": "application/json",
+          },
+        },
+      );
+      if (resp.status === 429 || resp.status === 401 || resp.status === 403) {
+        // Free quota is monthly: cool the key down like the other search keys
+        await markKeyExhausted(env, "brave", healthName, SEARCH_KEY_COOLDOWN_MS, `HTTP ${resp.status}`);
+        continue;
+      }
+      if (!resp.ok) continue;
+      const data = await resp.json() as { web?: { results?: Array<{ title: string; url: string; description: string }> } };
+      const items = (data.web?.results ?? [])
+        .filter((item) => !isNoiseResult(item.url))
+        .map((item) => ({
+          title: item.title,
+          link: item.url,
+          snippet: item.description?.slice(0, 200) || "",
+        }));
+      if (items.length > 0) return items;
+    } catch { /* try next key */ }
+  }
+  return [];
+}
+
+async function tavilySearch(query: string, env: Env, taskKeyIndex = 0): Promise<GoogleSearchResult[]> {
+  // Tavily stays the primary search fleet: D1 panel keys first, then env pool
+  const tavilyState = await getProviderState(env, "tavily");
+  const keys = isProviderUsable(tavilyState) ? tavilyState.keys : [];
+  if (keys.length === 0) return [];
+  const exhausted = await loadExhaustedHealthKeys(env, "tavily");
+  const order = buildKeyOrder(keys, keys.map((k) => keyHealthName("tavily", k)), taskKeyIndex, exhausted);
   if (order.length === 0) return []; // all keys exhausted: stop calling this cycle
   // Anti-ban: the assigned key (first in order) serves the whole company task.
   // We only move to the next key when the assigned one is rejected.
-  for (const { apiKey, keyIndex } of order) {
+  for (const { apiKey, healthName } of order) {
     try {
       const resp = await fetchWithTimeout(
         `https://api.tavily.com/search`,
@@ -785,7 +521,7 @@ async function tavilySearch(query: string, env: Env, taskKeyIndex = 0): Promise<
       if (resp.status === 429 || resp.status === 401 || resp.status === 403) {
         // Quota used up / key rejected: disable the key for the cooldown period
         // so no later task calls it again, then fall back to the next key.
-        await markKeyExhausted(env, "tavily", keyIndex, SEARCH_KEY_COOLDOWN_MS, `HTTP ${resp.status}`);
+        await markKeyExhausted(env, "tavily", healthName, SEARCH_KEY_COOLDOWN_MS, `HTTP ${resp.status}`);
         continue;
       }
       if (!resp.ok) continue;
@@ -807,12 +543,13 @@ async function tavilySearch(query: string, env: Env, taskKeyIndex = 0): Promise<
 }
 
 async function exaSearch(query: string, env: Env, taskKeyIndex = 0): Promise<GoogleSearchResult[]> {
-  const keys = getExaKeys(env);
+  const exaState = await getProviderState(env, "exa");
+  const keys = isProviderUsable(exaState) ? exaState.keys : [];
   if (keys.length === 0) return [];
-  const exhausted = await loadExhaustedKeyIndexes(env, "exa");
-  const order = buildKeyOrder(keys, taskKeyIndex, exhausted);
+  const exhausted = await loadExhaustedHealthKeys(env, "exa");
+  const order = buildKeyOrder(keys, keys.map((k) => keyHealthName("exa", k)), taskKeyIndex, exhausted);
   if (order.length === 0) return []; // all keys exhausted: stop calling this cycle
-  for (const { apiKey, keyIndex } of order) {
+  for (const { apiKey, healthName } of order) {
     try {
       const resp = await fetchWithTimeout(
         `https://api.exa.ai/search`,
@@ -824,7 +561,7 @@ async function exaSearch(query: string, env: Env, taskKeyIndex = 0): Promise<Goo
         },
       );
       if (resp.status === 429 || resp.status === 401 || resp.status === 403) {
-        await markKeyExhausted(env, "exa", keyIndex, SEARCH_KEY_COOLDOWN_MS, `HTTP ${resp.status}`);
+        await markKeyExhausted(env, "exa", healthName, SEARCH_KEY_COOLDOWN_MS, `HTTP ${resp.status}`);
         continue;
       }
       if (!resp.ok) continue;
@@ -879,6 +616,9 @@ async function duckduckgoSearch(query: string): Promise<GoogleSearchResult[]> {
 async function multiEngineSearch(query: string, env: Env, tavilyKeyIndex = 0): Promise<GoogleSearchResult[]> {
   // Tavily is the primary fleet (up to 60 keys); other engines are fallbacks
   let results = await tavilySearch(query, env, tavilyKeyIndex);
+  if (results.length > 0) return results;
+
+  results = await braveSearch(query, env, tavilyKeyIndex);
   if (results.length > 0) return results;
 
   results = await searloSearch(query, env);
@@ -1118,6 +858,8 @@ const AI_SYSTEM_PROMPT = `你是一名高级B2B市场数据分析师和营销专
 - 数值字段（email/cellphone/whatsapp/linkedin_url）只放数据本身，说明性文字写入 source
 - email 必须是页面上逐字出现的完整地址；只有域名（如 @company.com）而无完整地址时，email 留空并在 source 中记录该域名
 - 「信息不足，需进一步验证」这类文字禁止写入任何联系方式字段，只能写入 remarks
+- 找到多个联系邮箱时，优先选择销售/采购/商务类邮箱（sales@、info@、purchasing@、export@、contact@ 等），其次才是技术/法务类邮箱
+- 若某字段在来源页面中未提及，一律置为 null，严禁臆测或从上下文推断
 
 分析要求：
 - 充分利用公司的所有文字信息（产品描述、公司介绍、新闻、博客、社媒帖子等）
@@ -1254,27 +996,35 @@ async function analyzeWithGemini(
   env: Env,
   controller: AbortController,
 ): Promise<CustomerAnalysis | null> {
-  const pool = getGeminiKeys(env);
-  if (pool.length === 0) return null;
-  const exhausted = await loadExhaustedKeyIndexes(env, "gemini");
+  // D1-first key resolution (方案B): panel-managed api_configs rows take
+  // priority; env secrets remain as bootstrap fallback.
+  const state = await getProviderState(env, "gemini");
+  if (!isProviderUsable(state)) return null;
+  const pool = state.keys;
+  const exhausted = await loadExhaustedHealthKeys(env, "gemini");
   // One fixed Gemini key per company task (index derived from customer.id):
   // all models tried on the same key first; only a rejected/exhausted key
   // rotates to the next key.
-  const order = buildKeyOrder(pool.map((p) => p.key), customer.id, exhausted)
-    .map((attempt) => pool.find((p) => p.key === attempt.apiKey)!)
-    .filter((p) => !exhausted.has(p.keyIndex));
+  const order = buildKeyOrder(pool, pool.map((p) => keyHealthName("gemini", p)), customer.id, exhausted)
+    .map((attempt) => pool.find((p) => keyHealthName("gemini", p) === attempt.healthName)!)
+    .map((entry) => ({ entry, healthName: keyHealthName("gemini", entry) }));
   if (order.length === 0) {
     // All keys are in cooldown (e.g. HTTP 429 rate limit). This is transient —
     // surface it as a retryable condition instead of silently falling through
     // to the (unconfigured) fallback providers.
     throw new Error("HTTP 429: all Gemini keys are cooling down (rate limited)");
   }
-  for (const { key, keyIndex } of order) {
-    const model = env.GEMINI_MODEL || DEFAULT_MODEL;
+  const geminiRpmLimit = state.rpmTotal ?? rpmLimitFor("gemini", pool.length, rpmEnvOverride(env, "gemini"));
+  for (const { entry, healthName } of order) {
+    const key = entry.key;
+    const model = entry.model || env.GEMINI_MODEL || DEFAULT_MODEL;
     const models = [model, ...FALLBACK_MODELS].filter(
       (m, i, all) => all.indexOf(m) === i,
     );
     for (const m of models) {
+      // Proactive RPM guard: once this minute's cap is consumed, hand over to
+      // the fallback chain instead of hard-hitting the upstream free tier.
+      if (!tryAcquireRpmSlot("gemini", geminiRpmLimit)) return null;
       try {
         const response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m)}:generateContent`,
@@ -1358,11 +1108,15 @@ async function analyzeWithGemini(
           const content = (
             payload as { candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }> }
           ).candidates?.[0]?.content?.parts?.[0]?.text;
-          if (typeof content === "string") return parseAnalysis(content);
+          if (typeof content === "string") {
+            await noteProviderKeySuccess(env, "gemini", entry);
+            return parseAnalysis(content);
+          }
         }
         if (response.status === 429) {
           // Key quota exhausted for now: cool it down and rotate to next key
-          await markKeyExhausted(env, "gemini", keyIndex, GEMINI_KEY_COOLDOWN_MS, `HTTP 429 on ${m}`);
+          await markKeyExhausted(env, "gemini", healthName, GEMINI_KEY_COOLDOWN_MS, `HTTP 429 on ${m}`);
+          await noteProviderKeyError(env, "gemini", entry, `HTTP 429 on ${m}`);
           break; // next key
         }
       } catch { /* try next model */ }
@@ -1377,13 +1131,44 @@ async function analyzeWithGroq(
   env: Env,
   controller: AbortController,
 ): Promise<CustomerAnalysis | null> {
-  const keys: Array<{ key: string; model: string }> = [];
-  if (env.GROQ_API_KEY) keys.push({ key: env.GROQ_API_KEY, model: env.GROQ_MODEL || "llama-3.1-70b-versatile" });
-  if (env.GROQ_API_KEY_2) keys.push({ key: env.GROQ_API_KEY_2, model: env.GROQ_MODEL || "llama-3.1-70b-versatile" });
-  for (const { key, model } of keys) {
+  const fallbackModel = env.GROQ_MODEL || "llama-3.1-70b-versatile";
+  const state = await getProviderState(env, "groq");
+  if (!isProviderUsable(state)) return null;
+  const groqRpmLimit = state.rpmTotal ?? rpmLimitFor("groq", state.keys.length, rpmEnvOverride(env, "groq"));
+  for (const entry of state.keys) {
+    if (!tryAcquireRpmSlot("groq", entry.rpmLimit ?? groqRpmLimit)) return null;
     try {
-      return await openaiCompatibleAnalyze("https://api.groq.com/openai/v1/chat/completions", key, model, customer, researchContext, controller);
-    } catch { /* try next key */ }
+      const analysis = await openaiCompatibleAnalyze("https://api.groq.com/openai/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
+      await noteProviderKeySuccess(env, "groq", entry);
+      return analysis;
+    } catch (e) {
+      await noteProviderKeyError(env, "groq", entry, e instanceof Error ? e.message : String(e));
+    }
+  }
+  return null;
+}
+
+async function analyzeWithCerebras(
+  customer: CustomerRow,
+  researchContext: string,
+  env: Env,
+  controller: AbortController,
+): Promise<CustomerAnalysis | null> {
+  // llama-3.3-70b: free tier serves 70B-class models; 8B failed to follow the
+  // strict JSON extraction schema reliably on crawler-grade tasks.
+  const fallbackModel = env.CEREBRAS_MODEL || "llama-3.3-70b";
+  const state = await getProviderState(env, "cerebras");
+  if (!isProviderUsable(state)) return null;
+  const cerebrasRpmLimit = state.rpmTotal ?? rpmLimitFor("cerebras", state.keys.length, rpmEnvOverride(env, "cerebras"));
+  for (const entry of state.keys) {
+    if (!tryAcquireRpmSlot("cerebras", entry.rpmLimit ?? cerebrasRpmLimit)) return null;
+    try {
+      const analysis = await openaiCompatibleAnalyze("https://api.cerebras.ai/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
+      await noteProviderKeySuccess(env, "cerebras", entry);
+      return analysis;
+    } catch (e) {
+      await noteProviderKeyError(env, "cerebras", entry, e instanceof Error ? e.message : String(e));
+    }
   }
   return null;
 }
@@ -1394,13 +1179,19 @@ async function analyzeWithMistral(
   env: Env,
   controller: AbortController,
 ): Promise<CustomerAnalysis | null> {
-  const keys: Array<{ key: string; model: string }> = [];
-  if (env.MISTRAL_API_KEY) keys.push({ key: env.MISTRAL_API_KEY, model: env.MISTRAL_MODEL || "mistral-large-latest" });
-  if (env.MISTRAL_API_KEY_2) keys.push({ key: env.MISTRAL_API_KEY_2, model: env.MISTRAL_MODEL || "mistral-large-latest" });
-  for (const { key, model } of keys) {
+  const fallbackModel = env.MISTRAL_MODEL || "mistral-large-latest";
+  const state = await getProviderState(env, "mistral");
+  if (!isProviderUsable(state)) return null;
+  const mistralRpmLimit = state.rpmTotal ?? rpmLimitFor("mistral", state.keys.length, rpmEnvOverride(env, "mistral"));
+  for (const entry of state.keys) {
+    if (!tryAcquireRpmSlot("mistral", entry.rpmLimit ?? mistralRpmLimit)) return null;
     try {
-      return await openaiCompatibleAnalyze("https://api.mistral.ai/v1/chat/completions", key, model, customer, researchContext, controller);
-    } catch { /* try next key */ }
+      const analysis = await openaiCompatibleAnalyze("https://api.mistral.ai/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
+      await noteProviderKeySuccess(env, "mistral", entry);
+      return analysis;
+    } catch (e) {
+      await noteProviderKeyError(env, "mistral", entry, e instanceof Error ? e.message : String(e));
+    }
   }
   return null;
 }
@@ -1411,13 +1202,67 @@ async function analyzeWithDeepSeek(
   env: Env,
   controller: AbortController,
 ): Promise<CustomerAnalysis | null> {
-  const keys: Array<{ key: string; model: string }> = [];
-  if (env.DEEPSEEK_API_KEY) keys.push({ key: env.DEEPSEEK_API_KEY, model: env.DEEPSEEK_MODEL || "deepseek-chat" });
-  if (env.DEEPSEEK_API_KEY_2) keys.push({ key: env.DEEPSEEK_API_KEY_2, model: env.DEEPSEEK_MODEL || "deepseek-chat" });
-  for (const { key, model } of keys) {
+  const fallbackModel = env.DEEPSEEK_MODEL || "deepseek-chat";
+  const state = await getProviderState(env, "deepseek");
+  if (!isProviderUsable(state)) return null;
+  const deepseekRpmLimit = state.rpmTotal ?? rpmLimitFor("deepseek", state.keys.length, rpmEnvOverride(env, "deepseek"));
+  for (const entry of state.keys) {
+    if (!tryAcquireRpmSlot("deepseek", entry.rpmLimit ?? deepseekRpmLimit)) return null;
     try {
-      return await openaiCompatibleAnalyze("https://api.deepseek.com/v1/chat/completions", key, model, customer, researchContext, controller);
-    } catch { /* try next key */ }
+      const analysis = await openaiCompatibleAnalyze("https://api.deepseek.com/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
+      await noteProviderKeySuccess(env, "deepseek", entry);
+      return analysis;
+    } catch (e) {
+      await noteProviderKeyError(env, "deepseek", entry, e instanceof Error ? e.message : String(e));
+    }
+  }
+  return null;
+}
+
+async function analyzeWithZhipu(
+  customer: CustomerRow,
+  researchContext: string,
+  env: Env,
+  controller: AbortController,
+): Promise<CustomerAnalysis | null> {
+  // glm-4.7-flash: 30B-class, 200K context, permanently free — well above
+  // glm-4-flash for structured crawler-data extraction.
+  const fallbackModel = env.ZHIPU_MODEL || "glm-4.7-flash";
+  const state = await getProviderState(env, "zhipu");
+  if (!isProviderUsable(state)) return null;
+  const zhipuRpmLimit = state.rpmTotal ?? rpmLimitFor("zhipu", state.keys.length, rpmEnvOverride(env, "zhipu"));
+  for (const entry of state.keys) {
+    if (!tryAcquireRpmSlot("zhipu", entry.rpmLimit ?? zhipuRpmLimit)) return null;
+    try {
+      const analysis = await openaiCompatibleAnalyze("https://open.bigmodel.cn/api/paas/v4/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
+      await noteProviderKeySuccess(env, "zhipu", entry);
+      return analysis;
+    } catch (e) {
+      await noteProviderKeyError(env, "zhipu", entry, e instanceof Error ? e.message : String(e));
+    }
+  }
+  return null;
+}
+
+async function analyzeWithNvidia(
+  customer: CustomerRow,
+  researchContext: string,
+  env: Env,
+  controller: AbortController,
+): Promise<CustomerAnalysis | null> {
+  const fallbackModel = env.NVIDIA_MODEL || "meta/llama-3.3-70b-instruct";
+  const state = await getProviderState(env, "nvidia");
+  if (!isProviderUsable(state)) return null;
+  const nvidiaRpmLimit = state.rpmTotal ?? rpmLimitFor("nvidia", state.keys.length, rpmEnvOverride(env, "nvidia"));
+  for (const entry of state.keys) {
+    if (!tryAcquireRpmSlot("nvidia", entry.rpmLimit ?? nvidiaRpmLimit)) return null;
+    try {
+      const analysis = await openaiCompatibleAnalyze("https://integrate.api.nvidia.com/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
+      await noteProviderKeySuccess(env, "nvidia", entry);
+      return analysis;
+    } catch (e) {
+      await noteProviderKeyError(env, "nvidia", entry, e instanceof Error ? e.message : String(e));
+    }
   }
   return null;
 }
@@ -1428,15 +1273,19 @@ async function analyzeWithOpenRouter(
   env: Env,
   controller: AbortController,
 ): Promise<CustomerAnalysis | null> {
-  const keys: Array<{ key: string; model: string }> = [];
-  const model = env.OPENROUTER_MODEL || "google/gemini-2.5-flash";
-  if (env.OPENROUTER_API_KEY) keys.push({ key: env.OPENROUTER_API_KEY, model });
-  if (env.OPENROUTER_API_KEY_2) keys.push({ key: env.OPENROUTER_API_KEY_2, model });
-  if (env.OPENROUTER_API_KEY_3) keys.push({ key: env.OPENROUTER_API_KEY_3, model });
-  for (const { key, model: m } of keys) {
+  const fallbackModel = env.OPENROUTER_MODEL || "google/gemini-2.5-flash";
+  const state = await getProviderState(env, "openrouter");
+  if (!isProviderUsable(state)) return null;
+  const openrouterRpmLimit = state.rpmTotal ?? rpmLimitFor("openrouter", state.keys.length, rpmEnvOverride(env, "openrouter"));
+  for (const entry of state.keys) {
+    if (!tryAcquireRpmSlot("openrouter", entry.rpmLimit ?? openrouterRpmLimit)) return null;
     try {
-      return await openaiCompatibleAnalyze("https://openrouter.ai/api/v1/chat/completions", key, m, customer, researchContext, controller);
-    } catch { /* try next key */ }
+      const analysis = await openaiCompatibleAnalyze("https://openrouter.ai/api/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
+      await noteProviderKeySuccess(env, "openrouter", entry);
+      return analysis;
+    } catch (e) {
+      await noteProviderKeyError(env, "openrouter", entry, e instanceof Error ? e.message : String(e));
+    }
   }
   return null;
 }
@@ -1449,12 +1298,10 @@ async function analyzeCustomer(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
   try {
-    const hasAnyProviderKey =
-      getGeminiKeys(env).length > 0 ||
-      Boolean(env.GROQ_API_KEY || env.GROQ_API_KEY_2) ||
-      Boolean(env.MISTRAL_API_KEY || env.MISTRAL_API_KEY_2) ||
-      Boolean(env.DEEPSEEK_API_KEY || env.DEEPSEEK_API_KEY_2) ||
-      Boolean(env.OPENROUTER_API_KEY || env.OPENROUTER_API_KEY_2 || env.OPENROUTER_API_KEY_3);
+    const providers: Array<Promise<boolean>> = [
+      "gemini", "groq", "cerebras", "mistral", "deepseek", "zhipu", "nvidia", "openrouter",
+    ].map(async (p) => isProviderUsable(await getProviderState(env, p)));
+    const hasAnyProviderKey = (await Promise.all(providers)).some(Boolean);
     if (!hasAnyProviderKey) {
       // Configuration error, not transient: fail immediately with a clear
       // message so the panel shows what is actually missing.
@@ -1466,6 +1313,18 @@ async function analyzeCustomer(
 
     // Fallback to Groq
     result = await analyzeWithGroq(customer, researchContext, env, controller);
+    if (result) return result;
+
+    // Fallback to Cerebras (fast open models, free tier)
+    result = await analyzeWithCerebras(customer, researchContext, env, controller);
+    if (result) return result;
+
+    // Fallback to Zhipu GLM-4-Flash (permanently free, China-direct)
+    result = await analyzeWithZhipu(customer, researchContext, env, controller);
+    if (result) return result;
+
+    // Fallback to NVIDIA NIM (free credits, sits late to conserve them)
+    result = await analyzeWithNvidia(customer, researchContext, env, controller);
     if (result) return result;
 
     // Fallback to Mistral
@@ -1513,6 +1372,84 @@ async function claimCustomers(env: Env): Promise<CustomerRow[]> {
   return result.results;
 }
 
+// ── Pre-AI data cleaning ──
+// Crawled pages are full of navigation menus, cookie banners, legal boilerplate
+// and repeated headers. Feeding them to the AI wastes tokens (and TPM quota)
+// without adding signal. This stage is deterministic, free, and runs before any
+// provider is called. Line granularity keeps contact lines and list items.
+const CLEAN_MIN_LINE_LENGTH = 4;
+const CLEAN_MAX_BLOCK_CHARS = 4_500;
+const CLEAN_MAX_TOTAL_CHARS = 30_000;
+const CLEAN_BLOCK_SEPARATOR = "\n";
+// Lines that are pure navigation/UI noise (footer, menus, legal boilerplate).
+const CLEAN_NOISE_LINE_PATTERNS = [
+  /^home\b/i, /^about us$/i, /^contact us$/i, /^privacy policy$/i,
+  /^terms (of|&(amp;)? )?(use|service)/i, /^cookie(s| policy)?$/i,
+  /^all rights reserved/i, /^©/, /^copyright /i, /^skip to (main )?content/i,
+  /^sign in$/i, /^log ?in$/i, /^subscribe$/i, /^newsletter$/i,
+  /^accept( all)? cookies?$/i, /^read more$/i, /^learn more$/i,
+  /^share (this|on)\b/i, /^follow us\b/i, /^back to top$/i,
+  /^[»«‹›»<\-–—•·|\s]+$/, // bare decorative separators
+];
+
+/**
+ * Deduplicate and strip boilerplate from the research context before sending
+ * it to the AI. Removes exact-duplicate lines (crawled pages repeat menus on
+ * every sub-page), UI noise lines, then trims each source block and the whole
+ * context to a token budget. Preserves head lines of each block (section
+ * headers like "=== 搜索结果: ... ===" carry source attribution the AI uses).
+ */
+function cleanResearchContextForAi(raw: string): string {
+  // 1. Split into source blocks (sections separated by "=== ... ===" headers)
+  const blocks = raw.split(/(?=={3}\s)/g);
+  const cleanedBlocks: string[] = [];
+  const seenBlockHashes = new Set<string>();
+
+  for (const block of blocks) {
+    const lines = block.split("\n");
+    // Block header ("=== ... ===") is always kept: it tells the AI the source.
+    const header = lines[0]?.includes("===") ? lines[0] : "";
+    const bodyLines = header ? lines.slice(1) : lines;
+
+    const keptLines: string[] = [];
+    const seenLines = new Set<string>();
+    let blockChars = 0;
+    for (const line of bodyLines) {
+      const trimmed = line.trim();
+      if (trimmed.length < CLEAN_MIN_LINE_LENGTH) continue; // drop fragments
+      if (CLEAN_NOISE_LINE_PATTERNS.some((p) => p.test(trimmed))) continue;
+      const key = trimmed.toLowerCase();
+      if (seenLines.has(key)) continue; // intra-block duplicate (repeated menu)
+      seenLines.add(key);
+      if (blockChars + trimmed.length > CLEAN_MAX_BLOCK_CHARS) break;
+      keptLines.push(trimmed);
+      blockChars += trimmed.length;
+    }
+
+    if (keptLines.length === 0 && !header) continue;
+    const cleaned = [header, ...keptLines].filter(Boolean).join(CLEAN_BLOCK_SEPARATOR);
+    // Cross-block dedupe: sub-pages of the same site often collapse to the
+    // same content after cleaning; keep only the first.
+    const blockHash = cleaned.replace(/\s+/g, "").toLowerCase();
+    if (blockHash.length < 20) continue; // blocks with too little signal
+    if (seenBlockHashes.has(blockHash)) continue;
+    seenBlockHashes.add(blockHash);
+    cleanedBlocks.push(cleaned);
+  }
+
+  // 3. Global budget: join blocks until the total char budget is used.
+  let total = "";
+  for (const block of cleanedBlocks) {
+    if (total.length + block.length > CLEAN_MAX_TOTAL_CHARS) {
+      const remaining = CLEAN_MAX_TOTAL_CHARS - total.length;
+      if (remaining > 500) total += CLEAN_BLOCK_SEPARATOR + block.slice(0, remaining);
+      break;
+    }
+    total += (total ? CLEAN_BLOCK_SEPARATOR : "") + block;
+  }
+  return total;
+}
+
 function isRetryableAiError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const msg = error.message;
@@ -1534,9 +1471,24 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
     let socialLinks: string[] = [];
     try {
       const response = await fetchWebsite(normalizeDomain(customer.domain));
-      if (!response.ok) throw websiteError(response);
-      pageText = await extractPageText(response);
-      socialLinks = await extractLinks(response);
+      if (!response.ok) {
+        // 环节1 降级回退: bot-blocked (403/503) or JS-rendered pages get one
+        // Firecrawl attempt (headless renderer, LLM-clean markdown) before
+        // the site is treated as unreachable.
+        if (BLOCKED_WEBSITE_STATUSES.has(response.status)) {
+          const markdown = await firecrawlScrape(normalizeDomain(customer.domain), env);
+          if (markdown && markdown.length > 100) {
+            pageText = markdown.slice(0, 15_000);
+          } else {
+            throw websiteError(response);
+          }
+        } else {
+          throw websiteError(response);
+        }
+      } else {
+        pageText = await extractPageText(response);
+        socialLinks = await extractLinks(response);
+      }
     } catch (e) {
       if (e instanceof Error && !e.message.includes("HTTP 404")) {
         // For non-404 errors, still try to gather info from other sources
@@ -1572,14 +1524,20 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
       throw new Error("无法从任何来源获取有效信息");
     }
 
-    // Step 4: Save full research text to database
+    // Step 4: Save full research text to database (raw context kept for audit
+    // and re-analysis without re-crawling)
     const trimmedResearch = researchContext.slice(0, 50_000);
     await env.DB.prepare(
       `UPDATE customers SET full_research_text = ? WHERE id = ?`
     ).bind(trimmedResearch, customer.id).run();
 
+    // Step 4b: Clean the raw context BEFORE the AI call — dedupe repeated
+    // menus/boilerplate across sources and trim to a token budget so paid/free
+    // quotas are spent on signal, not navigation junk.
+    const researchForAi = cleanResearchContextForAi(researchContext);
+
     // Step 5: AI deep analysis
-    const analysis = await analyzeCustomer(customer, researchContext, env);
+    const analysis = await analyzeCustomer(customer, researchForAi, env);
     const personas = JSON.stringify(analysis.personas_and_solutions);
     const remarks = withCompanyMarker(analysis.remarks, customer.company_id);
 
@@ -1661,7 +1619,14 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
       `).bind(remarks, customer.id);
     }
 
-    const remarks = withCompanyMarker(`处理失败：${reason}`, customer.company_id);
+    // Multi-Step Crawling & Fallback skill: bot-blocked (403) sites must not
+    // burn retry slots forever — they are tagged for manual review instead.
+    // The admin panel can list them via remarks and re-queue after a fix.
+    const needsManualReview = reason.includes("HTTP 403");
+    const failureLabel = needsManualReview
+      ? `需人工复审（反爬拦截，已尝试 Firecrawl 降级仍未成功）：${reason}`
+      : `处理失败：${reason}`;
+    const remarks = withCompanyMarker(failureLabel, customer.company_id);
     return env.DB.prepare(`
       UPDATE customers
       SET status = 'failed', remarks = ?, updated_at = CURRENT_TIMESTAMP
