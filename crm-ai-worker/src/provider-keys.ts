@@ -57,7 +57,7 @@ interface EnvWithDb {
 
 // Providers that live in api_configs. Search engines use the same mechanism.
 export const D1_PROVIDERS = [
-  "gemini", "groq", "cerebras", "zhipu", "nvidia", "mistral", "deepseek", "openrouter",
+  "gemini", "groq", "cerebras", "zhipu", "nvidia", "amd", "mistral", "deepseek", "openrouter",
   "tavily", "exa", "brave", "searlo",
 ] as const;
 

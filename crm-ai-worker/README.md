@@ -85,6 +85,7 @@ Groq:       https://console.groq.com/      (免绑卡, ~30 RPM)
 Cerebras:   https://cloud.cerebras.ai/     (免绑卡, ~30 RPM, 极速, 70B 级模型)
 Zhipu:      https://open.bigmodel.cn/      (GLM-4.7-Flash 永久免费, 200K 上下文)
 NVIDIA NIM: https://build.nvidia.com/      (免费额度, ~40 RPM)
+AMD Radeon: https://developer.amd.com.cn/radeon/tokenfactory  (免费模型 API, DeepSeek-V4-Flash 等, GitHub 登录免绑卡)
 Mistral:    https://console.mistral.ai/
 DeepSeek:   https://platform.deepseek.com/
 OpenRouter: https://openrouter.ai/         (带 :free 后缀的模型免费)
@@ -158,6 +159,7 @@ GROQ_API_KEY, GROQ_API_KEY_2 … GROQ_API_KEY_40
 CEREBRAS_API_KEY, CEREBRAS_API_KEY_2 … CEREBRAS_API_KEY_40
 ZHIPU_API_KEY, ZHIPU_API_KEY_2 … ZHIPU_API_KEY_40
 NVIDIA_API_KEY, NVIDIA_API_KEY_2 … NVIDIA_API_KEY_40
+AMD_API_KEY, AMD_API_KEY_2 … AMD_API_KEY_40  (AMD Radeon Cloud, 默认模型 deepseek/deepseek-v4-flash-0731)
 MISTRAL_API_KEY, MISTRAL_API_KEY_2 … MISTRAL_API_KEY_40
 DEEPSEEK_API_KEY, DEEPSEEK_API_KEY_2 … DEEPSEEK_API_KEY_40
 OPENROUTER_API_KEY, OPENROUTER_API_KEY_2 … OPENROUTER_API_KEY_40

@@ -27,6 +27,7 @@ interface Env {
   OPENROUTER_MODEL?: string;
   ZHIPU_MODEL?: string;
   NVIDIA_MODEL?: string;
+  AMD_MODEL?: string;
   // Per-key pool secrets (<PROVIDER>_API_KEY, _2 … _40) are injected onto env
   // by Cloudflare and collected at runtime via collectKeyPool(); the indexed
   // fields are intentionally NOT enumerated here (see key-pool.ts).
@@ -960,6 +961,10 @@ async function openaiCompatibleAnalyze(
   customer: CustomerRow,
   researchContext: string,
   controller: AbortController,
+  // Public free endpoints (e.g. AMD Radeon Cloud) run vLLM/SGLang-style
+  // backends where response_format json_object is unreliable or rejected —
+  // jsonMode=false omits it and relies on the prompt hint + parseAnalysis.
+  jsonMode = true,
 ): Promise<CustomerAnalysis> {
   const jsonFormatHint = `\n\n你必须返回一个合法的JSON对象，格式如下：\n{\n  "customer_segment": "客户细分（Distributor/Dealer/Manufacturer/User/OEM/Service Provider/E-commerce/不相关）",\n  "product_categories": "产品类别（Inflatable Boats/Paddle Boards/Kayaks/Yachts/Kitesurfing/Windsurfing/Accessories/Apparel）",\n  "company_size": "公司规模（Small/Medium/Large/Enterprise）",\n  "geographic_coverage": "地理覆盖（Local/National/International）",\n  "personas_and_solutions": {"personas": [{"name": "角色名", "role": "职位", "needs": ["需求1"], "pain_points": ["痛点1"]}], "solutions": [{"name": "方案名", "value": "方案描述", "target_persona": "目标角色"}]},\n  "found_contacts": [{"first_name": "名", "last_name": "姓", "title": "职位", "email": "真实邮箱", "cellphone": "真实手机号", "whatsapp": "仅当有wa.me链接时填写", "linkedin_url": "LinkedIn链接", "source": "信息来源URL"}],\n  "remarks": "备注"\n}\n\n重要：found_contacts中的所有联系方式必须是从提供的数据中真实找到的，严禁编造！`;
 
@@ -977,7 +982,7 @@ async function openaiCompatibleAnalyze(
         { role: "user", content: buildUserPrompt(customer, researchContext) + jsonFormatHint },
       ],
       temperature: 0.1,
-      response_format: { type: "json_object" },
+      ...(jsonMode ? { response_format: { type: "json_object" as const } } : {}),
     }),
   });
   if (!response.ok) {
@@ -1290,6 +1295,33 @@ async function analyzeWithOpenRouter(
   return null;
 }
 
+async function analyzeWithAmd(
+  customer: CustomerRow,
+  researchContext: string,
+  env: Env,
+  controller: AbortController,
+): Promise<CustomerAnalysis | null> {
+  // AMD Radeon Cloud free model APIs (OpenAI-compatible). Registration:
+  // https://developer.amd.com.cn/radeon/tokenfactory (GitHub login, no card).
+  const fallbackModel = env.AMD_MODEL || "deepseek/deepseek-v4-flash-0731";
+  const state = await getProviderState(env, "amd");
+  if (!isProviderUsable(state)) return null;
+  const amdRpmLimit = state.rpmTotal ?? rpmLimitFor("amd", state.keys.length, rpmEnvOverride(env, "amd"));
+  for (const entry of state.keys) {
+    if (!tryAcquireRpmSlot("amd", entry.rpmLimit ?? amdRpmLimit)) return null;
+    try {
+      // AMD public free endpoint: JSON mode unreliable → prompt hint only;
+      // parseAnalysis still validates/normalizes the output.
+      const analysis = await openaiCompatibleAnalyze("https://developer.amd.com.cn/radeon/api/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller, false);
+      await noteProviderKeySuccess(env, "amd", entry);
+      return analysis;
+    } catch (e) {
+      await noteProviderKeyError(env, "amd", entry, e instanceof Error ? e.message : String(e));
+    }
+  }
+  return null;
+}
+
 async function analyzeCustomer(
   customer: CustomerRow,
   researchContext: string,
@@ -1299,7 +1331,7 @@ async function analyzeCustomer(
   const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
   try {
     const providers: Array<Promise<boolean>> = [
-      "gemini", "groq", "cerebras", "mistral", "deepseek", "zhipu", "nvidia", "openrouter",
+      "gemini", "groq", "cerebras", "mistral", "deepseek", "zhipu", "nvidia", "amd", "openrouter",
     ].map(async (p) => isProviderUsable(await getProviderState(env, p)));
     const hasAnyProviderKey = (await Promise.all(providers)).some(Boolean);
     if (!hasAnyProviderKey) {
@@ -1325,6 +1357,10 @@ async function analyzeCustomer(
 
     // Fallback to NVIDIA NIM (free credits, sits late to conserve them)
     result = await analyzeWithNvidia(customer, researchContext, env, controller);
+    if (result) return result;
+
+    // Fallback to AMD Radeon Cloud (free model APIs: DeepSeek-V4-Flash etc.)
+    result = await analyzeWithAmd(customer, researchContext, env, controller);
     if (result) return result;
 
     // Fallback to Mistral

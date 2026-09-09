@@ -462,7 +462,7 @@ async function callAiForOutreach(
   // DeepSeek, OpenRouter). Key pools resolve D1-first (panel-managed api_configs
   // rows), with env secrets as bootstrap fallback.
   const providerDefs: Array<{
-    provider: "groq" | "cerebras" | "mistral" | "deepseek" | "zhipu" | "nvidia" | "openrouter";
+    provider: "groq" | "cerebras" | "mistral" | "deepseek" | "zhipu" | "nvidia" | "amd" | "openrouter";
     url: string;
     fallbackModel: string;
   }> = [
@@ -470,12 +470,13 @@ async function callAiForOutreach(
     { provider: "cerebras", url: "https://api.cerebras.ai/v1/chat/completions", fallbackModel: env.CEREBRAS_MODEL || "llama-3.3-70b" },
     { provider: "zhipu", url: "https://open.bigmodel.cn/api/paas/v4/chat/completions", fallbackModel: env.ZHIPU_MODEL || "glm-4.7-flash" },
     { provider: "nvidia", url: "https://integrate.api.nvidia.com/v1/chat/completions", fallbackModel: env.NVIDIA_MODEL || "meta/llama-3.3-70b-instruct" },
+    { provider: "amd", url: "https://developer.amd.com.cn/radeon/api/v1/chat/completions", fallbackModel: env.AMD_MODEL || "deepseek/deepseek-v4-flash-0731" },
     { provider: "mistral", url: "https://api.mistral.ai/v1/chat/completions", fallbackModel: env.MISTRAL_MODEL || "mistral-large-latest" },
     { provider: "deepseek", url: "https://api.deepseek.com/v1/chat/completions", fallbackModel: env.DEEPSEEK_MODEL || "deepseek-chat" },
     { provider: "openrouter", url: "https://openrouter.ai/api/v1/chat/completions", fallbackModel: env.OPENROUTER_MODEL || "google/gemini-2.5-flash" },
   ];
   const providerSpecs: Array<{
-    provider: "groq" | "cerebras" | "mistral" | "deepseek" | "zhipu" | "nvidia" | "openrouter";
+    provider: "groq" | "cerebras" | "mistral" | "deepseek" | "zhipu" | "nvidia" | "amd" | "openrouter";
     url: string;
     model: string;
     keys: ProviderKeyEntry[];
@@ -492,10 +493,12 @@ async function callAiForOutreach(
       rpmTotal: state.rpmTotal,
     });
   }
-  const openaiKeys: Array<{ provider: "groq" | "cerebras" | "mistral" | "deepseek" | "zhipu" | "nvidia" | "openrouter"; entry: ProviderKeyEntry; url: string; model: string }> = [];
+  const openaiKeys: Array<{ provider: "groq" | "cerebras" | "mistral" | "deepseek" | "zhipu" | "nvidia" | "amd" | "openrouter"; entry: ProviderKeyEntry; url: string; model: string; jsonMode: boolean }> = [];
   for (const spec of providerSpecs) {
+    // AMD public free endpoint: response_format json_object unreliable → prompt only
+    const jsonMode = spec.provider !== "amd";
     for (const entry of spec.keys) {
-      openaiKeys.push({ provider: spec.provider, entry, url: spec.url, model: spec.model });
+      openaiKeys.push({ provider: spec.provider, entry, url: spec.url, model: spec.model, jsonMode });
     }
   }
   const openaiRpmLimits: Record<string, number> = {};
@@ -506,7 +509,7 @@ async function callAiForOutreach(
     if (!api.entry.key) continue;
     if (!tryAcquireRpmSlot(api.provider, openaiRpmLimits[api.provider])) continue;
     try {
-      const result = await callOpenAIOutreach(api.url, api.entry.key, api.model, prompt);
+      const result = await callOpenAIOutreach(api.url, api.entry.key, api.model, prompt, api.jsonMode);
       await noteProviderKeySuccess(env, api.provider, api.entry);
       return result;
     } catch (e) {
@@ -554,7 +557,8 @@ async function callOpenAIOutreach(
   apiUrl: string,
   apiKey: string,
   model: string,
-  prompt: string
+  prompt: string,
+  jsonMode = true
 ): Promise<{ subject: string; body: string }> {
   const response = await fetch(apiUrl, {
     method: "POST",
@@ -567,7 +571,7 @@ async function callOpenAIOutreach(
       messages: [{ role: "user", content: prompt }],
       temperature: 0.7,
       max_tokens: 1024,
-      response_format: { type: "json_object" },
+      ...(jsonMode ? { response_format: { type: "json_object" as const } } : {}),
     }),
   });
 

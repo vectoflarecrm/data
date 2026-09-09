@@ -72,6 +72,9 @@ export interface AdminEnv extends GmailEnv {
   NVIDIA_API_KEY?: string;
   NVIDIA_API_KEY_2?: string;
   NVIDIA_MODEL?: string;
+  AMD_API_KEY?: string;
+  AMD_API_KEY_2?: string;
+  AMD_MODEL?: string;
   MISTRAL_API_KEY?: string;
   MISTRAL_API_KEY_2?: string;
   MISTRAL_MODEL?: string;
@@ -93,6 +96,7 @@ export interface AdminEnv extends GmailEnv {
   DEEPSEEK_RPM?: string;
   ZHIPU_RPM?: string;
   NVIDIA_RPM?: string;
+  AMD_RPM?: string;
   OPENROUTER_RPM?: string;
   // Cloudflare API credentials for the panel's secret-management page
   // (bootstrap once via CI/`wrangler secret put`; keys then rotate in-panel)
@@ -405,7 +409,7 @@ async function updateCustomer(request: Request, env: AdminEnv, id: number): Prom
 /* ── Dynamic provider key management (方案B: D1 api_configs, no deploy needed) ── */
 
 const PANEL_PROVIDERS = [
-  "gemini", "groq", "cerebras", "zhipu", "nvidia", "mistral", "deepseek", "openrouter",
+  "gemini", "groq", "cerebras", "zhipu", "nvidia", "amd", "mistral", "deepseek", "openrouter",
   "tavily", "exa", "brave", "searlo",
 ] as const;
 
@@ -575,6 +579,7 @@ const SECRET_DEFINITIONS: SecretDefinition[] = [
   { name: "CEREBRAS_API_KEY", label: "Cerebras", group: "AI Provider Keys", indexed: true },
   { name: "ZHIPU_API_KEY", label: "Zhipu GLM", group: "AI Provider Keys", indexed: true },
   { name: "NVIDIA_API_KEY", label: "NVIDIA NIM", group: "AI Provider Keys", indexed: true },
+  { name: "AMD_API_KEY", label: "AMD Radeon Cloud", group: "AI Provider Keys", indexed: true },
   { name: "MISTRAL_API_KEY", label: "Mistral", group: "AI Provider Keys", indexed: true },
   { name: "DEEPSEEK_API_KEY", label: "DeepSeek", group: "AI Provider Keys", indexed: true },
   { name: "OPENROUTER_API_KEY", label: "OpenRouter", group: "AI Provider Keys", indexed: true },
@@ -1368,7 +1373,7 @@ tr.inactive td{opacity:.5}
 var toastEl=document.getElementById('toast');
 function toast(msg,err){toastEl.textContent=msg;toastEl.className=err?'err':'';toastEl.style.display='block';setTimeout(function(){toastEl.style.display='none'},4000)}
 function api(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin';throw new Error('登录过期')}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败');return d})})}
-var PROVIDER_NAMES={gemini:'Gemini',groq:'Groq',cerebras:'Cerebras',zhipu:'Zhipu',nvidia:'NVIDIA',mistral:'Mistral',deepseek:'DeepSeek',openrouter:'OpenRouter',tavily:'Tavily',exa:'Exa',brave:'Brave',searlo:'Searlo'};
+var PROVIDER_NAMES={gemini:'Gemini',groq:'Groq',cerebras:'Cerebras',zhipu:'Zhipu',nvidia:'NVIDIA',amd:'AMD',mistral:'Mistral',deepseek:'DeepSeek',openrouter:'OpenRouter',tavily:'Tavily',exa:'Exa',brave:'Brave',searlo:'Searlo'};
 function loadKeys(){
   api('/admin/api/keys').then(function(d){
     var tb=document.querySelector('#keysTable tbody');tb.innerHTML='';

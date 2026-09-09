@@ -24,6 +24,7 @@ export type ProviderId =
   | "deepseek"
   | "zhipu"
   | "nvidia"
+  | "amd"
   | "openrouter";
 
 // Conservative per-key free-tier RPM (well below the official caps so brief
@@ -36,6 +37,7 @@ export type ProviderId =
 // - zhipu: GLM-4-Flash is permanently free, concurrency-capped -> 15
 // - nvidia: NIM free endpoint ~40 RPM default -> 30 (credits are finite,
 //   so it sits late in the fallback chain)
+// - amd: Radeon Cloud free model APIs (no documented RPM cap yet) -> 20
 // - openrouter: :free models ~20 RPM -> 15
 export const PER_KEY_RPM: Record<ProviderId, number> = {
   gemini: 10,
@@ -45,6 +47,7 @@ export const PER_KEY_RPM: Record<ProviderId, number> = {
   deepseek: 100,
   zhipu: 15,
   nvidia: 30,
+  amd: 20,
   openrouter: 15,
 };
 
@@ -69,6 +72,7 @@ export function rpmEnvOverride(
     DEEPSEEK_RPM?: string;
     ZHIPU_RPM?: string;
     NVIDIA_RPM?: string;
+    AMD_RPM?: string;
     OPENROUTER_RPM?: string;
   },
   provider: ProviderId,
@@ -81,6 +85,7 @@ export function rpmEnvOverride(
     case "deepseek": return env.DEEPSEEK_RPM;
     case "zhipu": return env.ZHIPU_RPM;
     case "nvidia": return env.NVIDIA_RPM;
+    case "amd": return env.AMD_RPM;
     case "openrouter": return env.OPENROUTER_RPM;
   }
 }

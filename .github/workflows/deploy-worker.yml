@@ -79,6 +79,9 @@ jobs:
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       NVIDIA_API_KEY_2: ${{ secrets.NVIDIA_API_KEY_2 }}
       NVIDIA_MODEL: ${{ secrets.NVIDIA_MODEL }}
+      AMD_API_KEY: ${{ secrets.AMD_API_KEY }}
+      AMD_API_KEY_2: ${{ secrets.AMD_API_KEY_2 }}
+      AMD_MODEL: ${{ secrets.AMD_MODEL }}
       MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
       MISTRAL_API_KEY_2: ${{ secrets.MISTRAL_API_KEY_2 }}
       MISTRAL_MODEL: ${{ secrets.MISTRAL_MODEL }}
@@ -96,6 +99,7 @@ jobs:
       DEEPSEEK_RPM: ${{ secrets.DEEPSEEK_RPM }}
       ZHIPU_RPM: ${{ secrets.ZHIPU_RPM }}
       NVIDIA_RPM: ${{ secrets.NVIDIA_RPM }}
+      AMD_RPM: ${{ secrets.AMD_RPM }}
       OPENROUTER_RPM: ${{ secrets.OPENROUTER_RPM }}
       SEARLO_API_KEY: ${{ secrets.SEARLO_API_KEY }}
       SEARLO_API_KEY_2: ${{ secrets.SEARLO_API_KEY_2 }}
@@ -383,6 +387,16 @@ jobs:
               npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
             fi
           done
+          # Sync AMD Radeon Cloud keys
+          for var_name in AMD_API_KEY AMD_API_KEY_2 AMD_MODEL; do
+            val="${!var_name:-}"
+            if [ -n "$val" ]; then
+              printf '%s' "$val" | npx wrangler secret put "$var_name"
+              echo "Synced $var_name"
+            else
+              npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
+            fi
+          done
           # Sync Mistral keys
           for var_name in MISTRAL_API_KEY MISTRAL_API_KEY_2 MISTRAL_MODEL; do
             val="${!var_name:-}"
@@ -414,7 +428,7 @@ jobs:
             fi
           done
           # Sync optional RPM limiter overrides (total RPM per provider)
-          for var_name in GEMINI_RPM GROQ_RPM CEREBRAS_RPM MISTRAL_RPM DEEPSEEK_RPM ZHIPU_RPM NVIDIA_RPM OPENROUTER_RPM; do
+          for var_name in GEMINI_RPM GROQ_RPM CEREBRAS_RPM MISTRAL_RPM DEEPSEEK_RPM ZHIPU_RPM NVIDIA_RPM AMD_RPM OPENROUTER_RPM; do
             val="${!var_name:-}"
             if [ -n "$val" ]; then
               printf '%s' "$val" | npx wrangler secret put "$var_name"
