@@ -80,7 +80,7 @@ interface CustomerAnalysis {
 
 const BATCH_SIZE = 1;
 const FETCH_TIMEOUT_MS = 15_000;
-const AI_TIMEOUT_MS = 30_000;
+const AI_TIMEOUT_MS = 60_000;
 const MAX_SOURCE_PAGES = 5;
 const MAX_SEARCH_RESULTS = 5;
 const INTER_SOURCE_DELAY_MS = 2_000;
@@ -1138,8 +1138,15 @@ async function analyzeWithGemini(
           await markKeyExhausted(env, "gemini", healthName, GEMINI_KEY_COOLDOWN_MS, `HTTP 429 on ${m}`);
           await noteProviderKeyError(env, "gemini", entry, `HTTP 429 on ${m}`);
           break; // next key
+        }        } catch (e) {
+          // An abort must propagate: the shared controller is already dead, so
+          // "trying the next model" would fail instantly and mask the real
+          // (timeout) cause as a misleading "all providers unavailable".
+          if (controller.signal.aborted) {
+            throw new Error(`AI处理超时（${Math.round(AI_TIMEOUT_MS / 1000)}秒内未完成）`);
+          }
+          /* otherwise try next model */
         }
-      } catch { /* try next model */ }
     }
   }
   return null;
@@ -1344,6 +1351,14 @@ async function analyzeCustomer(
 ): Promise<CustomerAnalysis> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+  // Truthful timeout reporting: once the shared controller fires, every later
+  // provider call dies instantly — surface that as a timeout instead of the
+  // misleading "all providers unavailable" (which previously looped forever).
+  const ensureNotAborted = () => {
+    if (controller.signal.aborted) {
+      throw new Error(`AI处理超时（${Math.round(AI_TIMEOUT_MS / 1000)}秒内未完成）`);
+    }
+  };
   try {
     const providers: Array<Promise<boolean>> = [
       "gemini", "groq", "cerebras", "mistral", "deepseek", "zhipu", "nvidia", "amd", "openrouter",
@@ -1357,38 +1372,47 @@ async function analyzeCustomer(
     // Try Gemini first
     let result = await analyzeWithGemini(customer, researchContext, env, controller);
     if (result) return result;
+    ensureNotAborted();
 
     // Fallback to Groq
     result = await analyzeWithGroq(customer, researchContext, env, controller);
     if (result) return result;
+    ensureNotAborted();
 
     // Fallback to Cerebras (fast open models, free tier)
     result = await analyzeWithCerebras(customer, researchContext, env, controller);
     if (result) return result;
+    ensureNotAborted();
 
     // Fallback to Zhipu GLM-4-Flash (permanently free, China-direct)
     result = await analyzeWithZhipu(customer, researchContext, env, controller);
     if (result) return result;
+    ensureNotAborted();
 
     // Fallback to NVIDIA NIM (free credits, sits late to conserve them)
     result = await analyzeWithNvidia(customer, researchContext, env, controller);
     if (result) return result;
+    ensureNotAborted();
 
     // Fallback to AMD Radeon Cloud (free model APIs: DeepSeek-V4-Flash etc.)
     result = await analyzeWithAmd(customer, researchContext, env, controller);
     if (result) return result;
+    ensureNotAborted();
 
     // Fallback to Mistral
     result = await analyzeWithMistral(customer, researchContext, env, controller);
     if (result) return result;
+    ensureNotAborted();
 
     // Fallback to DeepSeek
     result = await analyzeWithDeepSeek(customer, researchContext, env, controller);
     if (result) return result;
+    ensureNotAborted();
 
     // Fallback to OpenRouter
     result = await analyzeWithOpenRouter(customer, researchContext, env, controller);
     if (result) return result;
+    ensureNotAborted();
 
     // Keys exist but every provider declined (rate limits, server errors).
     // Transient — the message makes isRetryableAiError() re-queue it.
@@ -1656,7 +1680,7 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
     // Rate-limit rejections (429 / full-pool cooldown) are infinite-retry:
     // they depend on other tasks releasing quota, not on this record being
     // broken, so they must never consume a retry slot or burn the record.
-    const isRateLimit = reason.includes("HTTP 429") || reason.includes("暂时不可用");
+    const isRateLimit = reason.includes("HTTP 429") || reason.includes("暂时不可用") || reason.includes("AI处理超时");
     const shouldRetry = isRetryableAiError(error) && (isRateLimit || retryCount < MAX_RETRIES);
 
     if (shouldRetry) {
