@@ -4,3 +4,6 @@ node_modules/
 *.log
 dist/
 .DS_Store
+
+# Private D1 backup repo working copy (separate repository, must never enter this repo)
+crm-db-backup/
