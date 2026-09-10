@@ -367,7 +367,9 @@ async function extractLinks(response: Response): Promise<string[]> {
     .on("a", {
       element(element) {
         const href = element.getAttribute("href") ?? "";
-        if (href && detectPlatform(href)) {
+        // wa.me/whatsapp deep links are the ONLY reliable WhatsApp signal the
+        // prompt demands, so capture them alongside the social platforms.
+        if (href && (detectPlatform(href) || /^https?:\/\/(wa\.me|api\.whatsapp\.com)/i.test(href))) {
           try {
             const url = new URL(href, response.url);
             links.push(url.toString());
@@ -1517,8 +1519,12 @@ async function claimCustomers(env: Env): Promise<CustomerRow[]> {
 // without adding signal. This stage is deterministic, free, and runs before any
 // provider is called. Line granularity keeps contact lines and list items.
 const CLEAN_MIN_LINE_LENGTH = 4;
-const CLEAN_MAX_BLOCK_CHARS = 4_500;
-const CLEAN_MAX_TOTAL_CHARS = 30_000;
+const CLEAN_MAX_BLOCK_CHARS = 4_000;
+// Contact facts live in the leading facts block; socials and sub-pages carry
+// prose, not contact signal. 22k chars of cleaned body ≈ 5-6k tokens per
+// request — roughly half the previous 30k budget — which doubles the number
+// of analyses the same free-token pool can serve.
+const CLEAN_MAX_TOTAL_CHARS = 22_000;
 const CLEAN_BLOCK_SEPARATOR = "\n";
 // Lines that are pure navigation/UI noise (footer, menus, legal boilerplate).
 const CLEAN_NOISE_LINE_PATTERNS = [
@@ -1587,6 +1593,22 @@ function cleanResearchContextForAi(raw: string): string {
     total += (total ? CLEAN_BLOCK_SEPARATOR : "") + block;
   }
   return total;
+}
+
+// Deterministic pre-extraction (docx2 第五层: "不要抓完网页直接扔给 AI"):
+// regex-free-of-AI facts — emails, phones, socials, WhatsApp links — are
+// already mined by rules; handing them to the AI as a compact block lets the
+// model skip scanning tens of thousands of raw chars for them. The main body
+// budget can then shrink without losing contact signal.
+function buildFactsBlock(emails: string[], phones: string[], socialLinks: string[]): string {
+  const waLinks = socialLinks.filter((l) => /wa\.me|api\.whatsapp\.com/i.test(l));
+  const socials = socialLinks.filter((l) => !/wa\.me|api\.whatsapp\.com/i.test(l));
+  const lines: string[] = ["=== 规则预提取事实（无需在正文中重复查找） ==="];
+  if (emails.length) lines.push(`已提取邮箱: ${emails.join(", ")}`);
+  if (phones.length) lines.push(`已提取电话: ${phones.join(", ")}`);
+  if (socials.length) lines.push(`已发现社媒链接: ${socials.join(", ")}`);
+  if (waLinks.length) lines.push(`WhatsApp链接（wa.me，可据此填写whatsapp字段）: ${waLinks.join(", ")}`);
+  return lines.length > 1 ? lines.join("\n") : "";
 }
 
 function isRetryableAiError(error: unknown): boolean {
@@ -1704,8 +1726,17 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
 
     // Step 4b: Clean the raw context BEFORE the AI call — dedupe repeated
     // menus/boilerplate across sources and trim to a token budget so paid/free
-    // quotas are spent on signal, not navigation junk.
-    const researchForAi = cleanResearchContextForAi(researchContext);
+    // quotas are spent on signal, not navigation junk. Contact facts already
+    // mined by rules go in as a compact leading block (docx2 第五层), so the
+    // model never has to grep raw prose for emails/phones and the body budget
+    // can stay small.
+    const mainEmails = extractContactEvidence(pageText || "").emails;
+    const mainPhones = extractContactEvidence(pageText || "").phones;
+    const factsBlock = buildFactsBlock(mainEmails, mainPhones, socialLinks);
+    const cleanedBody = cleanResearchContextForAi(researchContext);
+    const researchForAi = factsBlock
+      ? `${factsBlock}\n\n${cleanedBody}`.slice(0, CLEAN_MAX_TOTAL_CHARS + 2_000)
+      : cleanedBody;
 
     // Step 5: AI deep analysis
     const analysis = await analyzeCustomer(customer, researchForAi, env);

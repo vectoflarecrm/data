@@ -252,7 +252,6 @@ interface OutreachCompany {
   business_tag: string | null;
   customer_segment: string | null;
   country: string | null;
-  full_research_text: string | null;
   description: string | null;
   company_profile: string | null;
   outreach_context: string | null;
@@ -298,7 +297,7 @@ function buildOutreachPrompt(
 - 主营产品/服务：${profile.main_products?.length ? profile.main_products.join("、") : "未知"}
 - 下游客户群体：${profile.target_customers || "未知"}
 - 核心卖点/特色：${profile.selling_points?.length ? profile.selling_points.join("；") : "未知"}`
-    : "## 公司档案\n（尚无结构化档案，请仅依据下方原始研究资料，且不要编造细节）";
+    : "## 公司档案\n（尚无结构化档案）";
   const outreachSection = outreach && (outreach.recommended_angle || outreach.evidence_lines?.length)
     ? `## 推荐切入角度与可引用证据
 - 建议切入点：${outreach.recommended_angle || "（自行根据档案判断）"}
@@ -330,8 +329,6 @@ ${brand.signature}` : ""}
 - 公司描述：${company.description || "未知"}
 ${profileSection}
 ${outreachSection}
-## 原始研究资料（仅在上述结构化信息不足时参考）
-${(company.full_research_text || "").slice(0, 2000)}
 
 ## 写作要求
 
@@ -346,8 +343,8 @@ ${isEnglish ? "使用英文。" : `如果客户在西班牙，请用西班牙语
    - 结尾：提出具体的合作建议（如样品、报价、展会见面等）
    - 专业但亲切的语气
    - 长度：150-250词（不含签名）
-   - 必须个性化：引用该公司的具体产品、市场定位或业务特点
-   - 禁止使用模板化的套话
+   - 必须个性化：引用该公司档案中的具体产品、市场定位或业务特点
+   - 档案信息不足时基于“客户细分/经营产品”等已知字段合理展开，严禁编造具体细节
 ${brand.signature ? "   - 正文最后必须原样附加上面提供的邮件签名块（保持原样，不要翻译或改动）" : ""}
 
 3. **严格禁止**：
@@ -395,7 +392,7 @@ export async function generateOutreachEmails(
   const customers = await env.DB.prepare(`
     SELECT id, company_id, display_id, company_name, domain, first_name, last_name,
            title, email, products_services, business_tag, customer_segment, country,
-           full_research_text, description, company_profile, outreach_context
+           description, company_profile, outreach_context
     FROM customers
     WHERE status = 'completed'
       AND email IS NOT NULL AND email != ''
@@ -422,7 +419,6 @@ export async function generateOutreachEmails(
       business_tag: string | null;
       customer_segment: string | null;
       country: string | null;
-      full_research_text: string | null;
       description: string | null;
       company_profile: string | null;
       outreach_context: string | null;

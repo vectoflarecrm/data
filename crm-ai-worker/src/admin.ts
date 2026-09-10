@@ -156,6 +156,30 @@ interface AdminCustomer {
   updated_at: string;
 }
 
+// Field-level evidence chain (docx ①): every core AI judgement carries its
+// source URL, quoted text and confidence so users can verify claims without
+// re-crawling. Loaded per-company from the evidence table on detail view.
+interface EvidenceRow {
+  id: number;
+  field_name: string;
+  field_value: string | null;
+  source_url: string | null;
+  source_type: string | null;
+  evidence_text: string | null;
+  confidence: number | null;
+  collected_at: string;
+}
+
+async function getCustomerEvidence(env: AdminEnv, companyId: string): Promise<EvidenceRow[]> {
+  const result = await env.DB.prepare(
+    `SELECT id, field_name, field_value, source_url, source_type, evidence_text, confidence, collected_at
+     FROM evidence WHERE company_id = ? ORDER BY confidence DESC, collected_at DESC LIMIT 30`,
+  )
+    .bind(companyId)
+    .all<EvidenceRow>();
+  return result.results;
+}
+
 const CUSTOMER_COLUMNS = `
   id, company_id, display_id, domain, status, company_name, legal_name, trading_name, normalized_domain,
   first_name, last_name, full_name, title, department, linkedin_url,
@@ -1268,7 +1292,8 @@ async function handleAdminApi(request: Request, env: AdminEnv): Promise<Response
         const customer = await getCustomer(env, id);
         if (!customer) return jsonResponse({ detail: "Customer not found" }, 404);
         const contacts = await getCustomerContacts(env, customer.company_id);
-        return jsonResponse({ ...customer, contacts });
+        const evidence = await getCustomerEvidence(env, customer.company_id);
+        return jsonResponse({ ...customer, contacts, evidence });
       }
       if (request.method === "PATCH") return await updateCustomer(request, env, id);
     }
@@ -1497,7 +1522,13 @@ const ADMIN_PANEL_HTML = `<!doctype html>
       if(ct.social_accounts){try{var sa=JSON.parse(ct.social_accounts);if(sa.length>0){h+='<div style="grid-column:1/-1"><strong>社交账号:</strong> ';sa.forEach(function(a){h+=esc(a.platform)+': '+(a.username?'@'+esc(a.username):'')+' '});h+='</div>'}}catch(e){}}
       h+='</div></div>'});return h};
   var renderVerifiedSocial=function(sv){if(!sv)return'';var social=null;try{social=JSON.parse(sv)}catch(e){}if(!social||!social.length)return'';var h='<div class="section-title">📱 已验证社交媒体</div><div style="display:flex;flex-wrap:wrap;gap:8px">';social.forEach(function(s){var icon=s.platform==='LinkedIn'?'🔗':s.platform==='Facebook'?'📘':s.platform==='Instagram'?'📷':s.platform==='Twitter'?'🐦':s.platform==='YouTube'?'📺':s.platform==='TikTok'?'🎵':'🌐';var statusColor=s.verified?'#059669':'#dc2626';var statusText=s.verified?'已验证':'未验证';h+='<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:8px"><span style="font-size:18px">'+icon+'</span><div><div style="font-weight:600;font-size:13px">'+esc(s.platform)+'</div><a href="'+esc(s.url)+'" target="_blank" style="font-size:12px;color:#1677d2;word-break:break-all">'+esc(s.url)+'</a></div><span style="font-size:11px;color:'+statusColor+';font-weight:600">'+statusText+'</span></div>'});h+='</div>';return h};
-  window.openDetail=function(id){api('/admin/api/customers/'+id).then(function(c){state.selected=id;state.dirty={};$('modalTitle').textContent='客户详情 — '+esc(c.company_name||c.domain||'');var body=buildModal(c);body+=renderVerifiedSocial(c.social_accounts_verified);body+='<div class="section-title">👥 联系人列表</div>';body+='<div id="contactsArea"></div>';$('modalBody').innerHTML=body;var ca=document.getElementById('contactsArea');if(ca)ca.innerHTML=renderContacts(c.contacts);$('modalMsg').classList.add('hidden');$('modal').classList.add('active');document.body.style.overflow='hidden';
+  var renderEvidence=function(ev){if(!ev||!ev.length)return'';var h='<div class="section-title">🔍 证据链（AI 判断的来源依据）</div><div style="display:flex;flex-direction:column;gap:8px">';ev.forEach(function(e){var pct=e.confidence!=null?Math.round(e.confidence*100)+'%':'—';var cColor=e.confidence>=0.8?'#059669':e.confidence>=0.5?'#d97706':'#9ca3af';h+='<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px">'
+    +'<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px"><strong style="font-size:13px">'+esc(e.field_name)+'</strong><span style="font-size:11px;color:'+cColor+';font-weight:700">置信度 '+pct+'</span></div>'
+    +(e.field_value?'<div style="font-size:12px;color:#374151;margin-bottom:3px"><b>判定:</b> '+esc(e.field_value)+'</div>':'')
+    +(e.evidence_text?'<div style="font-size:12px;color:#6b7280;font-style:italic;margin-bottom:3px">“'+esc(e.evidence_text)+'”</div>':'')
+    +(e.source_url?'<a href="'+esc(e.source_url)+'" target="_blank" style="font-size:11px;color:#1677d2;word-break:break-all">'+esc(e.source_url.slice(0,90))+'</a>':'')
+    +'</div>'});h+='</div>';return h};
+  window.openDetail=function(id){api('/admin/api/customers/'+id).then(function(c){state.selected=id;state.dirty={};$('modalTitle').textContent='客户详情 — '+esc(c.company_name||c.domain||'');var body=buildModal(c);body+=renderEvidence(c.evidence);body+=renderVerifiedSocial(c.social_accounts_verified);body+='<div class="section-title">👥 联系人列表</div>';body+='<div id="contactsArea"></div>';$('modalBody').innerHTML=body;var ca=document.getElementById('contactsArea');if(ca)ca.innerHTML=renderContacts(c.contacts);$('modalMsg').classList.add('hidden');$('modal').classList.add('active');document.body.style.overflow='hidden';
       document.querySelectorAll('.edit-btn').forEach(function(btn){btn.onclick=function(){var key=btn.getAttribute('data-key');var row=btn.closest('.field-row');row.classList.add('editing');state.dirty[key]=true;var inp=document.getElementById('inp_'+key);if(inp&&inp.focus)inp.focus()}})}).catch(function(e){showMsg('listMessage',e.message,false)})};
   var closeModal=function(){$('modal').classList.remove('active');document.body.style.overflow='';state.selected=null;state.dirty={}};
   $('closeModal').onclick=closeModal;
