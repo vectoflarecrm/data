@@ -60,7 +60,7 @@ interface GoogleSearchResult {
   snippet: string;
 }
 
-interface CustomerAnalysis {
+export interface CustomerAnalysis {
   customer_segment: string;
   product_categories: string | null;
   company_size: string | null;
@@ -1780,6 +1780,7 @@ async function runRelevancePrecheck(
 export {
   parseRelevanceVerdict,
   isRelevancePrecheckEnabled,
+  computeLeadScore,
 };
 
 function isRetryableAiError(error: unknown): boolean {
@@ -1799,6 +1800,10 @@ function isRetryableAiError(error: unknown): boolean {
 // filter "only research/contact the best" without re-running AI. Deterministic
 // rules over already-verified facts — no extra AI cost.
 function computeLeadScore(a: CustomerAnalysis): number {
+  // Irrelevant companies are worthless by definition — the AI precheck marks
+  // them segment=不相关 with score 0, so the SQL-based histogram/filter can
+  // never surface one as a lead regardless of which fields were populated.
+  if (a.customer_segment.includes("不相关")) return 0;
   let score = 0;
   // Segment value: wholesale buyers outweigh end users.
   const seg = a.customer_segment.toLowerCase();
@@ -1835,9 +1840,13 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
     // timeout, provider 429, pool cooldown) happens AFTER research, so a
     // retry that re-crawls re-pays fetch time and — worse — Tavily/Brave
     // search credits (1 credit per query, 1k/month) for identical data.
+    // cleanedResearchCache dedupes the (only) clean pass shared by the
+    // reuse-check and the AI-input build further down.
+    let cleanedResearchCache: string | null = null;
+    const cleanedSavedResearch = () => cleanedResearchCache ??= cleanResearchContextForAi(savedResearch);
     const savedResearch = (customer.full_research_text ?? "").trim();
     const canReuseResearch =
-      savedResearch.length >= 500 && cleanResearchContextForAi(savedResearch).length > 200;
+      savedResearch.length >= 500 && cleanedSavedResearch().length > 200;
 
     // Step 1: Fetch main website and extract social media links
     let pageText = "";
@@ -1898,16 +1907,16 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
     let researchForAi = "";
     if (canReuseResearch) {
       // Facts are re-mined from the saved text (it contains the same blocks
-      // the fresh path would produce, incl. JSON-LD and [直接提取] lines).
+      // the fresh path would produce, incl. JSON-LD and [直接提取] lines);
+      // the cleaned body comes from the cache computed in the reuse check.
       const facts = extractContactEvidence(savedResearch);
       const waFacts = savedResearch.match(/wa\.me\/[0-9]+|api\.whatsapp\.com\/send\?phone=[0-9]+/gi) ?? [];
       const socialMatches = [...savedResearch.matchAll(/https:\/\/(?:www\.)?(linkedin|facebook|instagram|twitter|x|youtube|tiktok)\.com[^\s)\]"']*/gi)]
         .map((m) => m[0]);
       const factsBlock = buildFactsBlock(facts.emails, facts.phones, [...socialMatches, ...waFacts]);
-      const cleanedBody = cleanResearchContextForAi(savedResearch);
       researchForAi = factsBlock
-        ? `${factsBlock}\n\n${cleanedBody}`.slice(0, CLEAN_MAX_TOTAL_CHARS + 2_000)
-        : cleanedBody;
+        ? `${factsBlock}\n\n${cleanedSavedResearch()}`.slice(0, CLEAN_MAX_TOTAL_CHARS + 2_000)
+        : cleanedSavedResearch();
     } else {
       const socialInfo = verifiedSocial.length > 0
         ? `\n\n=== 已验证社交媒体 ===\n${verifiedSocial.map((s) => `${s.platform}: ${s.url} (${s.verified ? "已验证" : "未验证"})`).join("\n")}`

@@ -8,6 +8,8 @@ import { describe, it, expect } from "vitest";
 import {
   parseRelevanceVerdict,
   isRelevancePrecheckEnabled,
+  computeLeadScore,
+  type CustomerAnalysis,
 } from "../src/index";
 
 describe("parseRelevanceVerdict", () => {
@@ -51,5 +53,36 @@ describe("isRelevancePrecheckEnabled", () => {
 
   it("ignores unknown override values (fail-open)", () => {
     expect(isRelevancePrecheckEnabled({ AI: fakeAi, RELEVANCE_PRECHECK: "on" } as never)).toBe(true);
+  });
+});
+
+describe("computeLeadScore", () => {
+  const base = {
+    customer_segment: "Distributor",
+    product_categories: "Inflatable Boats",
+    company_size: "Medium",
+    geographic_coverage: "International",
+    personas_and_solutions: { personas: [], solutions: [] },
+    found_contacts: [{ email: "a@b.com" }],
+    company_profile: null,
+    outreach_context: null,
+    field_evidence: [],
+    buying_signals: [],
+    remarks: "",
+  } as unknown as CustomerAnalysis;
+
+  it("scores a strong distributor highly", () => {
+    expect(computeLeadScore(base)).toBeGreaterThanOrEqual(70);
+  });
+
+  it("forces score 0 for irrelevant companies regardless of other fields", () => {
+    // Guards against a populated profile/contacts rescuing an irrelevant row.
+    const irrelevant = { ...base, customer_segment: "不相关", product_categories: "Inflatable Boats", found_contacts: [{ email: "x@y.com" }] } as CustomerAnalysis;
+    expect(computeLeadScore(irrelevant)).toBe(0);
+  });
+
+  it("treats the '不相关' marker as a substring (defensive)", () => {
+    const variant = { ...base, customer_segment: "不相关（某无关行业）" } as CustomerAnalysis;
+    expect(computeLeadScore(variant)).toBe(0);
   });
 });
