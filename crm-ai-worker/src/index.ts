@@ -1243,6 +1243,41 @@ async function analyzeWithGemini(
                     business_type: { type: "STRING" },
                     product_category: { type: "STRING" },
                     target_market: { type: "STRING" },
+                    // Structured outreach columns + evidence chain: these MUST
+                    // be in the schema — responseSchema hard-constrains Gemini
+                    // output, so fields absent here can never be returned no
+                    // matter what the prompt asks for.
+                    company_profile: {
+                      type: "OBJECT",
+                      properties: {
+                        company_background: { type: "STRING" },
+                        main_products: { type: "ARRAY", items: { type: "STRING" } },
+                        target_customers: { type: "STRING" },
+                        selling_points: { type: "ARRAY", items: { type: "STRING" } },
+                      },
+                    },
+                    outreach_context: {
+                      type: "OBJECT",
+                      properties: {
+                        recommended_angle: { type: "STRING" },
+                        evidence_lines: { type: "ARRAY", items: { type: "STRING" } },
+                      },
+                    },
+                    field_evidence: {
+                      type: "ARRAY",
+                      items: {
+                        type: "OBJECT",
+                        properties: {
+                          field_name: { type: "STRING" },
+                          field_value: { type: "STRING" },
+                          source_url: { type: "STRING" },
+                          evidence_text: { type: "STRING" },
+                          confidence: { type: "NUMBER" },
+                        },
+                        required: ["field_name"],
+                      },
+                    },
+                    buying_signals: { type: "ARRAY", items: { type: "STRING" } },
                     remarks: { type: "STRING" },
                   },
                   required: ["customer_segment", "personas_and_solutions", "remarks"],
