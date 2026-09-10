@@ -12,6 +12,7 @@ interface CustomerRow {
   company_name: string | null;
   country: string | null;
   customer_segment: string | null;
+  full_research_text?: string | null;
   personas_and_solutions: string | null;
   remarks: string | null;
 }
@@ -294,14 +295,58 @@ async function firecrawlScrape(url: string, env: Env): Promise<string> {
   }
 }
 
+// JSON-LD (schema.org) blocks are machine-readable company data inserted by
+// the site itself — name, phone, address, sameAs socials. Parsing them here
+// yields high-confidence facts for free, and the JSON-LD section feeds the
+// facts block so the AI never re-derives these from prose.
+function formatJsonLdFacts(raw: string): string {
+  const out: string[] = [];
+  try {
+    const data: unknown = JSON.parse(raw);
+    const nodes = Array.isArray(data) ? data : [data];
+    const flat: any[] = nodes.flatMap((n: any) =>
+      n && typeof n === "object" && Array.isArray(n["@graph"]) ? n["@graph"] : [n],
+    );
+    for (const node of flat) {
+      if (!node || typeof node !== "object") continue;
+      const rawType = node["@type"];
+      const type = Array.isArray(rawType) ? rawType.join("/") : String(rawType ?? "");
+      if (!/organization|localbusiness|store|corporation|company/i.test(type)) continue;
+      if (typeof node.name === "string") out.push(`公司名(JSON-LD): ${node.name}`);
+      if (typeof node.telephone === "string") out.push(`电话(JSON-LD): ${node.telephone}`);
+      if (typeof node.email === "string") out.push(`邮箱(JSON-LD): ${node.email}`);
+      if (typeof node.description === "string") out.push(`简介(JSON-LD): ${node.description.slice(0, 400)}`);
+      if (typeof node.url === "string") out.push(`官网(JSON-LD): ${node.url}`);
+      const sameAs = node.sameAs;
+      if (typeof sameAs === "string" || Array.isArray(sameAs)) {
+        out.push(`官方社媒(JSON-LD): ${(Array.isArray(sameAs) ? sameAs : [sameAs]).join(", ")}`);
+      }
+      const addr = node.address;
+      if (addr && typeof addr === "object") {
+        const line = [addr.streetAddress, addr.addressLocality, addr.addressRegion, addr.postalCode, addr.addressCountry]
+          .filter((v: unknown) => typeof v === "string" && v)
+          .join(", ");
+        if (line) out.push(`地址(JSON-LD): ${line}`);
+      }
+    }
+  } catch { /* malformed ld+json is common; ignore */ }
+  return out.length ? `\n=== 结构化数据(JSON-LD，高可信) ===\n${out.join("\n")}` : "";
+}
+
 async function extractPageText(response: Response): Promise<string> {
   const parts: string[] = [];
+  let ldRaw = "";
   const addText = (text: string) => {
     const clean = text.replace(/\s+/g, " ").trim();
     if (clean) parts.push(clean);
   };
 
   const rewriter = new HTMLRewriter()
+    // JSON-LD carries structured company facts (phone/address/sameAs) that
+    // text-element handlers never see; captured separately and formatted.
+    .on('script[type="application/ld+json"]', {
+      text(text) { ldRaw += text.text; },
+    })
     .on("title", { text(text) { addText(text.text); } })
     .on("meta", {
       element(element) {
@@ -334,7 +379,11 @@ async function extractPageText(response: Response): Promise<string> {
     });
 
   await rewriter.transform(response).arrayBuffer();
-  return parts.join("\n").slice(0, 15_000);
+  const body = parts.join("\n");
+  const ldBlock = ldRaw ? formatJsonLdFacts(ldRaw) : "";
+  // JSON-LD facts go first: they survive every downstream budget trim and the
+  // cleaning stage keeps the "=== 结构化数据..." block header intact.
+  return (ldBlock ? `${ldBlock}\n${body}` : body).slice(0, 15_000);
 }
 
 interface SocialMediaLink {
@@ -700,12 +749,19 @@ async function searchCompanyInfo(companyName: string, country: string, env: Env,
     .filter((r) => !isOwnDomain(r.link, customerDomain))
     .sort((a, b) => Number(b.link.includes("linkedin.com")) - Number(a.link.includes("linkedin.com")));
   const pages: string[] = [];
+  const seenPageContent = new Set<string>();
   for (const result of prioritised.slice(0, MAX_SOURCE_PAGES)) {
     try {
       const resp = await fetchWithTimeout(result.link, FETCH_TIMEOUT_MS);
       if (resp.ok) {
         const text = await extractPageText(resp);
         if (text.length > 100) {
+          // Different queries often surface the same page (or mirrored
+          // directory entries). Skip content already collected so the same
+          // text never pays cleaning budget twice.
+          const contentKey = text.replace(/\s+/g, " ").slice(0, 300).toLowerCase();
+          if (seenPageContent.has(contentKey)) continue;
+          seenPageContent.add(contentKey);
           // Give LinkedIn pages more room (role/title lists are long)
           const budget = result.link.includes("linkedin.com") ? 6_000 : 4_000;
           const contact = extractContactEvidence(text);
@@ -734,7 +790,7 @@ async function searchCompanyInfo(companyName: string, country: string, env: Env,
   return `\n\n--- 搜索结果页面 (${allResults.length}条) ---\n${pages.join("\n")}`;
 }
 
-async function fetchAdditionalSources(companyName: string, domain: string, env: Env): Promise<string> {
+async function fetchAdditionalSources(companyName: string, domain: string, env: Env, existingText = ""): Promise<string> {
   const sources: string[] = [];
   const sourceLabels: string[] = [];
 
@@ -748,6 +804,12 @@ async function fetchAdditionalSources(companyName: string, domain: string, env: 
       if (resp.ok) {
         const text = await extractPageText(resp);
         if (text.length > 100) {
+          // Sub-pages frequently repeat the homepage intro verbatim; a
+          // duplicate page adds zero signal but costs cleaning budget.
+          const probe = text.replace(/\s+/g, " ").slice(0, 150).toLowerCase();
+          if (existingText && probe.length >= 50 && existingText.replace(/\s+/g, " ").toLowerCase().includes(probe)) {
+            continue;
+          }
           sources.push(`\n=== ${path} 页面内容 ===\n${text.slice(0, 3_000)}`);
           sourceLabels.push(path);
         }
@@ -1499,6 +1561,8 @@ async function claimCustomers(env: Env): Promise<CustomerRow[]> {
 
   // One UPDATE atomically claims the first three pending rows. This avoids the
   // SELECT-then-UPDATE race between overlapping Cron invocations.
+  // full_research_text rides along so retries reuse the already-crawled
+  // research instead of re-fetching pages and re-spending search quota.
   const result = await env.DB.prepare(`
     UPDATE customers
     SET status = 'processing', updated_at = CURRENT_TIMESTAMP
@@ -1508,7 +1572,7 @@ async function claimCustomers(env: Env): Promise<CustomerRow[]> {
       ORDER BY id
       LIMIT ?
     )
-    RETURNING id, company_id, display_id, domain, status, company_name, country, customer_segment, personas_and_solutions, remarks
+    RETURNING id, company_id, display_id, domain, status, company_name, country, customer_segment, personas_and_solutions, remarks, full_research_text
   `  ).bind(BATCH_SIZE).all<CustomerRow>();
   return result.results;
 }
@@ -1659,6 +1723,15 @@ function computeLeadScore(a: CustomerAnalysis): number {
 async function processCustomer(customer: CustomerRow, env: Env): Promise<D1PreparedStatement> {
   const retryCount = getRetryCount(customer.remarks);
   try {
+    // Research reuse: if a prior attempt already crawled and saved research,
+    // skip the paid steps below. Every failure the pipeline can hit (AI
+    // timeout, provider 429, pool cooldown) happens AFTER research, so a
+    // retry that re-crawls re-pays fetch time and — worse — Tavily/Brave
+    // search credits (1 credit per query, 1k/month) for identical data.
+    const savedResearch = (customer.full_research_text ?? "").trim();
+    const canReuseResearch =
+      savedResearch.length >= 500 && cleanResearchContextForAi(savedResearch).length > 200;
+
     // Step 1: Fetch main website and extract social media links
     let pageText = "";
     let socialLinks: string[] = [];
@@ -1697,46 +1770,70 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
       `UPDATE customers SET social_accounts_verified = ? WHERE id = ?`
     ).bind(verifiedSocialJson, customer.id).run();
 
-    // Step 2: Google search for company information
+    // Step 2: Google search for company information (skipped when reusing
+    // saved research — search API credits are the scarcest resource in the
+    // pipeline; retries must not re-spend them for identical data)
     const companyName = customer.company_name || customer.company_id;
     const country = customer.country || "";
-    const googleResults = await searchCompanyInfo(companyName, country, env, customer.id, customer.domain);
+    const googleResults = canReuseResearch
+      ? ""
+      : await searchCompanyInfo(companyName, country, env, customer.id, customer.domain);
 
-    // Step 3: Fetch additional sources (sub-pages, social media)
-    const additionalText = await fetchAdditionalSources(companyName, customer.domain, env);
+    // Step 3: Fetch additional sources (sub-pages, social media). The main
+    // page text is passed in so verbatim-duplicated sub-page content is
+    // skipped instead of duplicated into the context.
+    const additionalText = canReuseResearch
+      ? ""
+      : await fetchAdditionalSources(companyName, customer.domain, env, pageText);
 
-    // Step 4: Combine all research data
-    const socialInfo = verifiedSocial.length > 0
-      ? `\n\n=== 已验证社交媒体 ===\n${verifiedSocial.map((s) => `${s.platform}: ${s.url} (${s.verified ? "已验证" : "未验证"})`).join("\n")}`
-      : "";
-    const researchContext = pageText
-      ? `=== 主网站内容 ===\n${pageText}${socialInfo}${googleResults}${additionalText}`
-      : `=== 主网站无法访问 ===${socialInfo}${googleResults}${additionalText}`;
+    // Step 4: Build the AI input — reuse saved research when available,
+    // otherwise combine the freshly-gathered data.
+    let researchForAi = "";
+    if (canReuseResearch) {
+      // Facts are re-mined from the saved text (it contains the same blocks
+      // the fresh path would produce, incl. JSON-LD and [直接提取] lines).
+      const facts = extractContactEvidence(savedResearch);
+      const waFacts = savedResearch.match(/wa\.me\/[0-9]+|api\.whatsapp\.com\/send\?phone=[0-9]+/gi) ?? [];
+      const socialMatches = [...savedResearch.matchAll(/https:\/\/(?:www\.)?(linkedin|facebook|instagram|twitter|x|youtube|tiktok)\.com[^\s)\]"']*/gi)]
+        .map((m) => m[0]);
+      const factsBlock = buildFactsBlock(facts.emails, facts.phones, [...socialMatches, ...waFacts]);
+      const cleanedBody = cleanResearchContextForAi(savedResearch);
+      researchForAi = factsBlock
+        ? `${factsBlock}\n\n${cleanedBody}`.slice(0, CLEAN_MAX_TOTAL_CHARS + 2_000)
+        : cleanedBody;
+    } else {
+      const socialInfo = verifiedSocial.length > 0
+        ? `\n\n=== 已验证社交媒体 ===\n${verifiedSocial.map((s) => `${s.platform}: ${s.url} (${s.verified ? "已验证" : "未验证"})`).join("\n")}`
+        : "";
+      const researchContext = pageText
+        ? `=== 主网站内容 ===\n${pageText}${socialInfo}${googleResults}${additionalText}`
+        : `=== 主网站无法访问 ===${socialInfo}${googleResults}${additionalText}`;
 
-    if (researchContext.length < 50) {
-      throw new Error("无法从任何来源获取有效信息");
+      // Save full research text to database (raw context kept for audit and
+      // re-analysis/retry without re-crawling)
+      const trimmedResearch = researchContext.slice(0, 50_000);
+      await env.DB.prepare(
+        `UPDATE customers SET full_research_text = ? WHERE id = ?`
+      ).bind(trimmedResearch, customer.id).run();
+
+      // Clean the raw context BEFORE the AI call — dedupe repeated
+      // menus/boilerplate across sources and trim to a token budget so
+      // paid/free quotas are spent on signal, not navigation junk. Contact
+      // facts already mined by rules go in as a compact leading block
+      // (docx2 第五层), so the model never has to grep raw prose for
+      // emails/phones and the body budget can stay small.
+      const mainEmails = extractContactEvidence(pageText || "").emails;
+      const mainPhones = extractContactEvidence(pageText || "").phones;
+      const factsBlock = buildFactsBlock(mainEmails, mainPhones, socialLinks);
+      const cleanedBody = cleanResearchContextForAi(researchContext);
+      researchForAi = factsBlock
+        ? `${factsBlock}\n\n${cleanedBody}`.slice(0, CLEAN_MAX_TOTAL_CHARS + 2_000)
+        : cleanedBody;
     }
 
-    // Step 4: Save full research text to database (raw context kept for audit
-    // and re-analysis without re-crawling)
-    const trimmedResearch = researchContext.slice(0, 50_000);
-    await env.DB.prepare(
-      `UPDATE customers SET full_research_text = ? WHERE id = ?`
-    ).bind(trimmedResearch, customer.id).run();
-
-    // Step 4b: Clean the raw context BEFORE the AI call — dedupe repeated
-    // menus/boilerplate across sources and trim to a token budget so paid/free
-    // quotas are spent on signal, not navigation junk. Contact facts already
-    // mined by rules go in as a compact leading block (docx2 第五层), so the
-    // model never has to grep raw prose for emails/phones and the body budget
-    // can stay small.
-    const mainEmails = extractContactEvidence(pageText || "").emails;
-    const mainPhones = extractContactEvidence(pageText || "").phones;
-    const factsBlock = buildFactsBlock(mainEmails, mainPhones, socialLinks);
-    const cleanedBody = cleanResearchContextForAi(researchContext);
-    const researchForAi = factsBlock
-      ? `${factsBlock}\n\n${cleanedBody}`.slice(0, CLEAN_MAX_TOTAL_CHARS + 2_000)
-      : cleanedBody;
+    if (researchForAi.length < 200) {
+      throw new Error("无法从任何来源获取有效信息");
+    }
 
     // Step 5: AI deep analysis
     const analysis = await analyzeCustomer(customer, researchForAi, env);
