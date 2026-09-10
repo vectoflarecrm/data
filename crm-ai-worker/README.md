@@ -26,6 +26,159 @@ completed / failed
 3. **入库关联**：合并数据在 `remarks` 中带【合并数据公司ID: xxx】标记，可追溯。
 4. **开发信生成**（outreach 模块）：prompt 优先引用 `company_profile`/`outreach_context` 结构化档案，原始研究文本降级为 2000 字符的兜底参考——开发信引用的都是清洗后的高信号内容，不再需要现读原始网页。
 
+## 技术架构与流程详解（供方案评估）
+
+### 运行环境与硬约束
+
+```text
+运行时:      Cloudflare Workers 免费版（无 CPU 超时问题：全流程为 I/O 等待，
+             CPU 时间每请求仅数 ms，远低于免费档上限）
+调度:        Cron Trigger "*/5 * * * *"，每 tick 处理 BATCH_SIZE=3 个客户
+存储:        D1 (crm-ai-db)，SQLite 方言，免费档 500 万行读/10 万行写每天
+子请求上限:  免费版单次调用 50 个 fetch 子请求 —— 这是 BATCH_SIZE=3 的
+             决定性约束（每客户约 15-20 个子请求：6 搜索 + 5 结果页 +
+             子页面/社媒 + AI 调用），已达上限边缘
+ wall clock: 单客户约 3-4 分钟（研究 2-3 min + AI 0.5-1 min），3 个并行
+```
+
+### 管道各阶段（输入/输出/成本/失败模式）
+
+```text
+阶段 0  原子认领
+        一条 UPDATE ... RETURNING 认领 id 最小的 3 条 pending（无 SELECT-
+        then-UPDATE 竞态）；processing 超 30 分钟的任务自动回收为 pending。
+        失败模式：无（纯 SQL）。
+
+阶段 1  主站抓取（免费）
+        fetchWebsite（15s 超时、浏览器 UA）→ HTMLRewriter 流式抽取
+        title/meta/p/h1/h2/li + mailto:/tel: href + JSON-LD 结构化数据。
+        403/503 反爬 → Firecrawl 无头渲染降级（1 次）。
+        输出：pageText ≤15k 字符 + 社媒链接 + wa.me 链接。
+        失败模式：DNS/SSL/404 永久失败；403 走降级；其余跳过主站仅用搜索。
+
+阶段 2  社媒验证（免费）
+        extractLinks 抓到的社媒/wa.me 链接逐个 HEAD 校验（1s 间隔），
+        结果写 social_accounts_verified（JSON）。
+
+阶段 3  多引擎搜索（Tavily Credits / 免费）
+        6 条查询模板（联系方式×2、LinkedIn×3、业务×1），每条独立走
+        Tavily→Brave→Searlo→Exa→DuckDuckGo 链；结果去噪（维基/视频页）、
+        剔除自有域名、跨查询 URL 去重、内容前缀去重（不同查询命中同页只
+        抓一次）；取前 5 个结果页抓正文（LinkedIn 优先，6k 字符预算，其余
+        4k），并对其做规则级联系方式提取（[直接提取] 行）。
+        成本：Tavily advanced=2 Credits/查询（主消耗，Key 池 500 次/Key/月）；
+        重试行命中研究复用路径时整段跳过（0 Credits）。
+
+阶段 4  子页面抓取（免费）
+        /about /contact /team /products 等最多 3 页，与主站文本前缀去重
+        （首页介绍原文重复的子页直接跳过）；社交页最多 3 页。
+
+阶段 5  研究文本落库
+        全部来源拼装 ≤50k 字符存 full_research_text（审计 + 重试复用依据）。
+
+阶段 6  清洗与事实预提取（免费，零 token）
+        cleanResearchContextForAi：行级噪声模式剔除（导航/页脚/cookie）、
+        块内去重、跨块哈希去重、单块 4k/总量 22k 字符预算截断。
+        buildFactsBlock：正则提取邮箱/电话/社媒/wa.me + JSON-LD 公司名/
+        电话/邮箱/sameAs/地址，作为「规则预提取事实」块置顶 —— AI 不必在
+        正文里重复扫描联系方式。
+
+阶段 7  AI 结构化分析（token 主要消耗点）
+        输入：事实块 + 清洗后正文 ≤24k 字符（≈5-6k tokens）。
+        路径 A（主）：Gemini 原生 API，responseMimeType=application/json +
+        responseSchema 硬约束输出结构（profile/evidence/signals 均在
+        schema 内）；温度 0.1。
+        路径 B（备）：OpenAI 兼容 /chat/completions，json_object 模式
+        （AMD 后端不可靠，已对该平台禁用，用提示词约束 + 解析校验兜底）。
+        Provider 链：Gemini → Groq → Cerebras → Zhipu → NVIDIA → AMD →
+        Mistral → DeepSeek → OpenRouter；共享 60s AbortController，超时
+        如实上报（不伪装成「全部 Provider 不可用」）。
+        输出 JSON：segment/categories/size/coverage/personas/found_contacts/
+        company_profile/outreach_context/field_evidence/buying_signals/remarks。
+
+阶段 8  写回（一次 env.DB.batch()）
+        联系人指纹去重（姓名|邮箱|电话|wa 全小写拼接）→ contacts 表；
+        field_evidence 删旧插新 → evidence 表（字段级来源 URL + 原文引用
+        + 置信度 0-1）；lead_score（0-100 确定性公式）与画像列写入
+        customers；WHERE id=? AND status='processing' 防过期覆盖。
+```
+
+### lead_score 评分公式（确定性，无 AI 参与）
+
+```text
+客户细分命中目标行业   +30   产品类别命中        +25
+找到联系方式           +15   找到邮箱             +5
+有姓名联系人           +10   有采购信号           +10
+规模/地理覆盖完整      +5+5                       上限 100
+用途：面板直查 SQL 筛选高分客户，无需重跑 AI；
+面板柱状图（≥80 / 60-79 / 40-59 / <40 / 未评分）实时展示分布。
+```
+
+### 状态与用量可观测性
+
+```text
+customers.status:   pending → processing → completed / failed
+重试语义:           限流/超时 = 无限重试（环境性）；其余 ≤3 次
+                    （remarks 内 [retry:N] 标签）；403 反爬 = 人工复审
+api_key_usage:      provider × key_index × day 的成功计数（面板 📊 卡片）
+api_key_health:     被限 Key 的冷却截止时间与最近错误（面板 🧊 可一键清除）
+evidence 表:        每条核心判断的 source_url + evidence_text + confidence
+                    （详情弹窗「证据链」区展示，无需重爬即可核验）
+```
+
+### 面板端点一览
+
+```text
+/admin                 客户 CRUD + 评分分布卡 + CSV 导入 + 海选预过滤
+/admin/keys            动态 Key 池（D1，即时生效）/ 冷却监控 / 用量卡片
+/admin/secrets         经 Cloudflare API 直写 Worker Secrets（40 槽位）
+/admin/outreach        开发信生成与 Gmail 发送（结构化档案驱动，按国家语言）
+GET  /admin/api/customers?min_lead_score=   列表/筛选
+POST /admin/api/customers/import            CSV 原始层 → 去重入队
+GET  /admin/api/customers/pre-filter        SQL 海选（不花 AI token）
+GET  /admin/api/customers/lead-score-histogram  评分分布
+GET  /admin/api/customers/:id               详情（含 contacts + evidence）
+GET  /admin/api/keys/usage                  平台用量/容量汇总
+```
+
+### 关键设计决策与理由（评估替代方案时的对照基线）
+
+```text
+1. Cron 拉取而非消息队列   D1 单条 UPDATE 认领已消除并发重复，免排队
+   运维；代价是吞吐受 50 子请求/调用硬上限约束（BATCH_SIZE=3 封顶）。
+2. 研究文本落库 + 重试复用  管道中搜索 Credits 最稀缺（1k/月/Key），
+   所有可重试失败都发生在研究之后，重试只补 AI 调用 —— 回填 186 行
+   实测 0 Tavily 消耗。
+3. 规则优先、AI 兜底       邮箱/电话/JSON-LD/去重全部零 token 完成；
+   AI 只做语义判断，输入预算 30k→22k 字符后同额度池可服务约 2 倍请求。
+4. per-isolate 滑动窗口限流 无需 Durable Objects：Cron 单并发 + 免费档
+   低流量下足够；若未来多 Worker 并发写同一上游，需迁移到 DO 全局限流。
+5. D1 即 Key 池 + 冷却状态  面板改 Key 即时生效、免部署；env Secrets
+   兜底保证面板清空不停服。
+6. 结构化输出双路径        Gemini 用 responseSchema 硬约束；OpenAI 兼容
+   平台用 json_object + 提示词 + parseAnalysis 校验 —— 保证任何一家
+   顶上时输出结构一致。
+```
+
+## 现有瓶颈与替代方案评估（持续优化清单）
+
+按「收益/成本」排序，供评估更好的方案或工具时对照：
+
+| # | 现状与瓶颈 | 候选替代方案 | 收益 | 代价 |
+|---|---|---|---|---|
+| 1 | 吞吐受 50 子请求/调用限制，BATCH_SIZE=3 封顶 | **Cloudflare Queues**：每客户一条消息，消费者逐条处理，天然并行且无子请求聚合问题 | 吞吐与队列深度线性扩展，不再受单调用限制 | 付费计划（$5/月起，Queues 需 Workers Paid） |
+| 2 | per-isolate 限流窗口在多 Worker/多区域并发时会低估真实 RPM | **Durable Objects** 全局限流器（强一致单例） | 精准保护上游免费档，杜绝多节点叠加 429 | 增加一跳 DO 调用延迟；免费额度够用但代码复杂度上升 |
+| 3 | 同一域名重新研究时仍会重新抓主站（仅复用 full_research_text） | **KV 页面缓存**：URL→文本 24h TTL | 跨行去重（同集团多客户）、人工复审后重跑省抓取 | KV 读免费档 10 万次/天充裕；需失效策略 |
+| 4 | AI 每客户一次全量分析（约 5-6k input tokens） | **Workers AI 两级过滤**：先用 @cf/meta/llama（免费 Neurons）做「是否相关行业」粗分类，不相关直接跳过 Gemini | 不相关客户（实测约 30-40%）零付费 token | 需维护两级 prompt；粗分类错误会漏掉边缘客户 |
+| 5 | 文本清洗基于行模式与哈希去重，近似重复（同一新闻多站转载）仍会通过 | **Embedding 近似去重**（Workers AI bge-m3 + Vectorize） | 再省 10-20% 输入 token；可顺带做客户相似度聚类 | 首条需入库向量；增加一次 embedding 调用/来源块 |
+| 6 | 开发信个性化依赖单客户档案，无跨客户记忆 | **Vectorize RAG**：把 company_profile 向量化，写开发信时召回同细分/同区域客户案例做风格参考 | 开发信质量提升 | 存储/查询成本低，但收益偏质量而非省钱 |
+| 7 | Firecrawl 降级仅 1 次且配额有限（免费 500 次/月） | **Cloudflare Browser Rendering** 绑定（付费计划含免费额度）替代/并列 Firecrawl | 同账号内闭环，无第三方配额 | 需 Workers Paid；冷启动略高 |
+| 8 | 搜索依赖 SaaS（Tavily/Exa/Brave）月额度 | **SearXNG 自托管**（VPS）作最后兜底（现已用 DuckDuckGo HTML 兜底，稳定性一般） | 搜索无额度上限 | 需维护一台 VPS；自托管引擎有被封锁风险 |
+| 9 | 研究文本 50k 字符全量存 D1（行数多后表体积大） | **R2 归档**：>30 天的 full_research_text 移到 R2，D1 只留摘要 | D1 行读成本与体积下降 | 需归档 cron 与读取回源逻辑 |
+| 10 | 回退链固定顺序，未按「每 token 实际产出质量」动态排序 | 按 provider 记录 lead_score 达成率，动态调整链序 | 同 token 产出更高分客户 | 需要统计窗口与再平衡逻辑 |
+
+**结论基线**：当前架构在免费额度内的单位成本约为「每客户 1 次搜索消耗 + 5-6k AI input tokens」；上述 1/3/4/5 任一落地都可再降 30%+ 成本或翻倍吞吐。若项目升级为生产级批量（>5 万客户/月），优先做 #1（Queues）+ #4（两级过滤）组合。
+
 ## 配置
 
 先安装依赖：
@@ -162,7 +315,7 @@ npx wrangler secret put OPENROUTER_RPM
 默认模型为：
 
 ```text
-Gemini: gemini-2.5-flash-lite
+Gemini: gemini-3.5-flash-lite
 Groq: llama-3.1-70b-versatile
 Cerebras: llama-3.3-70b
 Zhipu: glm-4.7-flash
