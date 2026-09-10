@@ -78,7 +78,7 @@ interface CustomerAnalysis {
   remarks: string;
 }
 
-const BATCH_SIZE = 1;
+const BATCH_SIZE = 3;
 const FETCH_TIMEOUT_MS = 15_000;
 const AI_TIMEOUT_MS = 60_000;
 const MAX_SOURCE_PAGES = 5;
@@ -175,7 +175,6 @@ const FALLBACK_MODELS = ["gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-fl
 const STALE_PROCESSING_MINUTES = 30;
 const RETRYABLE_WEBSITE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const AI_RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
-const INTER_CUSTOMER_DELAY_MS = 5_000;
 const RATE_LIMIT_BASE_DELAY_MS = 30_000;
 const MAX_RETRIES = 3;
 const COMPANY_MARKER = (companyId: string) => `【合并数据公司ID: ${companyId}】`;
@@ -1718,14 +1717,18 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Claim-first design: rows are flipped to 'processing' before any slow work
+    // starts, so an overlapping cron tick can never double-claim the same
+    // customer — it just claims the next BATCH_SIZE rows and proceeds in
+    // parallel. WALL-CLOCK note: each customer costs ~4-6 min (searches + AI),
+    // so BATCH_SIZE=3 fits comfortably in the free-plan cron wall clock while
+    // tripling throughput versus one-per-tick.
     const customers = await claimCustomers(env);
     if (!customers.length) return;
-    // Process sequentially with delays to respect Gemini rate limits
-    const updates: D1PreparedStatement[] = [];
-    for (let i = 0; i < customers.length; i++) {
-      if (i > 0) await sleep(INTER_CUSTOMER_DELAY_MS);
-      updates.push(await processCustomer(customers[i], env));
-    }
+    // Process in parallel; per-customer pacing (INTER_SOURCE_DELAY_MS between
+    // searches) already respects upstream rate limits, and the RPM limiter
+    // guards each provider pool.
+    const updates = await Promise.all(customers.map((c) => processCustomer(c, env)));
     await env.DB.batch(updates);
     ctx.waitUntil(Promise.resolve());
   },
