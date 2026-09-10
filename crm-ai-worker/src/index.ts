@@ -536,13 +536,6 @@ async function searloSearch(query: string, env: Env): Promise<GoogleSearchResult
   return [];
 }
 
-function getBraveKeys(env: Env): string[] {
-  const keys: string[] = [];
-  if (env.BRAVE_API_KEY) keys.push(env.BRAVE_API_KEY);
-  if (env.BRAVE_API_KEY_2) keys.push(env.BRAVE_API_KEY_2);
-  return keys;
-}
-
 // Brave Search API (free tier ~2,000 queries/month, no credit card):
 // independent web index, good at surfacing official homepages and LinkedIn
 // pages for company-name queries.

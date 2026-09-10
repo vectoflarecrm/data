@@ -356,6 +356,8 @@ CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID  (面板引导凭据, 仅 Workers S
 | Exa | **$10 额度 / 月/账号**（注册另送 $20，约 2,800 次搜索） | 按 $ 计费：搜索约 $5/千次（`auto`），抓取正文按结果条数另计 | 滚动账单周期：按各账号注册日每 30 天重置（Dashboard → Usage & Billing 显示 *Resets on 日期*） |
 | Brave Search | 2,000 次 / 月/账号 | 网页搜索 1 次/请求 | 自然月 1 号 |
 
+> Brave Key 池容量与 Tavily/Exa 一致：40 个槽位（`BRAVE_API_KEY_2` … `_40`），面板批量导入或 Secrets 均可，运行时自动发现全部已配置的 Key。
+
 多账号（Key 池）额度线性叠加：例如 10 个 Tavily Key = 10,000 Credits/月；本项目 `advanced` 深度搜索为主，单个 Tavily Key 实际可用约 **500 次深度搜索/月**。Exa 按 $ 扣费且周期独立于自然月，适合作为 Tavily 额度耗尽后的接力层（面板冷却机制会在 429/额度耗尽时自动切换到下一个 Key/平台）。每次成功调用的用量计入 D1 `api_key_usage` 表（按天分 Key 统计），面板 📊 卡片实时汇总。
 
 邮件发送还需要 Google Workspace Gmail 配置：
