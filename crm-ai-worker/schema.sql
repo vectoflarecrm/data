@@ -216,6 +216,6 @@ CREATE INDEX IF NOT EXISTS idx_customer_imports_batch ON customer_imports(import
 
 -- Lead scoring (docx 建议/九): SQL-first targeting so only high-value customers
 -- consume crawl + AI budget. Recomputed after each successful analysis.
-ALTER TABLE customers ADD COLUMN lead_score INTEGER;
-ALTER TABLE customers ADD COLUMN buying_signals TEXT;
-ALTER TABLE customers ADD COLUMN source_import_id TEXT;
+-- Columns lead_score / buying_signals / source_import_id are added by the CI
+-- migration step (per-statement ALTER with duplicate-column tolerance), since
+-- D1 fails a whole schema file on any duplicate ALTER.
