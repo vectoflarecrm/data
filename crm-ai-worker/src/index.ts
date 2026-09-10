@@ -109,7 +109,12 @@ const FETCH_TIMEOUT_MS = 15_000;
 const AI_TIMEOUT_MS = 60_000;
 const MAX_SOURCE_PAGES = 5;
 const MAX_SEARCH_RESULTS = 5;
-const INTER_SOURCE_DELAY_MS = 2_000;
+// AI token pool has ample headroom (3+ Gemini keys x 30 RPM, guarded by the
+// RPM limiter), so research pacing is set by the search engines, not the AI:
+// 1s keeps Brave's free tier (1 req/sec) satisfied and stays polite to scraped
+// engines; a rare engine 429 just falls through to the next engine for free.
+// Halved from 2s: cuts ~17s of pure sleep per customer.
+const INTER_SOURCE_DELAY_MS = 1_000;
 // Realistic browser UA: many sites (and search engines) serve degraded pages
 // or blocks to bot-style UAs, which was silently degrading research quality.
 const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
@@ -1999,8 +2004,9 @@ export default {
     // Claim-first design: rows are flipped to 'processing' before any slow work
     // starts, so an overlapping cron tick can never double-claim the same
     // customer — it just claims the next BATCH_SIZE rows and proceeds in
-    // parallel. WALL-CLOCK note: each customer costs ~4-6 min (searches + AI),
-    // so BATCH_SIZE=3 fits comfortably in the free-plan cron wall clock while
+    // parallel. WALL-CLOCK note: with 1s inter-source pacing and research
+    // reuse on retries, each customer costs ~3-4 min (searches + AI), so
+    // BATCH_SIZE=3 fits comfortably in the free-plan cron wall clock while
     // tripling throughput versus one-per-tick.
     const customers = await claimCustomers(env);
     if (!customers.length) return;
