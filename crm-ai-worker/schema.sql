@@ -50,8 +50,20 @@ CREATE TABLE IF NOT EXISTS customers (
   geographic_coverage TEXT,
   personas_and_solutions TEXT CHECK (personas_and_solutions IS NULL OR json_valid(personas_and_solutions)),
   remarks TEXT,
+  -- Structured company profile distilled by AI from full_research_text:
+  -- background, main products, target customers, selling points. Kept separate
+  -- from the raw research text so cold-email generation reads a short,
+  -- high-signal JSON instead of re-parsing raw page dumps.
+  company_profile TEXT CHECK (company_profile IS NULL OR json_valid(company_profile)),
+  -- AI-recommended outreach angle + evidence lines, also JSON. Consumed by the
+  -- outreach prompt builder for second-pass personalization.
+  outreach_context TEXT CHECK (outreach_context IS NULL OR json_valid(outreach_context)),
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Idempotent migration for rows created before the profile columns existed.
+-- (D1 fails the whole file on a duplicate-column error, so these are applied
+-- by the CI migration step below instead of unconditional ALTERs.)
 
 CREATE INDEX IF NOT EXISTS idx_customers_status ON customers(status);
 CREATE INDEX IF NOT EXISTS idx_customers_company_id ON customers(company_id);

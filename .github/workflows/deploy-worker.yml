@@ -318,6 +318,20 @@ jobs:
             exit 1
           }
 
+      - name: Migrate customers profile columns
+        # ADD COLUMN is not idempotent in D1 files (a duplicate column fails
+        # the whole batch), so migrations run per-statement and ignore the
+        # "already exists" error — every later run becomes a no-op.
+        run: |
+          npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE customers ADD COLUMN company_profile TEXT" 2>&1 | grep -q 'duplicate column name' && echo 'company_profile already exists' || true
+          npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE customers ADD COLUMN outreach_context TEXT" 2>&1 | grep -q 'duplicate column name' && echo 'outreach_context already exists' || true
+          cols="$(npx wrangler d1 execute crm-ai-db --remote --json --command \"SELECT name FROM pragma_table_info('customers') WHERE name IN ('company_profile','outreach_context')\" | grep -c company_profile || true)"
+          cols2="$(npx wrangler d1 execute crm-ai-db --remote --json --command \"SELECT name FROM pragma_table_info('customers') WHERE name IN ('company_profile','outreach_context')\" | grep -c outreach_context || true)"
+          if [ "$cols" -lt 1 ] || [ "$cols2" -lt 1 ]; then
+            echo "Migration failed: company_profile/outreach_context columns missing"
+            exit 1
+          fi
+
       - name: Typecheck
         run: npm run typecheck
 

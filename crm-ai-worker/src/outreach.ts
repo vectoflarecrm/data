@@ -239,29 +239,71 @@ function getCountryLanguage(country: string | null): string {
 }
 
 /* ── Build AI prompt for outreach email generation ── */
+interface OutreachCompany {
+  company_name: string | null;
+  company_id: string;
+  display_id: string | null;
+  domain: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  title: string | null;
+  email: string | null;
+  products_services: string | null;
+  business_tag: string | null;
+  customer_segment: string | null;
+  country: string | null;
+  full_research_text: string | null;
+  description: string | null;
+  company_profile: string | null;
+  outreach_context: string | null;
+}
+
+interface CompanyProfile {
+  company_background?: string;
+  main_products?: string[];
+  target_customers?: string | null;
+  selling_points?: string[];
+}
+
+interface OutreachContext {
+  recommended_angle?: string;
+  evidence_lines?: string[];
+}
+
+function parseJsonColumn<T>(raw: string | null): T | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
 function buildOutreachPrompt(
   brand: BrandConfig,
-  company: {
-    company_name: string | null;
-    company_id: string;
-    display_id: string | null;
-    domain: string | null;
-    first_name: string | null;
-    last_name: string | null;
-    title: string | null;
-    email: string | null;
-    products_services: string | null;
-    business_tag: string | null;
-    customer_segment: string | null;
-    country: string | null;
-    full_research_text: string | null;
-    description: string | null;
-  }
+  company: OutreachCompany
 ): string {
   const contactName = [company.first_name, company.last_name].filter(Boolean).join(" ") || "Sir/Madam";
   const firstName = company.first_name || "there";
   const language = getCountryLanguage(company.country);
   const isEnglish = language.startsWith("English");
+  // Structured, AI-distilled profile beats raw page dumps: short, factual and
+  // written for exactly this purpose. Raw research text is demoted to a small
+  // fallback slice further down the prompt.
+  const profile = parseJsonColumn<CompanyProfile>(company.company_profile);
+  const outreach = parseJsonColumn<OutreachContext>(company.outreach_context);
+  const profileSection = profile && (profile.company_background || profile.main_products?.length)
+    ? `## 公司档案（AI提炼，供个性化引用）
+- 公司背景：${profile.company_background || "未知"}
+- 主营产品/服务：${profile.main_products?.length ? profile.main_products.join("、") : "未知"}
+- 下游客户群体：${profile.target_customers || "未知"}
+- 核心卖点/特色：${profile.selling_points?.length ? profile.selling_points.join("；") : "未知"}`
+    : "## 公司档案\n（尚无结构化档案，请仅依据下方原始研究资料，且不要编造细节）";
+  const outreachSection = outreach && (outreach.recommended_angle || outreach.evidence_lines?.length)
+    ? `## 推荐切入角度与可引用证据
+- 建议切入点：${outreach.recommended_angle || "（自行根据档案判断）"}
+- 可引用的具体事实（必须真实出现在该公司数据中）：\n${(outreach.evidence_lines ?? []).map((l) => `  * ${l}`).join("\n")}`
+    : "";
 
   return `你是一名专业的B2B营销专家，擅长撰写针对水上运动行业的个性化开发信。
 
@@ -286,7 +328,10 @@ ${brand.signature}` : ""}
 - 业务标签：${company.business_tag || "未知"}
 - 客户细分：${company.customer_segment || "未知"}
 - 公司描述：${company.description || "未知"}
-- 完整研究资料：${(company.full_research_text || "").slice(0, 3000)}
+${profileSection}
+${outreachSection}
+## 原始研究资料（仅在上述结构化信息不足时参考）
+${(company.full_research_text || "").slice(0, 2000)}
 
 ## 写作要求
 
@@ -350,7 +395,7 @@ export async function generateOutreachEmails(
   const customers = await env.DB.prepare(`
     SELECT id, company_id, display_id, company_name, domain, first_name, last_name,
            title, email, products_services, business_tag, customer_segment, country,
-           full_research_text, description
+           full_research_text, description, company_profile, outreach_context
     FROM customers
     WHERE status = 'completed'
       AND email IS NOT NULL AND email != ''
@@ -379,6 +424,8 @@ export async function generateOutreachEmails(
       country: string | null;
       full_research_text: string | null;
       description: string | null;
+      company_profile: string | null;
+      outreach_context: string | null;
     }>();
 
   const errors: string[] = [];

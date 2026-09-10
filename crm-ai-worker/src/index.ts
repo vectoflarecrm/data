@@ -75,6 +75,20 @@ interface CustomerAnalysis {
     linkedin_url?: string;
     source?: string;
   }>;
+  // Cold-email-ready profile distilled from the research text. Written to
+  // customers.company_profile so the outreach generator reads a short JSON
+  // instead of re-parsing raw page dumps.
+  company_profile: {
+    company_background: string;      // 2-4 sentences: business model, scale, audience
+    main_products: string[];         // concrete product lines the company sells/uses
+    target_customers: string | null; // their downstream customer group
+    selling_points: string[];        // certifications, craftsmanship, unique strengths
+  } | null;
+  // Suggested outreach angle + quotable evidence for second-pass personalization.
+  outreach_context: {
+    recommended_angle: string;       // how our products complement their business
+    evidence_lines: string[];        // quotable facts from their site/news/social
+  } | null;
   remarks: string;
 }
 
@@ -819,6 +833,19 @@ function parseAnalysis(content: string): CustomerAnalysis {
         // email, or a valid phone — otherwise drop it entirely.
         .filter((c) => c.first_name || c.last_name || c.email || c.cellphone || c.whatsapp)
     : [];
+  const cleanStrList = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? (value as unknown[])
+          .filter((v): v is string => typeof v === "string" && v.trim().length > 1)
+          .map((v) => v.trim())
+          .slice(0, 12)
+      : [];
+  const rawProfile = (typeof object.company_profile === "object" && object.company_profile !== null)
+    ? object.company_profile as Record<string, unknown>
+    : null;
+  const rawOutreach = (typeof object.outreach_context === "object" && object.outreach_context !== null)
+    ? object.outreach_context as Record<string, unknown>
+    : null;
   return {
     customer_segment: object.customer_segment.trim(),
     product_categories: typeof object.product_categories === "string" ? object.product_categories.trim() : null,
@@ -829,6 +856,18 @@ function parseAnalysis(content: string): CustomerAnalysis {
     target_market: typeof object.target_market === "string" ? object.target_market.trim() : null,
     personas_and_solutions: object.personas_and_solutions,
     found_contacts: foundContacts,
+    company_profile: rawProfile ? {
+      company_background:
+        typeof rawProfile.company_background === "string" ? rawProfile.company_background.trim().slice(0, 1200) : "",
+      main_products: cleanStrList(rawProfile.main_products),
+      target_customers: typeof rawProfile.target_customers === "string" ? rawProfile.target_customers.trim().slice(0, 300) : null,
+      selling_points: cleanStrList(rawProfile.selling_points),
+    } : null,
+    outreach_context: rawOutreach ? {
+      recommended_angle:
+        typeof rawOutreach.recommended_angle === "string" ? rawOutreach.recommended_angle.trim().slice(0, 600) : "",
+      evidence_lines: cleanStrList(rawOutreach.evidence_lines),
+    } : null,
     remarks: object.remarks.trim(),
   };
 }
@@ -957,6 +996,8 @@ ${researchContext || "（未获取到有效信息）"}
 6. 解决方案：针对每个角色，提供具体的解决方案建议
 7. 备注：总结公司的关键信息、潜在合作机会和风险点
 8. 信息来源标注：注明分析结论来自哪个信息来源
+9. 公司档案（company_profile）：从数据中提炼公司背景、主营产品线、下游客户群体、核心卖点，每一条都必须能在数据中找到依据
+10. 开发信切入（outreach_context）：给出向我们推介产品的最佳切入角度，并列出2-5条可直接在开发信中引用的具体事实（产品/活动/市场定位）
 
 ### 重要提醒
 - 严禁编造任何联系方式！如果找不到就留空
@@ -980,7 +1021,7 @@ async function openaiCompatibleAnalyze(
   // jsonMode=false omits it and relies on the prompt hint + parseAnalysis.
   jsonMode = true,
 ): Promise<CustomerAnalysis> {
-  const jsonFormatHint = `\n\n你必须返回一个合法的JSON对象，格式如下：\n{\n  "customer_segment": "客户细分（Distributor/Dealer/Manufacturer/User/OEM/Service Provider/E-commerce/不相关）",\n  "product_categories": "产品类别（Inflatable Boats/Paddle Boards/Kayaks/Yachts/Kitesurfing/Windsurfing/Accessories/Apparel）",\n  "company_size": "公司规模（Small/Medium/Large/Enterprise）",\n  "geographic_coverage": "地理覆盖（Local/National/International）",\n  "personas_and_solutions": {"personas": [{"name": "角色名", "role": "职位", "needs": ["需求1"], "pain_points": ["痛点1"]}], "solutions": [{"name": "方案名", "value": "方案描述", "target_persona": "目标角色"}]},\n  "found_contacts": [{"first_name": "名", "last_name": "姓", "title": "职位", "email": "真实邮箱", "cellphone": "真实手机号", "whatsapp": "仅当有wa.me链接时填写", "linkedin_url": "LinkedIn链接", "source": "信息来源URL"}],\n  "remarks": "备注"\n}\n\n重要：found_contacts中的所有联系方式必须是从提供的数据中真实找到的，严禁编造！`;
+  const jsonFormatHint = `\n\n你必须返回一个合法的JSON对象，格式如下：\n{\n  "customer_segment": "客户细分（Distributor/Dealer/Manufacturer/User/OEM/Service Provider/E-commerce/不相关）",\n  "product_categories": "产品类别（Inflatable Boats/Paddle Boards/Kayaks/Yachts/Kitesurfing/Windsurfing/Accessories/Apparel）",\n  "company_size": "公司规模（Small/Medium/Large/Enterprise）",\n  "geographic_coverage": "地理覆盖（Local/National/International）",\n  "personas_and_solutions": {"personas": [{"name": "角色名", "role": "职位", "needs": ["需求1"], "pain_points": ["痛点1"]}], "solutions": [{"name": "方案名", "value": "方案描述", "target_persona": "目标角色"}]},\n  "found_contacts": [{"first_name": "名", "last_name": "姓", "title": "职位", "email": "真实邮箱", "cellphone": "真实手机号", "whatsapp": "仅当有wa.me链接时填写", "linkedin_url": "LinkedIn链接", "source": "信息来源URL"}],\n  "company_profile": {\n    "company_background": "2-4句话概括公司业务模式、体量与客户群（基于证据，禁止编造）",\n    "main_products": ["该公司实际经营/使用的具体产品线1", "产品线2"],\n    "target_customers": "该公司的下游客户群体",\n    "selling_points": ["核心特色/工艺/认证1", "核心特色2"]\n  },\n  "outreach_context": {\n    "recommended_angle": "我们向该公司推介的最佳切入角度（如供应链替换/降低成本/定制配套/新品类补充）",\n    "evidence_lines": ["可用于开发信中引用的具体事实1（产品/活动/市场定位，须来自数据）", "事实2"]\n  },\n  "remarks": "备注"\n}\n\n重要：\n1. found_contacts中的所有联系方式必须是从提供的数据中真实找到的，严禁编造！\n2. company_profile与outreach_context同样只能基于提供的数据撰写；某子字段无据可依时留空数组或空字符串，严禁臆测。`;
 
   const response = await fetch(apiUrl, {
     method: "POST",
@@ -1614,6 +1655,10 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
     const analysis = await analyzeCustomer(customer, researchForAi, env);
     const personas = JSON.stringify(analysis.personas_and_solutions);
     const remarks = withCompanyMarker(analysis.remarks, customer.company_id);
+    // Cold-email-ready distillations: persisted as JSON columns so the outreach
+    // generator never has to re-parse raw research text.
+    const companyProfileJson = analysis.company_profile ? JSON.stringify(analysis.company_profile) : null;
+    const outreachContextJson = analysis.outreach_context ? JSON.stringify(analysis.outreach_context) : null;
 
     // Step 5: Save found contacts to contacts table
     if (analysis.found_contacts && analysis.found_contacts.length > 0) {
@@ -1671,9 +1716,9 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
 
     return env.DB.prepare(`
       UPDATE customers
-      SET status = 'completed', customer_segment = ?, product_categories = ?, company_size = ?, geographic_coverage = ?, personas_and_solutions = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
+      SET status = 'completed', customer_segment = ?, product_categories = ?, company_size = ?, geographic_coverage = ?, personas_and_solutions = ?, company_profile = ?, outreach_context = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND status = 'processing'
-    `).bind(analysis.customer_segment, analysis.product_categories, analysis.company_size, analysis.geographic_coverage, personas, remarks, customer.id);
+    `).bind(analysis.customer_segment, analysis.product_categories, analysis.company_size, analysis.geographic_coverage, personas, companyProfileJson, outreachContextJson, remarks, customer.id);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     // Rate-limit rejections (429 / full-pool cooldown) are infinite-retry:

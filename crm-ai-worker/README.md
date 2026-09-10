@@ -14,6 +14,18 @@ completed / failed
   ↓ D1 batch 一次性写回
 ```
 
+## 分层清洗与开发信上下文（结构化档案）
+
+管道遵循「机械清洗 → 语义提取 → 入库关联 → 开发信调用」四层设计：
+
+1. **规则预清洗**（`cleanResearchContextForAi`）：零 token 成本剔除导航/页脚/重复块；`full_research_text` 保留原始多源文本供审计。
+2. **语义提取**（AI Structured Output）：每条客户额外产出两份 JSON 列——
+   - `company_profile`：公司背景、主营产品线、下游客户群体、核心卖点；
+   - `outreach_context`：推荐切入角度 + 可引用的具体事实（开发信素材）。
+   全部要求基于证据，无据可依的字段留空，严禁臆测。
+3. **入库关联**：合并数据在 `remarks` 中带【合并数据公司ID: xxx】标记，可追溯。
+4. **开发信生成**（outreach 模块）：prompt 优先引用 `company_profile`/`outreach_context` 结构化档案，原始研究文本降级为 2000 字符的兜底参考——开发信引用的都是清洗后的高信号内容，不再需要现读原始网页。
+
 ## 配置
 
 先安装依赖：
