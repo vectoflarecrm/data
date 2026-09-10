@@ -179,3 +179,43 @@ CREATE TABLE IF NOT EXISTS gmail_send_log (
 
 CREATE INDEX IF NOT EXISTS idx_gmail_send_log_date ON gmail_send_log(date(sent_at));
 CREATE INDEX IF NOT EXISTS idx_gmail_send_log_email ON gmail_send_log(outreach_email_id);
+
+-- Field-level evidence trail (docx 建议七): every AI-judged fact keeps its
+-- source URL, quoted evidence text and confidence, so a wrong judgement can be
+-- traced and re-processed instead of silently overwriting the record.
+CREATE TABLE IF NOT EXISTS evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id TEXT NOT NULL,
+  contact_id TEXT,
+  field_name TEXT NOT NULL,
+  field_value TEXT,
+  source_url TEXT,
+  source_type TEXT,
+  evidence_text TEXT,
+  confidence REAL,
+  collected_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_evidence_company ON evidence(company_id, field_name);
+
+-- Raw import layer (docx 建议三): original uploaded rows are immutable; the
+-- normalized/enriched customer rows reference back to them. Re-importing the
+-- same file never destroys original data.
+CREATE TABLE IF NOT EXISTS customer_imports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  import_id TEXT NOT NULL,
+  file_name TEXT,
+  row_number INTEGER,
+  raw_json TEXT NOT NULL CHECK (raw_json IS NULL OR json_valid(raw_json)),
+  mapped_company_id TEXT,
+  dedup_status TEXT NOT NULL DEFAULT 'pending' CHECK (dedup_status IN ('pending','matched','inserted','skipped')),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_customer_imports_batch ON customer_imports(import_id);
+
+-- Lead scoring (docx 建议/九): SQL-first targeting so only high-value customers
+-- consume crawl + AI budget. Recomputed after each successful analysis.
+ALTER TABLE customers ADD COLUMN lead_score INTEGER;
+ALTER TABLE customers ADD COLUMN buying_signals TEXT;
+ALTER TABLE customers ADD COLUMN source_import_id TEXT;

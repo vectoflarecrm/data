@@ -166,7 +166,8 @@ const CUSTOMER_COLUMNS = `
   is_wholesaler, is_retailer, is_ecommerce, is_rental, is_oem, social_accounts,
   full_research_text, social_accounts_verified, customer_segment,
   product_categories, company_size, geographic_coverage,
-  personas_and_solutions, remarks, updated_at
+  personas_and_solutions, remarks, updated_at,
+  company_profile, outreach_context, buying_signals, lead_score, source_import_id
 `;
 const CUSTOMER_STATUSES = new Set(["pending", "processing", "completed", "failed"]);
 const COOKIE_NAME = "crm_admin_token";
@@ -348,6 +349,190 @@ async function listCustomers(request: Request, env: AdminEnv): Promise<Response>
     limit,
     offset,
   });
+}
+
+// ── Seed-data CSV import (docx ①/③: Data Import + Raw Layer) ─────────────
+// Expected CSV columns (header row, order-insensitive):
+//   company_name, country, domain|website, email, product
+// Every raw row is stored verbatim in customer_imports (Layer 1, immutable);
+// rows that match an existing company (domain or normalized name) are marked
+// 'matched' and skipped; new ones become pending customers (Layer 2).
+async function importCustomersCsv(request: Request, env: AdminEnv): Promise<Response> {
+  let body: { csv?: string; file_name?: string };
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ detail: "Invalid JSON body" }, 400);
+  }
+  const csvText = (body.csv ?? "").trim();
+  if (!csvText) return jsonResponse({ detail: "csv is required" }, 400);
+
+  // Minimal RFC4180-ish parser: handles quoted fields with embedded commas/newlines.
+  const parseCsv = (text: string): string[][] => {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let field = "";
+    let inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (inQuotes) {
+        if (ch === '"') {
+          if (text[i + 1] === '"') { field += '"'; i++; }
+          else inQuotes = false;
+        } else field += ch;
+      } else if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ',') {
+        row.push(field); field = "";
+      } else if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && text[i + 1] === '\n') i++;
+        row.push(field); field = "";
+        if (row.some((c) => c.trim())) rows.push(row);
+        row = [];
+      } else field += ch;
+    }
+    if (field || row.length) { row.push(field); if (row.some((c) => c.trim())) rows.push(row); }
+    return rows;
+  };
+
+  const table = parseCsv(csvText);
+  if (table.length < 2) return jsonResponse({ detail: "CSV needs a header row plus at least one data row" }, 400);
+  const header = table[0].map((h) => h.trim().toLowerCase());
+  const col = (...names: string[]) => header.findIndex((h) => names.includes(h));
+  const iName = col("company_name", "company", "name");
+  const iCountry = col("country");
+  const iDomain = col("domain", "website", "url");
+  const iEmail = col("email", "email_address");
+  const iProduct = col("product", "product_category", "products");
+  if (iName === -1) return jsonResponse({ detail: "CSV must contain a company_name column" }, 400);
+
+  const importId = `imp_${Date.now().toString(36)}`;
+  const normalizeDomain = (raw: string | undefined): string | null => {
+    if (!raw) return null;
+    try {
+      let v = raw.trim().toLowerCase();
+      if (!v) return null;
+      if (!/^https?:\/\//.test(v)) v = `https://${v}`;
+      const host = new URL(v).hostname.replace(/^www\./, "");
+      return host || null;
+    } catch { return null; }
+  };
+
+  let inserted = 0, matched = 0, skipped = 0;
+  const insertStmts: D1PreparedStatement[] = [];
+  for (let r = 1; r < table.length; r++) {
+    const cells = table[r];
+    const companyName = (cells[iName] ?? "").trim();
+    const domain = normalizeDomain(cells[iDomain]);
+    if (!companyName && !domain) { skipped++; continue; }
+    const rawJson = JSON.stringify({
+      company_name: companyName || null,
+      country: iCountry >= 0 ? (cells[iCountry] ?? "").trim() || null : null,
+      domain: domain,
+      email: iEmail >= 0 ? (cells[iEmail] ?? "").trim() || null : null,
+      product: iProduct >= 0 ? (cells[iProduct] ?? "").trim() || null : null,
+    });
+
+    // Dedup (docx Step 3): by domain first, then exact company_name.
+    let existingId: string | null = null;
+    if (domain) {
+      const hit = await env.DB.prepare(
+        `SELECT company_id FROM customers WHERE normalized_domain = ? OR domain LIKE ? LIMIT 1`,
+      ).bind(domain, `%${domain}%`).first<{ company_id: string }>();
+      if (hit) existingId = hit.company_id;
+    }
+    if (!existingId && companyName) {
+      const hit = await env.DB.prepare(
+        `SELECT company_id FROM customers WHERE LOWER(company_name) = LOWER(?) LIMIT 1`,
+      ).bind(companyName).first<{ company_id: string }>();
+      if (hit) existingId = hit.company_id;
+    }
+
+    if (existingId) {
+      matched++;
+      insertStmts.push(env.DB.prepare(
+        `INSERT INTO customer_imports (import_id, file_name, row_number, raw_json, mapped_company_id, dedup_status)
+         VALUES (?, ?, ?, ?, ?, 'matched')`,
+      ).bind(importId, body.file_name ?? null, r, rawJson, existingId));
+      continue;
+    }
+
+    // New company: map into the customers schema (docx 建议 4 — keep the
+    // imported name as company_name; website may reveal a trading_name later).
+    const companyId = crypto.randomUUID();
+    insertStmts.push(env.DB.prepare(
+      `INSERT INTO customers (company_id, domain, normalized_domain, company_name, country, email, products_services, status, source_import_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+    ).bind(
+      companyId,
+      domain ?? "",
+      domain,
+      companyName || domain || `import_row_${r}`,
+      iCountry >= 0 ? (cells[iCountry] ?? "").trim() || null : null,
+      iEmail >= 0 ? (cells[iEmail] ?? "").trim() || null : null,
+      iProduct >= 0 ? (cells[iProduct] ?? "").trim() || null : null,
+      importId,
+    ));
+    insertStmts.push(env.DB.prepare(
+      `INSERT INTO customer_imports (import_id, file_name, row_number, raw_json, mapped_company_id, dedup_status)
+       VALUES (?, ?, ?, ?, ?, 'inserted')`,
+    ).bind(importId, body.file_name ?? null, r, rawJson, companyId));
+    inserted++;
+  }
+
+  // D1 batches are capped; chunk to stay safely below the 100-statement limit.
+  for (let i = 0; i < insertStmts.length; i += 50) {
+    await env.DB.batch(insertStmts.slice(i, i + 50));
+  }
+  return jsonResponse({ import_id: importId, inserted, matched, skipped, total_rows: table.length - 1 });
+}
+
+// ── Pre-filter / 海选 (docx Step 2) ──────────────────────────────────────
+// SQL-only narrowing over existing verified fields. Counts what remains so the
+// user can decide before committing research budget. Also can reset matching
+// rows to pending (action=queue) so the cron pipeline re-processes them.
+async function preFilterCustomers(request: Request, env: AdminEnv): Promise<Response> {
+  const url = new URL(request.url);
+  const countries = (url.searchParams.get("countries") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const segments = (url.searchParams.get("segments") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const products = (url.searchParams.get("products") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const minScore = Number(url.searchParams.get("min_lead_score") ?? 0) || 0;
+  const hasEmail = url.searchParams.get("has_email") === "1";
+  const action = url.searchParams.get("action") ?? "count";
+
+  const where: string[] = ["status = 'completed'"];
+  const binds: Array<string | number> = [];
+  if (countries.length) {
+    where.push(`(${countries.map(() => "country LIKE ?").join(" OR ")})`);
+    countries.forEach((c) => binds.push(`%${c}%`));
+  }
+  if (segments.length) {
+    where.push(`(${segments.map(() => "customer_segment LIKE ?").join(" OR ")})`);
+    segments.forEach((s) => binds.push(`%${s}%`));
+  }
+  if (products.length) {
+    where.push(`(${products.map(() => "(product_categories LIKE ? OR products_services LIKE ?)").join(" OR ")})`);
+    products.forEach((p) => binds.push(`%${p}%`, `%${p}%`));
+  }
+  if (minScore > 0) { where.push("lead_score >= ?"); binds.push(minScore); }
+  if (hasEmail) where.push("email IS NOT NULL AND email != ''");
+  const clause = `WHERE ${where.join(" AND ")}`;
+
+  if (action === "queue") {
+    // Reset the filtered set for re-research (海选 → 再处理).
+    const result = await env.DB.prepare(
+      `UPDATE customers SET status = 'pending', updated_at = CURRENT_TIMESTAMP ${clause}`,
+    ).bind(...binds).run();
+    return jsonResponse({ action, queued: result.meta.changes ?? 0 });
+  }
+
+  const count = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM customers ${clause}`,
+  ).bind(...binds).first<{ n: number }>();
+  const sample = await env.DB.prepare(
+    `SELECT ${CUSTOMER_COLUMNS} FROM customers ${clause} ORDER BY lead_score DESC NULLS LAST, id LIMIT 20`,
+  ).bind(...binds).all<AdminCustomer>();
+  return jsonResponse({ matching: count?.n ?? 0, sample: sample.results });
 }
 
 async function updateCustomer(request: Request, env: AdminEnv, id: number): Promise<Response> {
@@ -1065,6 +1250,18 @@ async function handleAdminApi(request: Request, env: AdminEnv): Promise<Response
     if (url.pathname === "/admin/api/customers" && request.method === "GET") {
       return await listCustomers(request, env);
     }
+    // POST /admin/api/customers/import — seed-data CSV import (docx ① Data Import).
+    // Original rows land in customer_imports untouched; deduped new companies
+    // are inserted as pending customers so the cron pipeline enriches them.
+    if (url.pathname === "/admin/api/customers/import" && request.method === "POST") {
+      return await importCustomersCsv(request, env);
+    }
+    // GET /admin/api/customers/pre-filter — 海选: SQL-only targeting over
+    // verified fields so users can shrink 50k rows to a research-worthy set
+    // before spending any crawl/AI budget (docx 建议 Step 2 Pre-Filter).
+    if (url.pathname === "/admin/api/customers/pre-filter" && request.method === "GET") {
+      return await preFilterCustomers(request, env);
+    }
     const id = parseCustomerId(url.pathname);
     if (id !== null) {
       if (request.method === "GET") {
@@ -1188,7 +1385,9 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 .persona-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin-bottom:10px}.persona-card h4{margin:0 0 8px;font-size:14px;color:#1e293b}.persona-card ul{margin:0;padding-left:18px;font-size:13px;color:#475569}.solution-card{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px;margin-bottom:10px}.solution-card h4{margin:0 0 6px;font-size:14px;color:#1e40af}.solution-card p{margin:0;font-size:13px;color:#1e3a5f}.section-title{font-size:15px;font-weight:600;color:#123b68;margin:18px 0 10px;padding-bottom:6px;border-bottom:2px solid #123b68}
 @media(max-width:700px){.top{align-items:flex-start;flex-direction:column}table{display:block;overflow-x:auto;white-space:nowrap}.field-row{flex-direction:column}.field-label{width:100%;min-width:0;border-right:none;border-bottom:1px solid #e2e8f0}.modal-body{padding:16px}}
 </style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div style="display:flex;gap:12px;align-items:center"><a href="/admin/outreach" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">📧 开发信管理</a><a href="/admin/secrets" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">🔑 AI Key 管理</a><a href="/admin/keys" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
-<section class="panel"><h2>客户列表</h2><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
+<section class="panel"><h2>📥 客户数据导入（Seed CSV）</h2><p style="font-size:13px;color:#475569;margin:6px 0">粘贴 CSV（需表头，支持列：company_name, country, domain/website, email, product）。原始数据永久保存在 customer_imports（不可变原始层）；域名或公司名匹配的行自动去重跳过，新公司以 pending 状态进入研究队列。</p><div class="toolbar"><input id="importFileName" placeholder="文件名备注（可选）" style="max-width:220px"><button class="button" id="importBtn">导入并去重入队</button></div><textarea id="importCsv" rows="6" placeholder="company_name,country,website,email,product\nABC Sports,USA,,buyer@abcsports.com,SUP\nOcean Pro,Germany,oceanpro.de,,RIB"></textarea><div id="importMsg" class="notice hidden"></div></section>
+<section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p style="font-size:13px;color:#475569;margin:6px 0">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围，再点「重新入队」让管道二次研究高价值客户。</p><div class="toolbar"><input id="pfCountries" placeholder="国家（逗号分隔，如 Spain,France）" style="max-width:200px"><input id="pfSegments" placeholder="细分（如 Distributor,Dealer）" style="max-width:200px"><input id="pfProducts" placeholder="产品（如 SUP,Kayak）" style="max-width:160px"><input id="pfMinScore" type="number" min="0" max="100" placeholder="最低分" style="max-width:90px"><label style="font-size:13px"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button></div><div id="pfResult" class="notice hidden"></div></section>
+<section class="panel"><h2>客户列表</h2><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>评分</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
 </main>
 <div class="modal-overlay" id="modal"><div class="modal"><div class="modal-header"><h2 id="modalTitle">客户详情</h2><button class="button secondary small" id="closeModal">✕ 关闭</button></div><div class="modal-body" id="modalBody"></div><div class="modal-footer"><span id="modalMsg" class="notice hidden" style="margin-right:auto"></span><button class="button danger small" id="requeueBtn">设为 pending 重新处理</button><button class="button" id="submitBtn">提交修改</button></div></div></div>
 <script>
@@ -1199,7 +1398,14 @@ const ADMIN_PANEL_HTML = `<!doctype html>
   var api=function(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin';throw new Error('登录已过期')}var ct=r.headers.get('content-type')||'';if(ct.indexOf('json')===-1&&ct.indexOf('text/plain')===-1){return r.text().then(function(t){throw new Error('服务器返回非JSON响应 (HTTP '+r.status+'): '+t.slice(0,100))})}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败 ('+r.status+')');return d})})};
   var showMsg=function(id,t,g){var e=$(id);e.textContent=t;e.className='notice '+(g?'success':'error');e.classList.remove('hidden')};
   var badge=function(s){return'<span class="badge badge-'+esc(s)+'">'+esc(s)+'</span>'};
-  var load=function(){var p=new URLSearchParams({q:$('search').value,status:$('status').value,limit:String(state.limit),offset:String(state.offset)});api('/admin/api/customers?'+p.toString()).then(function(d){state.total=d.total;$('summary').textContent='共 '+d.total+' 条（显示公司名称、网址、状态、客户细分、国家、联系方式）';$('rows').innerHTML=d.items.map(function(c){var did=c.display_id||'N/A';return'<tr><td>'+esc(did)+'</td><td>'+esc(c.company_name||'-')+'</td><td><a href="'+esc(c.domain)+'" target="_blank">'+esc((c.domain||'').slice(0,35))+'</a></td><td>'+badge(c.status)+'</td><td>'+esc((c.customer_segment||'-').slice(0,35))+'</td><td>'+esc((c.country||'-'))+'</td><td>'+esc((c.email||c.cellphone||'-').slice(0,25))+'</td><td><button class="button" onclick="window.openDetail('+c.id+')">查看详情</button></td></tr>'}).join('')||'<tr><td colspan="8">暂无数据</td></tr>';$('pageInfo').textContent=(state.total?state.offset+1:0)+'-'+Math.min(state.offset+state.limit,state.total)+' / '+state.total;$('prev').disabled=state.offset===0;$('next').disabled=state.offset+state.limit>=state.total}).catch(function(e){showMsg('listMessage',e.message,false)})};
+  var load=function(){var p=new URLSearchParams({q:$('search').value,status:$('status').value,limit:String(state.limit),offset:String(state.offset)});api('/admin/api/customers?'+p.toString()).then(function(d){state.total=d.total;$('summary').textContent='共 '+d.total+' 条';$('rows').innerHTML=d.items.map(function(c){var did=c.display_id||'N/A';var score=c.lead_score;var scoreHtml=(score===null||score===undefined)?'—':(score>=70?'<span style="color:#16a34a;font-weight:700">'+score+'</span>':score>=40?'<span style="color:#d97706;font-weight:700">'+score+'</span>':'<span style="color:#9ca3af">'+score+'</span>');return'<tr><td>'+esc(did)+'</td><td>'+esc(c.company_name||'-')+'</td><td><a href="'+esc(c.domain)+'" target="_blank">'+esc((c.domain||'').slice(0,35))+'</a></td><td>'+badge(c.status)+'</td><td>'+scoreHtml+'</td><td>'+esc((c.customer_segment||'-').slice(0,35))+'</td><td>'+esc((c.country||'-'))+'</td><td>'+esc((c.email||c.cellphone||'-').slice(0,25))+'</td><td><button class="button" onclick="window.openDetail('+c.id+')">查看详情</button></td></tr>'}).join('')||'<tr><td colspan="9">暂无数据</td></tr>';$('pageInfo').textContent=(state.total?state.offset+1:0)+'-'+Math.min(state.offset+state.limit,state.total)+' / '+state.total;$('prev').disabled=state.offset===0;$('next').disabled=state.offset+state.limit>=state.total}).catch(function(e){showMsg('listMessage',e.message,false)})};
+  // Seed CSV import (docx ① Data Import)
+  var doImport=function(){var csv=$('importCsv').value;if(!csv.trim()){showMsg('importMsg','请先粘贴 CSV 内容',false);return}$('importBtn').disabled=true;$('importBtn').textContent='导入中…';api('/admin/api/customers/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({csv:csv,file_name:$('importFileName').value||null})}).then(function(d){showMsg('importMsg','✅ 导入完成：新增 '+d.inserted+' 家（进入研究队列），匹配已有 '+d.matched+' 家（跳过），无效行 '+d.skipped+'。导入批次：'+d.import_id,true);$('importCsv').value='';load()}).catch(function(e){showMsg('importMsg',e.message,false)}).finally(function(){$('importBtn').disabled=false;$('importBtn').textContent='导入并去重入队'})};
+  $('importBtn').onclick=doImport;
+  // Pre-filter 海选 (docx Step 2)
+  var pfParams=function(){var p=new URLSearchParams();var c=$('pfCountries').value.trim();var s=$('pfSegments').value.trim();var pr=$('pfProducts').value.trim();var m=$('pfMinScore').value;if(c)p.set('countries',c);if(s)p.set('segments',s);if(pr)p.set('products',pr);if(m&&Number(m)>0)p.set('min_lead_score',m);if($('pfHasEmail').checked)p.set('has_email','1');return p};
+  $('pfCount').onclick=function(){var p=pfParams();p.set('action','count');$('pfCount').disabled=true;api('/admin/api/customers/pre-filter?'+p.toString()).then(function(d){var s=d.sample||[];var lines=s.slice(0,5).map(function(c){return esc((c.company_name||c.display_id||c.id)+'（'+(c.lead_score??'—')+'分）')}).join('、');$('pfResult').classList.remove('hidden');$('pfResult').innerHTML='🎯 匹配 <b>'+d.matching+'</b> 家'+(lines?'。高分示例：'+lines:'');$('pfResult').style.color='#123b68'}).catch(function(e){$('pfResult').classList.remove('hidden');$('pfResult').textContent='❌ '+e.message;$('pfResult').style.color='#b91c1c'}).finally(function(){$('pfCount').disabled=false})};
+  $('pfQueue').onclick=function(){if(!confirm('确定将所有匹配的已完成客户重置为 pending 重新研究？'))return;var p=pfParams();p.set('action','queue');$('pfQueue').disabled=true;api('/admin/api/customers/pre-filter?'+p.toString()).then(function(d){$('pfResult').classList.remove('hidden');$('pfResult').innerHTML='✅ 已重新入队 <b>'+d.queued+'</b> 家，等待 cron 逐批处理';$('pfResult').style.color='#123b68';load()}).catch(function(e){$('pfResult').classList.remove('hidden');$('pfResult').textContent='❌ '+e.message;$('pfResult').style.color='#b91c1c'}).finally(function(){$('pfQueue').disabled=false})};
   var fields=[
     {key:'id',label:'数据库 ID',readonly:true},
     {key:'display_id',label:'客户 ID',readonly:true},

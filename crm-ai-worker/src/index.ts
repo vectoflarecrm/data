@@ -89,6 +89,17 @@ interface CustomerAnalysis {
     recommended_angle: string;       // how our products complement their business
     evidence_lines: string[];        // quotable facts from their site/news/social
   } | null;
+  // Per-fact confidence + source trail (docx 建议七). Written to the evidence
+  // table so a wrong judgement can be traced to its source and re-verified.
+  field_evidence: Array<{
+    field_name: string;
+    field_value: string;
+    source_url?: string;
+    evidence_text?: string;
+    confidence?: number;
+  }>;
+  // Buying signals: recent expansion, new product category, hiring, events...
+  buying_signals: string[];
   remarks: string;
 }
 
@@ -868,6 +879,19 @@ function parseAnalysis(content: string): CustomerAnalysis {
         typeof rawOutreach.recommended_angle === "string" ? rawOutreach.recommended_angle.trim().slice(0, 600) : "",
       evidence_lines: cleanStrList(rawOutreach.evidence_lines),
     } : null,
+    field_evidence: Array.isArray(object.field_evidence)
+      ? (object.field_evidence as Array<Record<string, unknown>>)
+          .filter((e) => e && typeof e === "object" && typeof e.field_name === "string" && e.field_name.trim())
+          .map((e) => ({
+            field_name: (e.field_name as string).trim().slice(0, 80),
+            field_value: typeof e.field_value === "string" ? e.field_value.trim().slice(0, 300) : "",
+            source_url: cleanUrl(e.source_url),
+            evidence_text: typeof e.evidence_text === "string" ? e.evidence_text.trim().slice(0, 500) : undefined,
+            confidence: typeof e.confidence === "number" && e.confidence >= 0 && e.confidence <= 1 ? e.confidence : undefined,
+          }))
+          .slice(0, 30)
+      : [],
+    buying_signals: cleanStrList(object.buying_signals),
     remarks: object.remarks.trim(),
   };
 }
@@ -1021,7 +1045,7 @@ async function openaiCompatibleAnalyze(
   // jsonMode=false omits it and relies on the prompt hint + parseAnalysis.
   jsonMode = true,
 ): Promise<CustomerAnalysis> {
-  const jsonFormatHint = `\n\n你必须返回一个合法的JSON对象，格式如下：\n{\n  "customer_segment": "客户细分（Distributor/Dealer/Manufacturer/User/OEM/Service Provider/E-commerce/不相关）",\n  "product_categories": "产品类别（Inflatable Boats/Paddle Boards/Kayaks/Yachts/Kitesurfing/Windsurfing/Accessories/Apparel）",\n  "company_size": "公司规模（Small/Medium/Large/Enterprise）",\n  "geographic_coverage": "地理覆盖（Local/National/International）",\n  "personas_and_solutions": {"personas": [{"name": "角色名", "role": "职位", "needs": ["需求1"], "pain_points": ["痛点1"]}], "solutions": [{"name": "方案名", "value": "方案描述", "target_persona": "目标角色"}]},\n  "found_contacts": [{"first_name": "名", "last_name": "姓", "title": "职位", "email": "真实邮箱", "cellphone": "真实手机号", "whatsapp": "仅当有wa.me链接时填写", "linkedin_url": "LinkedIn链接", "source": "信息来源URL"}],\n  "company_profile": {\n    "company_background": "2-4句话概括公司业务模式、体量与客户群（基于证据，禁止编造）",\n    "main_products": ["该公司实际经营/使用的具体产品线1", "产品线2"],\n    "target_customers": "该公司的下游客户群体",\n    "selling_points": ["核心特色/工艺/认证1", "核心特色2"]\n  },\n  "outreach_context": {\n    "recommended_angle": "我们向该公司推介的最佳切入角度（如供应链替换/降低成本/定制配套/新品类补充）",\n    "evidence_lines": ["可用于开发信中引用的具体事实1（产品/活动/市场定位，须来自数据）", "事实2"]\n  },\n  "remarks": "备注"\n}\n\n重要：\n1. found_contacts中的所有联系方式必须是从提供的数据中真实找到的，严禁编造！\n2. company_profile与outreach_context同样只能基于提供的数据撰写；某子字段无据可依时留空数组或空字符串，严禁臆测。`;
+  const jsonFormatHint = `\n\n你必须返回一个合法的JSON对象，格式如下：\n{\n  "customer_segment": "客户细分（Distributor/Dealer/Manufacturer/User/OEM/Service Provider/E-commerce/不相关）",\n  "product_categories": "产品类别（Inflatable Boats/Paddle Boards/Kayaks/Yachts/Kitesurfing/Windsurfing/Accessories/Apparel）",\n  "company_size": "公司规模（Small/Medium/Large/Enterprise）",\n  "geographic_coverage": "地理覆盖（Local/National/International）",\n  "personas_and_solutions": {"personas": [{"name": "角色名", "role": "职位", "needs": ["需求1"], "pain_points": ["痛点1"]}], "solutions": [{"name": "方案名", "value": "方案描述", "target_persona": "目标角色"}]},\n  "found_contacts": [{"first_name": "名", "last_name": "姓", "title": "职位", "email": "真实邮箱", "cellphone": "真实手机号", "whatsapp": "仅当有wa.me链接时填写", "linkedin_url": "LinkedIn链接", "source": "信息来源URL"}],\n  "company_profile": {\n    "company_background": "2-4句话概括公司业务模式、体量与客户群（基于证据，禁止编造）",\n    "main_products": ["该公司实际经营/使用的具体产品线1", "产品线2"],\n    "target_customers": "该公司的下游客户群体",\n    "selling_points": ["核心特色/工艺/认证1", "核心特色2"]\n  },\n  "outreach_context": {\n    "recommended_angle": "我们向该公司推介的最佳切入角度（如供应链替换/降低成本/定制配套/新品类补充）",\n    "evidence_lines": ["可用于开发信中引用的具体事实1（产品/活动/市场定位，须来自数据）", "事实2"]\n  },\n  "field_evidence": [\n    {"field_name": "customer_segment", "field_value": "Distributor", "source_url": "来源URL", "evidence_text": "原文引用短句", "confidence": 0.9}\n  ],\n  "buying_signals": ["近期扩张/新品类/招聘/参加展会等采购信号（须有数据依据）"],\n  "remarks": "备注"\n}\n\n重要：\n1. found_contacts中的所有联系方式必须是从提供的数据中真实找到的，严禁编造！\n2. company_profile与outreach_context同样只能基于提供的数据撰写；某子字段无据可依时留空数组或空字符串，严禁臆测。\n3. field_evidence：为核心判断（customer_segment/product_categories/company_size/geographic_coverage/主要联系人）逐条给出来源URL、原文引用与置信度（0-1），没有来源的判断不要写入。\n4. buying_signals：只列数据中真实出现的采购信号；没有就返回空数组。`;
 
   const response = await fetch(apiUrl, {
     method: "POST",
@@ -1578,6 +1602,38 @@ function isRetryableAiError(error: unknown): boolean {
   return false;
 }
 
+// Lead score (docx 建议二/九): SQL-targetable 0-100 score so the panel can
+// filter "only research/contact the best" without re-running AI. Deterministic
+// rules over already-verified facts — no extra AI cost.
+function computeLeadScore(a: CustomerAnalysis): number {
+  let score = 0;
+  // Segment value: wholesale buyers outweigh end users.
+  const seg = a.customer_segment.toLowerCase();
+  if (seg.includes("distributor")) score += 30;
+  else if (seg.includes("dealer")) score += 25;
+  else if (seg.includes("oem")) score += 25;
+  else if (seg.includes("wholesaler")) score += 25;
+  else if (seg.includes("e-commerce")) score += 15;
+  else if (seg.includes("retailer")) score += 10;
+  else if (seg.includes("user") || seg.includes("service")) score += 5;
+  // Product relevance: matches our catalogue.
+  const cats = (a.product_categories ?? "").toLowerCase();
+  if (cats && !cats.includes("信息不足")) score += 20;
+  // Reachability: an email is the strongest outreach channel.
+  const hasEmail = a.found_contacts.some((c) => c.email);
+  if (hasEmail) score += 20;
+  else if (a.found_contacts.length > 0) score += 10;
+  // Decision-maker quality: named contacts beat generic inboxes.
+  const named = a.found_contacts.filter((c) => c.first_name || c.last_name).length;
+  if (named > 0) score += 10;
+  // Signals of active buying intent.
+  if (a.buying_signals.length > 0) score += 10;
+  // Data completeness proxy: verified coverage/size fields.
+  if (a.company_size && !a.company_size.includes("信息不足")) score += 5;
+  if (a.geographic_coverage && !a.geographic_coverage.includes("信息不足")) score += 5;
+  return Math.min(100, score);
+}
+
 async function processCustomer(customer: CustomerRow, env: Env): Promise<D1PreparedStatement> {
   const retryCount = getRetryCount(customer.remarks);
   try {
@@ -1659,6 +1715,8 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
     // generator never has to re-parse raw research text.
     const companyProfileJson = analysis.company_profile ? JSON.stringify(analysis.company_profile) : null;
     const outreachContextJson = analysis.outreach_context ? JSON.stringify(analysis.outreach_context) : null;
+    const buyingSignalsJson = analysis.buying_signals.length ? JSON.stringify(analysis.buying_signals) : null;
+    const leadScore = computeLeadScore(analysis);
 
     // Step 5: Save found contacts to contacts table
     if (analysis.found_contacts && analysis.found_contacts.length > 0) {
@@ -1714,11 +1772,24 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
       }
     }
 
+    // Field-level evidence trail: replaces prior rows for this company so a
+    // re-analysis always reflects the latest verification pass.
+    if (analysis.field_evidence.length > 0) {
+      await env.DB.prepare(`DELETE FROM evidence WHERE company_id = ?`).bind(customer.company_id).run();
+      const evidenceStmts = analysis.field_evidence.map((e) =>
+        env.DB.prepare(
+          `INSERT INTO evidence (company_id, field_name, field_value, source_url, source_type, evidence_text, confidence)
+           VALUES (?, ?, ?, ?, 'ai_analysis', ?, ?)`
+        ).bind(customer.company_id, e.field_name, e.field_value, e.source_url ?? null, e.evidence_text ?? null, e.confidence ?? null)
+      );
+      await env.DB.batch(evidenceStmts);
+    }
+
     return env.DB.prepare(`
       UPDATE customers
-      SET status = 'completed', customer_segment = ?, product_categories = ?, company_size = ?, geographic_coverage = ?, personas_and_solutions = ?, company_profile = ?, outreach_context = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
+      SET status = 'completed', customer_segment = ?, product_categories = ?, company_size = ?, geographic_coverage = ?, personas_and_solutions = ?, company_profile = ?, outreach_context = ?, buying_signals = ?, lead_score = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND status = 'processing'
-    `).bind(analysis.customer_segment, analysis.product_categories, analysis.company_size, analysis.geographic_coverage, personas, companyProfileJson, outreachContextJson, remarks, customer.id);
+    `).bind(analysis.customer_segment, analysis.product_categories, analysis.company_size, analysis.geographic_coverage, personas, companyProfileJson, outreachContextJson, buyingSignalsJson, leadScore, remarks, customer.id);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     // Rate-limit rejections (429 / full-pool cooldown) are infinite-retry:

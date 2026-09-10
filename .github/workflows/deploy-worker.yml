@@ -323,10 +323,12 @@ jobs:
         # the whole batch), so migrations run per-statement and ignore the
         # "already exists" error — every later run becomes a no-op.
         run: |
-          npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE customers ADD COLUMN company_profile TEXT" 2>&1 | grep -q 'duplicate column name' && echo 'company_profile already exists' || true
-          npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE customers ADD COLUMN outreach_context TEXT" 2>&1 | grep -q 'duplicate column name' && echo 'outreach_context already exists' || true
-          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('customers') WHERE name LIKE '%_context' OR name LIKE '%profile'")"
-          echo "$info" | grep -q '"n": 2' || { echo 'Migration failed: profile columns missing'; exit 1; }
+          for col in company_profile TEXT outreach_context TEXT lead_score INTEGER buying_signals TEXT source_import_id TEXT; do
+            set -- $col
+            npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE customers ADD COLUMN $1 $2" 2>&1 | grep -q 'duplicate column name' && echo "$1 already exists" || true
+          done
+          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('customers') WHERE name IN ('company_profile','outreach_context','lead_score','buying_signals','source_import_id')")"
+          echo "$info" | grep -q '"n": 5' || { echo 'Migration failed: enrichment columns missing'; exit 1; }
 
       - name: Typecheck
         run: npm run typecheck
