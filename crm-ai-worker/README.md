@@ -169,7 +169,7 @@ GET  /admin/api/keys/usage                  平台用量/容量汇总
 | 1 | 吞吐受 50 子请求/调用限制，BATCH_SIZE=3 封顶 | **Cloudflare Queues**：每客户一条消息，消费者逐条处理，天然并行且无子请求聚合问题 | 吞吐与队列深度线性扩展，不再受单调用限制 | 付费计划（$5/月起，Queues 需 Workers Paid） |
 | 2 | per-isolate 限流窗口在多 Worker/多区域并发时会低估真实 RPM | **Durable Objects** 全局限流器（强一致单例） | 精准保护上游免费档，杜绝多节点叠加 429 | 增加一跳 DO 调用延迟；免费额度够用但代码复杂度上升 |
 | 3 | 同一域名重新研究时仍会重新抓主站（仅复用 full_research_text） | **KV 页面缓存**：URL→文本 24h TTL | 跨行去重（同集团多客户）、人工复审后重跑省抓取 | KV 读免费档 10 万次/天充裕；需失效策略 |
-| 4 | AI 每客户一次全量分析（约 5-6k input tokens） | **Workers AI 两级过滤**：先用 @cf/meta/llama（免费 Neurons）做「是否相关行业」粗分类，不相关直接跳过 Gemini | 不相关客户（实测约 30-40%）零付费 token | 需维护两级 prompt；粗分类错误会漏掉边缘客户 |
+| 4 | ~~AI 每客户一次全量分析~~ **已实现**：`runRelevancePrecheck`（`@cf/meta/llama-3.1-8b-instruct-fast`，免费 Neurons）在 Gemini 分析前判定相关性，不相关客户直接置 `segment=不相关`（0 付费 token）；解析失败/绑定缺失自动放行（fail-open），`RELEVANCE_PRECHECK=off` 可关闭 | 已落地；后续可迭代：不相关行积累后回看预检准确率，必要时改为「低置信送全量分析」 | 不相关客户（约 30-40%）零付费 token | 预检误杀会漏掉边缘客户（保守提示词缓解） |
 | 5 | 文本清洗基于行模式与哈希去重，近似重复（同一新闻多站转载）仍会通过 | **Embedding 近似去重**（Workers AI bge-m3 + Vectorize） | 再省 10-20% 输入 token；可顺带做客户相似度聚类 | 首条需入库向量；增加一次 embedding 调用/来源块 |
 | 6 | 开发信个性化依赖单客户档案，无跨客户记忆 | **Vectorize RAG**：把 company_profile 向量化，写开发信时召回同细分/同区域客户案例做风格参考 | 开发信质量提升 | 存储/查询成本低，但收益偏质量而非省钱 |
 | 7 | Firecrawl 降级仅 1 次且配额有限（免费 500 次/月） | **Cloudflare Browser Rendering** 绑定（付费计划含免费额度）替代/并列 Firecrawl | 同账号内闭环，无第三方配额 | 需 Workers Paid；冷启动略高 |

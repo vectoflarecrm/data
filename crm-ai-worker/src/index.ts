@@ -19,6 +19,9 @@ interface CustomerRow {
 
 interface Env {
   DB: D1Database;
+  AI?: Ai;                       // Workers AI (relevance precheck); optional so
+                                 // tests / older wrangler.toml keep working
+  RELEVANCE_PRECHECK?: string;   // "off" disables the precheck gate
   GEMINI_API_KEY: string;
   GEMINI_MODEL?: string;
   GROQ_MODEL?: string;
@@ -1715,6 +1718,70 @@ function buildFactsBlock(emails: string[], phones: string[], socialLinks: string
   return lines.length > 1 ? lines.join("\n") : "";
 }
 
+// ── Two-stage relevance filter (alternatives table #4) ──
+// The full Gemini analysis costs ~5-6k input tokens; a meaningful share of
+// crawled companies (typically 30-40% in this vertical) are clearly irrelevant
+// (local plumber, restaurant, unrelated industry). A tiny Workers AI model on
+// the free Neuron allowance decides "worth analyzing?" for 0 paid tokens; only
+// plausible companies continue to the expensive structured analysis.
+// Conservative by design: parse errors, model absence or any failure fall
+// through to the full analysis — the gate can only skip, never block.
+const RELEVANCE_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast";
+const RELEVANCE_SNIPPET_CHARS = 2_500; // opening chars of the cleaned body
+
+function parseRelevanceVerdict(text: string): "relevant" | "irrelevant" | null {
+  const m = text.match(/\b(RELEVANT|IRRELEVANT)\b/i);
+  if (!m) return null;
+  return m[1].toUpperCase() === "RELEVANT" ? "relevant" : "irrelevant";
+}
+
+function isRelevancePrecheckEnabled(env: Env): boolean {
+  if (!env.AI) return false;
+  if ((env.RELEVANCE_PRECHECK ?? "").toLowerCase() === "off") return false;
+  return true;
+}
+
+async function runRelevancePrecheck(
+  env: Env,
+  customer: CustomerRow,
+  researchForAi: string,
+): Promise<boolean> {
+  try {
+    const result = await env.AI!.run(RELEVANCE_MODEL, {
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a strict B2B lead classifier for a water-sports equipment wholesaler " +
+            "(inflatable boats, RIB boats, SUP, paddle boards, kayaks, yachts, kitesurfing, windsurfing). " +
+            "Answer with exactly one word: RELEVANT if the company could plausibly buy or resell such " +
+            "equipment (retailers, dealers, distributors, manufacturers, OEM, rental, schools, e-commerce " +
+            "in marine/outdoor/sporting goods), otherwise IRRELEVANT. No explanation.",
+        },
+        {
+          role: "user",
+          content: `公司: ${customer.company_name || customer.company_id}\n网站: ${customer.domain}\n\n网页内容节选:\n${researchForAi.slice(0, RELEVANCE_SNIPPET_CHARS)}`,
+        },
+      ],
+      max_tokens: 8,
+    });
+    const text = typeof result === "object" && result !== null && "response" in result
+      ? String((result as { response: unknown }).response ?? "")
+      : "";
+    const verdict = parseRelevanceVerdict(text);
+    // null (unparseable) ⇒ treat as relevant: defer to the full analysis.
+    return verdict !== "irrelevant";
+  } catch {
+    return true; // any model/binding failure ⇒ never block the pipeline
+  }
+}
+
+// Exported for unit tests (tests/relevance.test.ts).
+export {
+  parseRelevanceVerdict,
+  isRelevancePrecheckEnabled,
+};
+
 function isRetryableAiError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const msg = error.message;
@@ -1873,6 +1940,17 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
 
     if (researchForAi.length < 200) {
       throw new Error("无法从任何来源获取有效信息");
+    }
+
+    // Step 4c: Zero-cost relevance gate — skip the paid analysis outright for
+    // clearly unrelated companies (runs on free Workers AI Neurons).
+    if (isRelevancePrecheckEnabled(env) && !(await runRelevancePrecheck(env, customer, researchForAi))) {
+      const skipRemarks = withCompanyMarker("预检判定与水上运动行业无关（Workers AI 免费预检，未消耗付费 token）", customer.company_id);
+      return env.DB.prepare(`
+        UPDATE customers
+        SET status = 'completed', customer_segment = '不相关', lead_score = 0, remarks = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status = 'processing'
+      `).bind(skipRemarks, customer.id);
     }
 
     // Step 5: AI deep analysis

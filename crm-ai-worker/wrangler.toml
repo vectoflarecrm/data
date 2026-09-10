@@ -2,6 +2,11 @@ name = "crm-ai-worker"
 main = "src/index.ts"
 compatibility_date = "2024-03-01"
 
+# Workers AI binding: free-tier Neurons power the zero-cost relevance precheck
+# that runs BEFORE the paid Gemini analysis (skips clearly irrelevant companies).
+[ai]
+binding = "AI"
+
 [triggers]
 crons = ["*/5 * * * *"]
 
