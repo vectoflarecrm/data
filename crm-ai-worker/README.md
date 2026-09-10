@@ -456,6 +456,16 @@ npx wrangler d1 execute crm-ai-db --local --command="INSERT INTO customers (comp
 npm run typecheck
 ```
 
+### 本地查询远程 D1（免改动 wrangler.toml）
+
+仓库中有一个被 Git 忽略的 `wrangler.local.toml`（含真实 `database_id`，不提交）。对远程 D1 做临时查询/修复时直接引用它，**不要**再临时改 `wrangler.toml` 再改回来：
+
+```bash
+npx wrangler d1 execute crm-ai-db --remote --json --config wrangler.local.toml --command "SELECT ..."
+```
+
+如果该文件不存在，从 `wrangler.toml` 复制一份并把 `database_id` 换成真实 ID 即可。`wrangler.toml` 中的占位符 `REPLACE_WITH_D1_DATABASE_ID` 只由 CI 在部署时替换，永远不要把真实 ID 提交进仓库。
+
 ## 部署
 
 本地部署时确认 `wrangler.toml` 中的 `database_id` 已填写真实 D1 ID 后再部署。GitHub Actions 如果设置了 `CLOUDFLARE_D1_DATABASE_ID`，会复用该 D1；如果未设置，workflow 会自动创建名为 `crm-ai-db` 的 D1，并仅在运行目录临时注入 ID。创建和初始化远程 Schema 需要 Cloudflare API Token 的 `D1 → Edit` 权限。

@@ -729,7 +729,19 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
         monthly_capacity: capacity || null, // null = no documented capacity (AI providers)
       };
     });
-    return jsonResponse({ usage });
+    // Precheck savings: irrelevant companies skipped today (each skipped row
+    // would have cost ~5-6k paid input tokens in the full analysis).
+    let precheck = { skipped_today: 0, tokens_saved_estimate: 0 };
+    try {
+      const row = await env.DB.prepare(`
+        SELECT COUNT(*) AS n FROM customers
+        WHERE customer_segment = '不相关' AND remarks LIKE '%预检判定%'
+          AND updated_at >= date('now')
+      `).first<{ n: number }>();
+      const skipped = row?.n ?? 0;
+      precheck = { skipped_today: skipped, tokens_saved_estimate: skipped * 5_500 };
+    } catch { /* stats are non-critical; render zeros */ }
+    return jsonResponse({ usage, precheck });
   }
 
   // POST /admin/api/keys/bulk — bulk import keys.
@@ -1883,6 +1895,8 @@ function loadKeys(){
           '<td style="padding:4px 8px">'+bar+'</td></tr>';
       });
       h+='</tbody></table></div><p style="font-size:12px;color:#6b7280;margin:6px 0 0">月容量按免费层估算：Tavily 500次深度搜索/Key、Exa ~2000次/Key、Brave 2000次/Key；AI 平台无固定容量（取决于 token 混合）。</p>';
+      var pc=d.precheck||{skipped_today:0,tokens_saved_estimate:0};
+      if(pc.skipped_today>0){h+='<p style="font-size:12px;color:#059669;margin:6px 0 0">⚡ 免费预检今日已跳过 <b>'+pc.skipped_today+'</b> 家不相关客户，估算节省付费输入 token ~'+(pc.tokens_saved_estimate>=1000?(Math.round(pc.tokens_saved_estimate/1000)+'k'):pc.tokens_saved_estimate)+'（Workers AI Neurons，0 成本）</p>';}
       box.innerHTML=h;
     }).catch(function(){document.getElementById('usageBox').innerHTML='<p style="color:#6b7280;margin:4px 0">用量数据不可用</p>'});
     var cdBox=document.getElementById('cooldownBox');
