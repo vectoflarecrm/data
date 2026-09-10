@@ -536,9 +536,10 @@ async function searloSearch(query: string, env: Env): Promise<GoogleSearchResult
   return [];
 }
 
-// Brave Search API (free tier ~2,000 queries/month, no credit card):
-// independent web index, good at surfacing official homepages and LinkedIn
-// pages for company-name queries.
+// Brave Search API removed from the chain: the free tier now requires a
+// payment method on file, conflicting with the zero-cost key-pool strategy.
+// Tavily (primary) + Exa (volume fallback) cover the same ground; Searlo and
+// keyless DuckDuckGo remain as the tail of the chain.
 async function braveSearch(query: string, env: Env, taskKeyIndex = 0): Promise<GoogleSearchResult[]> {
   const braveState = await getProviderState(env, "brave");
   const keys = isProviderUsable(braveState) ? braveState.keys : [];
@@ -706,11 +707,10 @@ async function duckduckgoSearch(query: string): Promise<GoogleSearchResult[]> {
 }
 
 async function multiEngineSearch(query: string, env: Env, tavilyKeyIndex = 0): Promise<GoogleSearchResult[]> {
-  // Tavily is the primary fleet (up to 60 keys); other engines are fallbacks
+  // Tavily is the primary fleet (up to 60 keys); Exa is the volume fallback
+  // (4x more account-efficient); Searlo and keyless DuckDuckGo close the chain.
+  // Brave was removed: its free tier now requires a payment method on file.
   let results = await tavilySearch(query, env, tavilyKeyIndex);
-  if (results.length > 0) return results;
-
-  results = await braveSearch(query, env, tavilyKeyIndex);
   if (results.length > 0) return results;
 
   results = await searloSearch(query, env);

@@ -62,7 +62,7 @@ completed / failed
 
 阶段 3  多引擎搜索（Tavily Credits / 免费）
         6 条查询模板（联系方式×2、LinkedIn×3、业务×1），每条独立走
-        Tavily→Brave→Searlo→Exa→DuckDuckGo 链；结果去噪（维基/视频页）、
+        Tavily→Exa→Searlo→DuckDuckGo 链（Brave 已停用）；结果去噪（维基/视频页）、
         剔除自有域名、跨查询 URL 去重、内容前缀去重（不同查询命中同页只
         抓一次）；取前 5 个结果页抓正文（LinkedIn 优先，6k 字符预算，其余
         4k），并对其做规则级联系方式提取（[直接提取] 行）。
@@ -224,8 +224,8 @@ npx wrangler d1 execute crm-ai-db --local --file=./schema.sql
 - 在网页上直接添加/停用/删除任意平台的 Key，可设置单 Key RPM、模型覆盖；
 - 平台级设置支持默认模型、总 RPM 上限和一键启用/停用整个平台；
 - 🧊 冷却监控：被 429/401/403 暂停的 Key 实时显示剩余冷却时间，可一键清除；过期冷却保留在 📜 历史列表（最近 20 条）；页面每 30 秒自动刷新（输入时暂停）；
-- 📊 本月用量卡片：每个平台的成功调用次数（本月/累计）、活动 Key 数、冷却数、以及搜索平台的免费容量估算进度条（Tavily 500 次深度搜索/Key、Exa ~2000 次/Key、Brave 2000 次/Key）；
-- 📦 批量导入（适合 Tavily/Exa/Brave 等大量 Key）：模板格式**每行一条 `API Key,备注/账号`**，也支持 Tab 或 | 分隔（可直接从 Excel/Google Sheets 复制两列粘贴），纯 Key（逗号/分号/空格分隔）也可；面板内置 Tavily/Exa/Brave/通用 一键填充模板；自动去重、跳过已存在的 Key（部分重贴安全）；
+- 📊 本月用量卡片：每个平台的成功调用次数（本月/累计）、活动 Key 数、冷却数、以及搜索平台的免费容量估算进度条（Tavily 500 次深度搜索/Key、Exa ~2000 次/Key）；
+- 📦 批量导入（适合 Tavily/Exa 等大量 Key）：模板格式**每行一条 `API Key,备注/账号`**，也支持 Tab 或 | 分隔（可直接从 Excel/Google Sheets 复制两列粘贴），纯 Key（逗号/分号/空格分隔）也可；面板内置 Tavily/Exa/通用 一键填充模板；自动去重、跳过已存在的 Key（部分重贴安全）；
 - 数据存于 D1 `api_configs` / `provider_settings` 表，下一个请求即生效（同节点即时，全网 30 秒内刷新），**不需要重新部署，也不需要 GitHub 或命令行**；
 - Worker 按「D1 优先、env Secrets 兑底」解析 Key，面板清空后自动回退到 Secret 池。
 
@@ -354,9 +354,9 @@ CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID  (面板引导凭据, 仅 Workers S
 |---|---|---|---|
 | Tavily | 1,000 Credits / 月/账号 | `basic` 搜索 1 Credit/次；`advanced` 搜索 2 Credits/次（即 500 次）；`extract` 每 5 个网页扣 1 Credit | 自然月每月 1 号 UTC 0:00，所有账号统一 |
 | Exa | **$10 额度 / 月/账号**（注册另送 $20，约 2,800 次搜索） | 按 $ 计费：搜索约 $5/千次（`auto`），抓取正文按结果条数另计 | 滚动账单周期：按各账号注册日每 30 天重置（Dashboard → Usage & Billing 显示 *Resets on 日期*） |
-| Brave Search | 2,000 次 / 月/账号 | 网页搜索 1 次/请求 | 自然月 1 号 |
+| ~~Brave Search~~ | ~~2,000 次 / 月/账号~~ **已停用（2026-09）**：免费档现要求绑定支付方式，与零成本 Key 池策略冲突 | — | — |
 
-> Brave Key 池容量与 Tavily/Exa 一致：40 个槽位（`BRAVE_API_KEY_2` … `_40`），面板批量导入或 Secrets 均可，运行时自动发现全部已配置的 Key。
+> Brave 已从搜索回退链移除。当前链路：**Tavily → Exa → Searlo → DuckDuckGo**；容量由 Tavily + Exa 双层承担（Exa 账号效率约为 Tavily 的 4 倍）。代码中 `braveSearch` 保留但不在链内，若未来免费档恢复无卡要求可随时接回。
 
 多账号（Key 池）额度线性叠加：例如 10 个 Tavily Key = 10,000 Credits/月；本项目 `advanced` 深度搜索为主，单个 Tavily Key 实际可用约 **500 次深度搜索/月**。Exa 按 $ 扣费且周期独立于自然月，适合作为 Tavily 额度耗尽后的接力层（面板冷却机制会在 429/额度耗尽时自动切换到下一个 Key/平台）。每次成功调用的用量计入 D1 `api_key_usage` 表（按天分 Key 统计），面板 📊 卡片实时汇总。
 
@@ -527,7 +527,7 @@ pending → processing → completed
 - 使用单条 `UPDATE ... RETURNING` 原子认领 3 条 pending 记录，避免 Cron 并发重复处理；
 - 网页请求超时为 10 秒；
 - AI 分析前会先执行本地数据清洗（`cleanResearchContextForAi`）：剔除导航/页脚/cookie 横幅等样板行、跨来源去重、并按块与全局预算截断（单块 4.5K 字符，总量 30K 字符），显著降低 AI token 消耗；原始研究全文仍保留在 `full_research_text` 供审计；
-- 搜索引擎回退链：Tavily → Brave → Searlo → Exa → DuckDuckGo。Brave Search 免费档约 2,000 次/月（无需信用卡），Key 池支持 `BRAVE_API_KEY`、`BRAVE_API_KEY_2`；
+- 搜索引擎回退链：Tavily → Exa → Searlo → DuckDuckGo（Brave 已停用：免费档需绑卡）；
 - 主网站被反爬拦截（HTTP 403/503）或需 JS 渲染时，自动降级用 Firecrawl 无头渲染抓取一次（可选 Key `FIRECRAWL_API_KEY`，未配置时自动跳过）；
 - 确认被反爬拦截且降级失败的客户标记为「需人工复审」并归入 failed，不消耗重试次数；修复后可在管理面板重新置为 pending；
 - Gemini 请求超时为 15 秒；

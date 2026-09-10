@@ -898,7 +898,7 @@ const SECRET_DEFINITIONS: SecretDefinition[] = [
   { name: "OPENROUTER_API_KEY", label: "OpenRouter", group: "AI Provider Keys", indexed: true },
   { name: "TAVILY_API_KEY", label: "Tavily (搜索)", group: "Search Keys", indexed: true },
   { name: "EXA_API_KEY", label: "Exa (搜索)", group: "Search Keys", indexed: true },
-  { name: "BRAVE_API_KEY", label: "Brave (搜索)", group: "Search Keys", indexed: true },
+  { name: "BRAVE_API_KEY", label: "Brave (搜索，已停用：需绑卡)", group: "Search Keys", indexed: true },
   { name: "SEARLO_API_KEY", label: "Searlo (搜索)", group: "Search Keys", indexed: true },
   { name: "FIRECRAWL_API_KEY", label: "Firecrawl (反爬降级)", group: "Search Keys" },
   { name: "GEMINI_MODEL", label: "Gemini 模型", group: "Model Overrides" },
@@ -1807,7 +1807,7 @@ tr.inactive td{opacity:.5}
       <option value="gemini">Gemini</option><option value="groq">Groq</option><option value="cerebras">Cerebras</option>
       <option value="zhipu">Zhipu GLM</option><option value="nvidia">NVIDIA NIM</option><option value="amd">AMD Radeon</option><option value="mistral">Mistral</option>
       <option value="deepseek">DeepSeek</option><option value="openrouter">OpenRouter</option>
-      <option value="tavily">Tavily 搜索</option><option value="exa">Exa 搜索</option><option value="brave">Brave 搜索</option><option value="searlo">Searlo 搜索</option>
+      <option value="tavily">Tavily 搜索</option><option value="exa">Exa 搜索</option><option value="searlo">Searlo 搜索</option>
     </select></div>
     <div class="field"><label>备注</label><input id="nkLabel" placeholder="如: 账号2"></div>
     <div class="field"><label>API Key</label><input id="nkKey" autocomplete="off"></div>
@@ -1820,7 +1820,7 @@ tr.inactive td{opacity:.5}
 <div class="card"><h2>📦 批量导入（适合 Tavily/Exa 等大量 Key）</h2>
   <div class="grid">
     <div class="field"><label>平台</label><select id="bulkProvider">
-      <option value="tavily">Tavily 搜索</option><option value="exa">Exa 搜索</option><option value="brave">Brave 搜索</option><option value="searlo">Searlo 搜索</option>
+      <option value="tavily">Tavily 搜索</option><option value="exa">Exa 搜索</option><option value="searlo">Searlo 搜索</option>
       <option value="gemini">Gemini</option><option value="groq">Groq</option><option value="cerebras">Cerebras</option>
       <option value="zhipu">Zhipu GLM</option><option value="nvidia">NVIDIA NIM</option><option value="amd">AMD Radeon</option><option value="mistral">Mistral</option>
       <option value="deepseek">DeepSeek</option><option value="openrouter">OpenRouter</option>
@@ -1837,7 +1837,6 @@ tvly-zzzzzzzz,账号3"></textarea>
       <span style="font-size:12px;color:#6b7280">填充模板：</span>
       <button class="btn tpl" data-tpl="tavily" type="button">Tavily</button>
       <button class="btn tpl" data-tpl="exa" type="button">Exa</button>
-      <button class="btn tpl" data-tpl="brave" type="button">Brave</button>
       <button class="btn tpl" data-tpl="generic" type="button">通用</button>
       <span style="font-size:12px;color:#6b7280">（覆盖 textarea 内容；分隔符可用英文逗号、Tab 或 | ）</span>
     </div>
@@ -1894,7 +1893,7 @@ function loadKeys(){
           '<td style="text-align:right;padding:4px 8px">'+(r.monthly_capacity?r.monthly_capacity:'—')+'</td>'+
           '<td style="padding:4px 8px">'+bar+'</td></tr>';
       });
-      h+='</tbody></table></div><p style="font-size:12px;color:#6b7280;margin:6px 0 0">月容量按免费层估算：Tavily 500次深度搜索/Key、Exa ~2000次/Key、Brave 2000次/Key；AI 平台无固定容量（取决于 token 混合）。</p>';
+      h+='</tbody></table></div><p style="font-size:12px;color:#6b7280;margin:6px 0 0">月容量按免费层估算：Tavily 500次深度搜索/Key、Exa ~2000次/Key；AI 平台无固定容量（取决于 token 混合）。Brave 已停用（免费档需绑卡）。</p>';
       var pc=d.precheck||{skipped_today:0,tokens_saved_estimate:0};
       if(pc.skipped_today>0){h+='<p style="font-size:12px;color:#059669;margin:6px 0 0">⚡ 免费预检今日已跳过 <b>'+pc.skipped_today+'</b> 家不相关客户，估算节省付费输入 token ~'+(pc.tokens_saved_estimate>=1000?(Math.round(pc.tokens_saved_estimate/1000)+'k'):pc.tokens_saved_estimate)+'（Workers AI Neurons，0 成本）</p>';}
       box.innerHTML=h;
