@@ -76,7 +76,13 @@ CREATE TABLE IF NOT EXISTS outreach_settings (
   company_intro TEXT,
   sender_email TEXT,
   sender_name TEXT,
+  -- Legal entity name used as the sending identity in the email body
+  -- (e.g. "SUP DIVISION OF QINGDAO VATRAD GROUP CO., LTD"); NULL = use brand_name.
+  company_entity TEXT,
   signature TEXT,
+  -- Optional gmail_accounts.client_email binding; NULL = auto-pick from pool.
+  -- For oauth_refresh accounts this is also the From mailbox.
+  gmail_account TEXT,
   enabled INTEGER DEFAULT 0,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -84,7 +90,9 @@ CREATE TABLE IF NOT EXISTS outreach_settings (
 -- Brand sender identities and signatures are part of the base schema so a
 -- fresh database can be initialized without follow-up migrations.
 
--- Outreach attachments (base64 in D1; small files like PDF catalogs)
+-- Outreach attachments (base64 in D1; small files like PDF catalogs).
+-- language: ISO 639-1 code (es/de/fr/...) of the catalog version, or "all"
+-- for universal attachments sent to every recipient regardless of language.
 CREATE TABLE IF NOT EXISTS outreach_attachments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   brand_name TEXT NOT NULL,
@@ -92,6 +100,7 @@ CREATE TABLE IF NOT EXISTS outreach_attachments (
   mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
   size_bytes INTEGER NOT NULL,
   content_base64 TEXT NOT NULL,
+  language TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -167,6 +176,30 @@ CREATE TABLE IF NOT EXISTS provider_settings (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Gmail sender account pool: multiple Google identities that can send via the
+-- Gmail API. Two credential kinds:
+--   credential_type = 'service_account' — service-account PEM + domain-wide
+--       delegation (client_email = …@….iam.gserviceaccount.com, private_key = PEM);
+--   credential_type = 'oauth_refresh' — per-mailbox OAuth2 refresh token
+--       (client_email = the From mailbox, private_key = the refresh token),
+--       the no-key alternative for orgs whose policy blocks service-account keys.
+-- Emails pick one account (per-brand binding first, then least-used healthy
+-- account) so the daily send quota scales linearly with the account count.
+CREATE TABLE IF NOT EXISTS gmail_accounts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT,
+  credential_type TEXT NOT NULL DEFAULT 'service_account' CHECK (credential_type IN ('service_account', 'oauth_refresh')),
+  client_email TEXT NOT NULL UNIQUE,  -- service account email, or the From mailbox for oauth_refresh
+  private_key TEXT NOT NULL,          -- PEM (service_account) or refresh token (oauth_refresh)
+  delegated_domain TEXT,              -- workspace domain for quick reference
+  daily_limit INTEGER,                -- NULL = global GMAIL_DAILY_LIMIT (default 400)
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  last_error TEXT,
+  cooldown_until TIMESTAMP,           -- set when Google rejects the account
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Gmail send log (daily quota tracking + delivery audit for outreach emails)
 CREATE TABLE IF NOT EXISTS gmail_send_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -219,3 +252,53 @@ CREATE INDEX IF NOT EXISTS idx_customer_imports_batch ON customer_imports(import
 -- Columns lead_score / buying_signals / source_import_id are added by the CI
 -- migration step (per-statement ALTER with duplicate-column tolerance), since
 -- D1 fails a whole schema file on any duplicate ALTER.
+
+-- Saved customer groups (定向群发/客群): a reusable 海选 filter set so a
+-- segment ("西班牙经销商") can be re-targeted later without retyping criteria.
+-- The same filter JSON drives both the preview and campaign creation, so what
+-- the operator counted is exactly what gets emailed.
+CREATE TABLE IF NOT EXISTS outreach_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT,
+  filters TEXT NOT NULL CHECK (filters IS NULL OR json_valid(filters)),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- A campaign is a resumable send task over a SNAPSHOT of customer ids taken at
+-- creation time. Snapshotting (rather than re-running the filter on every step)
+-- keeps membership stable while the pipeline keeps researching customers, and
+-- makes the progress counters exact.
+CREATE TABLE IF NOT EXISTS outreach_campaigns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  brand_name TEXT NOT NULL,
+  group_id INTEGER,                    -- NULL = one-off campaign, not saved
+  filters TEXT CHECK (filters IS NULL OR json_valid(filters)),
+  total INTEGER NOT NULL DEFAULT 0,
+  -- draft | paused | done
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'paused', 'done')),
+  last_error TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_campaigns_brand ON outreach_campaigns(brand_name, status);
+
+-- Per-customer progress. status is the resume cursor: 'pending' needs a draft,
+-- 'generated' holds a draft id waiting to be sent, 'sent'/'failed' are
+-- terminal. outreach_email_id lets the send step go straight to the draft
+-- without re-deriving which email belongs to this campaign.
+CREATE TABLE IF NOT EXISTS outreach_campaign_members (
+  campaign_id INTEGER NOT NULL,
+  customer_id INTEGER NOT NULL,
+  -- pending | generated | sent | skipped | failed
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'generated', 'sent', 'skipped', 'failed')),
+  outreach_email_id INTEGER,
+  error TEXT,
+  PRIMARY KEY (campaign_id, customer_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_campaign_members_queue ON outreach_campaign_members(campaign_id, status);

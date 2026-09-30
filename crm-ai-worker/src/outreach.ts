@@ -10,7 +10,9 @@ export interface BrandConfig {
   company_intro: string;
   sender_email: string | null; // per-brand sender identity (Gmail delegated mailbox)
   sender_name: string | null;  // display name in the From header
+  company_entity: string | null; // legal entity name used in the email body (falls back to brand_name)
   signature: string | null;    // email signature block appended to every outreach body
+  gmail_account: string | null; // optional gmail_accounts.client_email binding (NULL = auto-pick from pool)
   enabled: boolean;
 }
 
@@ -35,10 +37,21 @@ const DEFAULT_BRANDS: BrandConfig[] = [
   {
     brand_name: "Afarer",
     product_category: "SUPs",
-    company_intro: "[Afarer公司简介待填写]",
-    sender_email: "toby@afarer.com",
-    sender_name: "Toby | Afarer Team",
-    signature: null,
+    company_intro: "SUP DIVISION OF QINGDAO VATRAD GROUP CO., LTD（青岛Vatrad集团SUP事业部）位于青岛经济开发区，是集团旗下专注充气式站立桨板（iSUP）的自有工厂事业部。工厂面积12,000平方米，拥有200余名熟练工人，年产桨板15,000片以上，客户覆盖50多个国家的品牌商、进口商与经销商。事业部集设计、工程、打样、制造与测试于一体，自有多条产线：CNC drop-stitch裁切、RF/热合焊接、数码与丝网印刷、FRP模具车间及独立质检实验室（ISO 9001认证，产品通过CE、BSCI、REACH），每片桨板出厂前100%进行保压与接缝剥离测试。标准起订量每型号5-10片，交期30-45天，支持OEM/ODM贴牌定制，可按FOB青岛/CIF/DDP条款发货。",
+    sender_email: "helen@isupfactory.com",
+    sender_name: "Helen | Vatrad SUP Division",
+    // SUP 开发信以 Vatrad 集团 SUP 事业部名义发送；Afarer 仅作内部品牌标识。
+    company_entity: "SUP DIVISION OF QINGDAO VATRAD GROUP CO., LTD",
+    // Helen 的新版邮件签名（2026-09，iSupfactory 名义），原样附加在正文末尾。
+    signature: [
+      "Helen Li",
+      "Director",
+      "helen@isupfactory.com",
+      "Whatsapp: 86 13305324192",
+      "iSupfactory/Qingdao Vatrad Group Co., Ltd",
+      "No.40 Yantai Road, Laixi, Qingdao, CHINA 266600",
+    ].join("\n"),
+    gmail_account: null,
     enabled: false,
   },
   {
@@ -47,7 +60,9 @@ const DEFAULT_BRANDS: BrandConfig[] = [
     company_intro: "[Aquafarer公司简介待填写]",
     sender_email: null,
     sender_name: null,
+    company_entity: null,
     signature: null,
+    gmail_account: null,
     enabled: false,
   },
   {
@@ -56,21 +71,43 @@ const DEFAULT_BRANDS: BrandConfig[] = [
     company_intro: "[Neptunor公司简介待填写]",
     sender_email: "helen@neptunor.com",
     sender_name: "Helen | Neptunor Team",
+    company_entity: null,
     signature: null,
+    gmail_account: null,
     enabled: false,
   },
 ];
 
+/* ── Schema backfill: company_entity was added after launch; ALTER the column
+ * into existing databases so older deployments keep working without a manual
+ * migration. Runs at most once per isolate. ── */
+let settingsColumnsEnsured = false;
+async function ensureSettingsColumns(env: AdminEnv): Promise<void> {
+  if (settingsColumnsEnsured) return;
+  for (const ddl of [
+    "ALTER TABLE outreach_settings ADD COLUMN company_entity TEXT",
+    "ALTER TABLE outreach_settings ADD COLUMN gmail_account TEXT",
+  ]) {
+    try {
+      await env.DB.prepare(ddl).run();
+    } catch {
+      // Column already exists (or table not created yet) — safe to ignore.
+    }
+  }
+  settingsColumnsEnsured = true;
+}
+
 /* ── Initialize default brand settings if table is empty ── */
 export async function initBrandSettings(env: AdminEnv): Promise<void> {
+  await ensureSettingsColumns(env);
   const count = await env.DB.prepare("SELECT COUNT(*) as cnt FROM outreach_settings")
     .first<{ cnt: number }>();
   if (count && count.cnt > 0) return;
 
   const stmts = DEFAULT_BRANDS.map((b) =>
     env.DB.prepare(
-      "INSERT OR IGNORE INTO outreach_settings (brand_name, product_category, company_intro, sender_email, sender_name, enabled) VALUES (?, ?, ?, ?, ?, ?)"
-    ).bind(b.brand_name, b.product_category, b.company_intro, b.sender_email, b.sender_name, b.enabled ? 1 : 0)
+      "INSERT OR IGNORE INTO outreach_settings (brand_name, product_category, company_intro, sender_email, sender_name, company_entity, signature, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(b.brand_name, b.product_category, b.company_intro, b.sender_email, b.sender_name, b.company_entity, b.signature, b.enabled ? 1 : 0)
   );
   await env.DB.batch(stmts);
 }
@@ -79,15 +116,17 @@ export async function initBrandSettings(env: AdminEnv): Promise<void> {
 export async function getBrandSettings(env: AdminEnv): Promise<BrandConfig[]> {
   await initBrandSettings(env);
   const result = await env.DB.prepare(
-    "SELECT brand_name, product_category, company_intro, sender_email, sender_name, signature, enabled FROM outreach_settings ORDER BY id"
-  ).all<{ brand_name: string; product_category: string; company_intro: string; sender_email: string | null; sender_name: string | null; signature: string | null; enabled: number }>();
+    "SELECT brand_name, product_category, company_intro, sender_email, sender_name, company_entity, signature, gmail_account, enabled FROM outreach_settings ORDER BY id"
+  ).all<{ brand_name: string; product_category: string; company_intro: string; sender_email: string | null; sender_name: string | null; company_entity: string | null; signature: string | null; gmail_account: string | null; enabled: number }>();
   return result.results.map((r) => ({
     brand_name: r.brand_name,
     product_category: r.product_category,
     company_intro: r.company_intro || "",
     sender_email: r.sender_email || null,
     sender_name: r.sender_name || null,
+    company_entity: r.company_entity || null,
     signature: r.signature || null,
+    gmail_account: r.gmail_account || null,
     enabled: r.enabled === 1,
   }));
 }
@@ -96,7 +135,7 @@ export async function getBrandSettings(env: AdminEnv): Promise<BrandConfig[]> {
 export async function updateBrandSetting(
   env: AdminEnv,
   brandName: string,
-  updates: Partial<Pick<BrandConfig, "company_intro" | "enabled" | "sender_email" | "sender_name" | "signature">>
+  updates: Partial<Pick<BrandConfig, "company_intro" | "enabled" | "sender_email" | "sender_name" | "company_entity" | "signature" | "gmail_account">>
 ): Promise<void> {
   const sets: string[] = [];
   const binds: unknown[] = [];
@@ -112,15 +151,24 @@ export async function updateBrandSetting(
     sets.push("sender_name = ?");
     binds.push(updates.sender_name);
   }
+  if (updates.company_entity !== undefined) {
+    sets.push("company_entity = ?");
+    binds.push(updates.company_entity);
+  }
   if (updates.signature !== undefined) {
     sets.push("signature = ?");
     binds.push(updates.signature);
+  }
+  if (updates.gmail_account !== undefined) {
+    sets.push("gmail_account = ?");
+    binds.push(updates.gmail_account);
   }
   if (updates.enabled !== undefined) {
     sets.push("enabled = ?");
     binds.push(updates.enabled ? 1 : 0);
   }
   if (sets.length === 0) return;
+  await ensureSettingsColumns(env);
   sets.push("updated_at = CURRENT_TIMESTAMP");
   binds.push(brandName);
   await env.DB.prepare(`UPDATE outreach_settings SET ${sets.join(", ")} WHERE brand_name = ?`)
@@ -238,6 +286,46 @@ function getCountryLanguage(country: string | null): string {
   return "English";
 }
 
+/* ── Country → attachment language code (catalog selection) ──
+ * Attachments carry a language tag ("es", "en", "de", …); emails attach the
+ * catalog matching the recipient's language, plus any language-tagged "all"
+ * attachments. Unmatched countries fall back to "en".
+ */
+const COUNTRY_ATTACHMENT_LANGS: Record<string, string> = {
+  // 西班牙语
+  ES: "es", MX: "es", AR: "es", CO: "es", CL: "es", PE: "es", VE: "es",
+  EC: "es", GT: "es", CU: "es", BO: "es", DO: "es", HN: "es", PY: "es",
+  SV: "es", NI: "es", CR: "es", PA: "es", UY: "es", GQ: "es",
+  // 葡萄牙语
+  PT: "pt", BR: "pt", AO: "pt", MZ: "pt",
+  // 法语
+  FR: "fr", BE: "fr", SN: "fr", CM: "fr", CI: "fr",
+  // 德语
+  DE: "de", AT: "de", LI: "de",
+  // 意大利语
+  IT: "it",
+  // 荷兰语
+  NL: "nl",
+  // 其他欧洲主要市场
+  PL: "pl", RU: "ru", GR: "el", TR: "tr", SE: "sv", DK: "da", NO: "no",
+  FI: "fi", CZ: "cs", RO: "ro", HU: "hu", UA: "uk",
+  // 亚洲
+  JP: "ja", KR: "ko", TH: "th", VN: "vi", ID: "id",
+};
+
+export function attachmentLangForCountry(country: string | null): string {
+  if (!country) return "en";
+  const code = country.trim().toUpperCase();
+  if (COUNTRY_ATTACHMENT_LANGS[code]) return COUNTRY_ATTACHMENT_LANGS[code];
+  const countryLower = country.toLowerCase();
+  if (countryLower.includes("spain") || countryLower.includes("espa") || countryLower.includes("mexico") || countryLower.includes("méxico")) return "es";
+  if (countryLower.includes("brazil") || countryLower.includes("brasil") || countryLower.includes("portugal")) return "pt";
+  if (countryLower.includes("france")) return "fr";
+  if (countryLower.includes("germany") || countryLower.includes("deutschland")) return "de";
+  if (countryLower.includes("italy")) return "it";
+  return "en";
+}
+
 /* ── Build AI prompt for outreach email generation ── */
 interface OutreachCompany {
   company_name: string | null;
@@ -303,11 +391,14 @@ function buildOutreachPrompt(
 - 建议切入点：${outreach.recommended_angle || "（自行根据档案判断）"}
 - 可引用的具体事实（必须真实出现在该公司数据中）：\n${(outreach.evidence_lines ?? []).map((l) => `  * ${l}`).join("\n")}`
     : "";
+  // 发送主体名义：正文署名用对外公司主体（如 Vatrad 集团 SUP 事业部），
+  // 品牌名（Afarer 等）仅作内部标识，不出现在邮件里。
+  const entityName = brand.company_entity?.trim() || brand.brand_name;
 
   return `你是一名专业的B2B营销专家，擅长撰写针对水上运动行业的个性化开发信。
 
 ## 你的身份
-你代表 **${brand.brand_name}** 公司${brand.sender_name ? `，发件人署名身份是：**${brand.sender_name}**（From 地址为 ${brand.sender_email}）` : ""}，以下是我们公司的简介：
+你代表 **${entityName}** 公司${brand.sender_name ? `，发件人署名身份是：**${brand.sender_name}**（From 地址为 ${brand.sender_email}）` : ""}，以下是我们公司的简介：
 ${brand.company_intro}
 
 ## 产品类别
@@ -339,7 +430,7 @@ ${isEnglish ? "使用英文。" : `如果客户在西班牙，请用西班牙语
 1. **邮件主题（Subject）**：用${language}撰写，简洁有力，不超过60字符，突出合作价值
 2. **邮件正文（Body）**：用${language}撰写
    - 开头：用 ${firstName} 称呼，提及他们的公司名和具体业务
-   - 中间：介绍 ${brand.brand_name} 的产品如何与他们的业务互补（引用他们的具体产品或业务模式）
+   - 中间：介绍我们的产品如何与他们的业务互补（引用他们的具体产品或业务模式）
    - 结尾：提出具体的合作建议（如样品、报价、展会见面等）
    - 专业但亲切的语气
    - 长度：150-250词（不含签名）
@@ -349,6 +440,7 @@ ${brand.signature ? "   - 正文最后必须原样附加上面提供的邮件签
 
 3. **严格禁止**：
    - 编造虚假信息
+   - 在正文或落款中出现「${entityName}」以外的公司名、品牌名或商标
    - 使用"Dear Sir/Madam"等泛泛称呼（除非确实不知道联系人姓名）
    - 承诺无法兑现的条件
    - 使用英文写给非英语国家的客户（必须使用当地语言！）
@@ -361,11 +453,30 @@ ${brand.signature ? "   - 正文最后必须原样附加上面提供的邮件签
 }
 
 /* ── Generate outreach emails using AI ── */
-export async function generateOutreachEmails(
-  env: AdminEnv,
-  brandName: string,
-  limit: number = 10
-): Promise<{ generated: number; errors: string[] }> {
+export interface OutreachCustomer {
+  id: number;
+  company_id: string;
+  display_id: string | null;
+  company_name: string | null;
+  domain: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  title: string | null;
+  email: string | null;
+  products_services: string | null;
+  business_tag: string | null;
+  customer_segment: string | null;
+  country: string | null;
+  description: string | null;
+  company_profile: string | null;
+  outreach_context: string | null;
+}
+
+const OUTREACH_CUSTOMER_COLUMNS = `id, company_id, display_id, company_name, domain, first_name, last_name,
+  title, email, products_services, business_tag, customer_segment, country,
+  description, company_profile, outreach_context`;
+
+async function loadBrandForOutreach(env: AdminEnv, brandName: string): Promise<BrandConfig> {
   const brands = await getBrandSettings(env);
   const brand = brands.find((b) => b.brand_name === brandName);
   if (!brand) throw new Error(`Brand ${brandName} not found`);
@@ -373,6 +484,53 @@ export async function generateOutreachEmails(
   if (!brand.company_intro || brand.company_intro.startsWith("[")) {
     throw new Error(`Brand ${brandName} company intro not configured`);
   }
+  return brand;
+}
+
+/* Generate and persist one draft. Throws on AI/DB failure so both the
+ * brand-keyword sweep and the targeted campaign path report per-customer
+ * errors the same way. */
+async function generateDraftForCustomer(
+  env: AdminEnv,
+  brand: BrandConfig,
+  customer: OutreachCustomer,
+): Promise<number> {
+  const prompt = buildOutreachPrompt(brand, customer);
+  // Deterministic key per company: customer.id picks the start key so load
+  // spreads across the Gemini pool; rotation only happens on failure.
+  const result = await callAiForOutreach(env, prompt, customer.id);
+  if (!result) throw new Error("AI returned empty");
+
+  const inserted = await env.DB.prepare(`
+    INSERT INTO outreach_emails
+      (customer_id, company_id, display_id, company_name, email_to,
+       product_category, brand_name, subject, body, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')
+  `)
+    .bind(
+      customer.id,
+      customer.company_id,
+      customer.display_id,
+      customer.company_name,
+      customer.email,
+      brand.product_category,
+      brand.brand_name,
+      result.subject,
+      result.body
+    )
+    .run();
+
+  // Rate limit: 2 seconds between AI calls
+  await new Promise((r) => setTimeout(r, 2000));
+  return Number(inserted.meta.last_row_id ?? 0);
+}
+
+export async function generateOutreachEmails(
+  env: AdminEnv,
+  brandName: string,
+  limit: number = 10
+): Promise<{ generated: number; errors: string[] }> {
+  const brand = await loadBrandForOutreach(env, brandName);
 
   // Match each product family independently. Neptunor covers both RIB and
   // inflatable boats, while the other brands keep their narrower category.
@@ -390,9 +548,7 @@ export async function generateOutreachEmails(
     }
   }
   const customers = await env.DB.prepare(`
-    SELECT id, company_id, display_id, company_name, domain, first_name, last_name,
-           title, email, products_services, business_tag, customer_segment, country,
-           description, company_profile, outreach_context
+    SELECT ${OUTREACH_CUSTOMER_COLUMNS}
     FROM customers
     WHERE status = 'completed'
       AND email IS NOT NULL AND email != ''
@@ -405,67 +561,84 @@ export async function generateOutreachEmails(
     LIMIT ?
   `)
     .bind(...keywordBinds, brandName, limit)
-    .all<{
-      id: number;
-      company_id: string;
-      display_id: string | null;
-      company_name: string | null;
-      domain: string | null;
-      first_name: string | null;
-      last_name: string | null;
-      title: string | null;
-      email: string | null;
-      products_services: string | null;
-      business_tag: string | null;
-      customer_segment: string | null;
-      country: string | null;
-      description: string | null;
-      company_profile: string | null;
-      outreach_context: string | null;
-    }>();
+    .all<OutreachCustomer>();
 
   const errors: string[] = [];
   let generated = 0;
 
   for (const customer of customers.results) {
     try {
-      const prompt = buildOutreachPrompt(brand, customer);
-      // Deterministic key per company: customer.id picks the start key so load
-      // spreads across the Gemini pool; rotation only happens on failure.
-      const result = await callAiForOutreach(env, prompt, customer.id);
-      if (!result) {
-        errors.push(`${customer.display_id || customer.company_id}: AI returned empty`);
-        continue;
-      }
-
-      await env.DB.prepare(`
-        INSERT INTO outreach_emails
-          (customer_id, company_id, display_id, company_name, email_to,
-           product_category, brand_name, subject, body, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')
-      `)
-        .bind(
-          customer.id,
-          customer.company_id,
-          customer.display_id,
-          customer.company_name,
-          customer.email,
-          brand.product_category,
-          brand.brand_name,
-          result.subject,
-          result.body
-        )
-        .run();
-
+      await generateDraftForCustomer(env, brand, customer);
       generated++;
-      // Rate limit: 2 seconds between AI calls
-      await new Promise((r) => setTimeout(r, 2000));
     } catch (e) {
       errors.push(`${customer.display_id || customer.company_id}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
   return { generated, errors };
+}
+
+/* ── Targeted generation (定向群发) ──
+ * Generate drafts for an explicit customer-id list (a campaign's membership
+ * snapshot) instead of sweeping by product keyword. Customers that already
+ * have any email for this brand are reported back as `already` so the caller
+ * can mark them skipped rather than burning AI tokens on a duplicate. */
+export async function generateOutreachForCustomerIds(
+  env: AdminEnv,
+  brandName: string,
+  customerIds: number[],
+): Promise<{
+  generated: number;
+  already: Array<{ customer_id: number; email_id: number; status: string }>;
+  drafts: Array<{ customer_id: number; email_id: number }>;
+  errors: Array<{ customer_id: number; message: string }>;
+}> {
+  const brand = await loadBrandForOutreach(env, brandName);
+  const unique = [...new Set(customerIds)].filter((id) => Number.isSafeInteger(id) && id > 0);
+  if (unique.length === 0) return { generated: 0, already: [], drafts: [], errors: [] };
+
+  // D1 caps a bound IN list; chunk so a large campaign member set still works.
+  const placeholders = (n: number) => Array(n).fill("?").join(",");
+  const existing: Array<{ customer_id: number; email_id: number; status: string }> = [];
+  for (let i = 0; i < unique.length; i += 100) {
+    const chunk = unique.slice(i, i + 100);
+    const rows = await env.DB.prepare(
+      `SELECT customer_id, id AS email_id, status FROM outreach_emails
+       WHERE brand_name = ? AND customer_id IN (${placeholders(chunk.length)})
+       ORDER BY id`,
+    )
+      .bind(brandName, ...chunk)
+      .all<{ customer_id: number; email_id: number; status: string }>();
+    existing.push(...rows.results);
+  }
+  // Earliest email per customer wins — matches what the send step will pick.
+  const existingByCustomer = new Map<number, { customer_id: number; email_id: number; status: string }>();
+  for (const row of existing) {
+    if (!existingByCustomer.has(row.customer_id)) existingByCustomer.set(row.customer_id, row);
+  }
+
+  const todo = unique.filter((id) => !existingByCustomer.has(id));
+  const customers = await env.DB.prepare(
+    `SELECT ${OUTREACH_CUSTOMER_COLUMNS} FROM customers WHERE id IN (${placeholders(todo.length)}) ORDER BY id`,
+  )
+    .bind(...todo)
+    .all<OutreachCustomer>();
+
+  const drafts: Array<{ customer_id: number; email_id: number }> = [];
+  const errors: Array<{ customer_id: number; message: string }> = [];
+  for (const customer of customers.results) {
+    try {
+      const emailId = await generateDraftForCustomer(env, brand, customer);
+      drafts.push({ customer_id: customer.id, email_id: emailId });
+    } catch (e) {
+      errors.push({
+        customer_id: customer.id,
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  return { generated: drafts.length, already: [...existingByCustomer.values()], drafts, errors };
 }
 
 /* ── Call AI to generate outreach email ── */

@@ -6,16 +6,37 @@ import {
   updateOutreachEmail,
   deleteOutreachEmail,
   getOutreachStats,
+  attachmentLangForCountry,
 } from "./outreach";
 import {
   getQuota,
   sendOutreachEmail,
   sendDelayMs,
+  getAccessToken,
+  noteGmailAccountResult,
   GmailEnv,
   GmailConfigError,
 } from "./gmail";
 import { invalidateProviderCache } from "./provider-keys";
 import { parseBulkKeyEntries } from "./bulk-keys";
+import {
+  parseSegmentFilters,
+  segmentClause,
+  previewSegment,
+  listGroups,
+  createGroup,
+  updateGroup,
+  deleteGroup,
+  listCampaigns,
+  getCampaign,
+  listCampaignMembers,
+  createCampaign,
+  setCampaignStatus,
+  deleteCampaign,
+  runCampaignGenerate,
+  runCampaignSend,
+  deserializeFilters,
+} from "./campaigns";
 
 export interface AdminEnv extends GmailEnv {
   DB: D1Database;
@@ -515,32 +536,20 @@ async function importCustomersCsv(request: Request, env: AdminEnv): Promise<Resp
 // SQL-only narrowing over existing verified fields. Counts what remains so the
 // user can decide before committing research budget. Also can reset matching
 // rows to pending (action=queue) so the cron pipeline re-processes them.
+// Shares its WHERE-clause builder with the 定向群发 campaign preview so both
+// screens agree on what "this customer group" means.
 async function preFilterCustomers(request: Request, env: AdminEnv): Promise<Response> {
   const url = new URL(request.url);
-  const countries = (url.searchParams.get("countries") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-  const segments = (url.searchParams.get("segments") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-  const products = (url.searchParams.get("products") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-  const minScore = Number(url.searchParams.get("min_lead_score") ?? 0) || 0;
   const hasEmail = url.searchParams.get("has_email") === "1";
+  const filters = parseSegmentFilters({
+    countries: url.searchParams.get("countries") ?? "",
+    segments: url.searchParams.get("segments") ?? "",
+    products: url.searchParams.get("products") ?? "",
+    min_lead_score: url.searchParams.get("min_lead_score") ?? 0,
+    has_email: hasEmail,
+  });
   const action = url.searchParams.get("action") ?? "count";
-
-  const where: string[] = ["status = 'completed'"];
-  const binds: Array<string | number> = [];
-  if (countries.length) {
-    where.push(`(${countries.map(() => "country LIKE ?").join(" OR ")})`);
-    countries.forEach((c) => binds.push(`%${c}%`));
-  }
-  if (segments.length) {
-    where.push(`(${segments.map(() => "customer_segment LIKE ?").join(" OR ")})`);
-    segments.forEach((s) => binds.push(`%${s}%`));
-  }
-  if (products.length) {
-    where.push(`(${products.map(() => "(product_categories LIKE ? OR products_services LIKE ?)").join(" OR ")})`);
-    products.forEach((p) => binds.push(`%${p}%`, `%${p}%`));
-  }
-  if (minScore > 0) { where.push("lead_score >= ?"); binds.push(minScore); }
-  if (hasEmail) where.push("email IS NOT NULL AND email != ''");
-  const clause = `WHERE ${where.join(" AND ")}`;
+  const { clause, binds } = segmentClause(filters, { requireCompleted: true, requireEmail: hasEmail });
 
   if (action === "queue") {
     // Reset the filtered set for re-research (海选 → 再处理).
@@ -886,7 +895,16 @@ interface SecretDefinition {
 
 // Provider pools share one definition with indexed: true (40 keys each).
 // Searlo/Tavily/Exa keep their historical pool sizes.
+// Panel Config 放在最前：分组按数组顺序渲染，避免被 500+ 个 AI Key 字段沉底。
 const SECRET_DEFINITIONS: SecretDefinition[] = [
+  { name: "GMAIL_OAUTH_CLIENT_ID", label: "Gmail OAuth 客户端 ID（OAuth 令牌发信必需）", group: "Panel Config" },
+  { name: "GMAIL_OAUTH_CLIENT_SECRET", label: "Gmail OAuth 客户端密钥（桌面应用可为空）", group: "Panel Config" },
+  { name: "GMAIL_DAILY_LIMIT", label: "Gmail 每日发送上限（默认 400）", group: "Panel Config" },
+  { name: "GMAIL_SEND_DELAY_MS", label: "发信间隔毫秒（默认 3000）", group: "Panel Config" },
+  { name: "CLOUDFLARE_API_TOKEN", label: "Cloudflare API Token (面板引导)", group: "Panel Config" },
+  { name: "CLOUDFLARE_ACCOUNT_ID", label: "Cloudflare Account ID", group: "Panel Config" },
+  { name: "WORKER_SCRIPT_NAME", label: "Worker 脚本名 (默认 crm-ai-worker)", group: "Panel Config" },
+  { name: "ADMIN_PANEL_TOKEN", label: "面板登录 Token (改后需重新登录)", group: "Panel Config" },
   { name: "GEMINI_API_KEY", label: "Gemini", group: "AI Provider Keys", indexed: true },
   { name: "GROQ_API_KEY", label: "Groq", group: "AI Provider Keys", indexed: true },
   { name: "CEREBRAS_API_KEY", label: "Cerebras", group: "AI Provider Keys", indexed: true },
@@ -917,10 +935,6 @@ const SECRET_DEFINITIONS: SecretDefinition[] = [
   { name: "MISTRAL_RPM", label: "Mistral 总RPM", group: "RPM Overrides" },
   { name: "DEEPSEEK_RPM", label: "DeepSeek 总RPM", group: "RPM Overrides" },
   { name: "OPENROUTER_RPM", label: "OpenRouter 总RPM", group: "RPM Overrides" },
-  { name: "CLOUDFLARE_API_TOKEN", label: "Cloudflare API Token (面板引导)", group: "Panel Config" },
-  { name: "CLOUDFLARE_ACCOUNT_ID", label: "Cloudflare Account ID", group: "Panel Config" },
-  { name: "WORKER_SCRIPT_NAME", label: "Worker 脚本名 (默认 crm-ai-worker)", group: "Panel Config" },
-  { name: "ADMIN_PANEL_TOKEN", label: "面板登录 Token (改后需重新登录)", group: "Panel Config" },
 ];
 
 const INDEXED_SECRET_MAX = 40;
@@ -1066,7 +1080,7 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
     if (path.startsWith("/admin/api/outreach/settings/") && request.method === "PATCH") {
       const brandName = decodeURIComponent(path.split("/").pop() || "");
       const body = (await request.json()) as Record<string, unknown>;
-      const updates: { company_intro?: string; enabled?: boolean; sender_email?: string | null; sender_name?: string | null; signature?: string | null } = {};
+      const updates: { company_intro?: string; enabled?: boolean; sender_email?: string | null; sender_name?: string | null; company_entity?: string | null; signature?: string | null; gmail_account?: string | null } = {};
       if (typeof body.company_intro === "string") updates.company_intro = body.company_intro;
       if (typeof body.enabled === "boolean") updates.enabled = body.enabled;
       if (typeof body.sender_email === "string") {
@@ -1079,9 +1093,19 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
       if (typeof body.sender_name === "string") {
         updates.sender_name = body.sender_name.replace(/[\r\n]+/g, " ").trim() || null;
       }
+      if (typeof body.company_entity === "string") {
+        updates.company_entity = body.company_entity.replace(/[\r\n]+/g, " ").trim() || null;
+      }
       if (typeof body.signature === "string") {
         if (body.signature.length > 5_000) return jsonResponse({ detail: "signature is too long" }, 400);
         updates.signature = body.signature || null;
+      }
+      if (typeof body.gmail_account === "string") {
+        const ga = body.gmail_account.trim();
+        if (ga && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ga)) {
+          return jsonResponse({ detail: "gmail_account 必须是有效的邮箱地址（发信账号池中的服务账号或 OAuth 发件邮箱）" }, 400);
+        }
+        updates.gmail_account = ga || null;
       }
       await updateBrandSetting(env, brandName, updates);
       return jsonResponse({ ok: true });
@@ -1093,15 +1117,15 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
       const brand = url.searchParams.get("brand");
       if (!brand) return jsonResponse({ detail: "brand is required" }, 400);
       const rows = await env.DB.prepare(
-        `SELECT id, brand_name, filename, mime_type, size_bytes, created_at
+        `SELECT id, brand_name, filename, mime_type, size_bytes, language, created_at
          FROM outreach_attachments WHERE brand_name = ? ORDER BY created_at`,
       ).bind(brand).all();
       return jsonResponse({ attachments: rows.results ?? [] });
     }
-    // POST /admin/api/outreach/attachments - upload (JSON: brand, filename, mime_type, content_base64)
+    // POST /admin/api/outreach/attachments - upload (JSON: brand, filename, mime_type, content_base64, language)
     if (path === "/admin/api/outreach/attachments" && request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as {
-        brand?: string; filename?: string; mime_type?: string; content_base64?: string;
+        brand?: string; filename?: string; mime_type?: string; content_base64?: string; language?: string;
       };
       if (typeof body.brand !== "string" || typeof body.filename !== "string" || typeof body.content_base64 !== "string" || !body.brand.trim() || !body.filename.trim() || !body.content_base64.trim()) {
         return jsonResponse({ detail: "brand, filename and content_base64 are required strings" }, 400);
@@ -1122,21 +1146,149 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
       if (body.mime_type !== undefined && (typeof body.mime_type !== "string" || !/^[\w.+-]+\/[\w.+-]+$/.test(body.mime_type))) {
         return jsonResponse({ detail: "附件 MIME 类型无效" }, 400);
       }
+      // Language tag: ISO 639-1 code (es/de/fr/…) or "all" for universal
+      // attachments. Empty/missing = "all" so existing callers keep working.
+      const language = (typeof body.language === "string" ? body.language.trim().toLowerCase() : "") || "all";
+      if (!/^[a-z]{2,3}$/.test(language) && language !== "all") {
+        return jsonResponse({ detail: "language 必须是 2-3 位语言代码（如 es）或 all" }, 400);
+      }
       const count = await env.DB.prepare(
         "SELECT COUNT(*) AS cnt FROM outreach_attachments WHERE brand_name = ?",
       ).bind(body.brand.trim()).first<{ cnt: number }>();
       if ((count?.cnt ?? 0) >= 5) return jsonResponse({ detail: "每个品牌最多 5 个附件" }, 400);
       await env.DB.prepare(
-        `INSERT INTO outreach_attachments (brand_name, filename, mime_type, size_bytes, content_base64)
-         VALUES (?, ?, ?, ?, ?)`,
-      ).bind(body.brand.trim(), body.filename.trim().slice(0, 200), body.mime_type || "application/octet-stream", sizeBytes, b64).run();
-      return jsonResponse({ ok: true, size_bytes: sizeBytes });
+        `INSERT INTO outreach_attachments (brand_name, filename, mime_type, size_bytes, content_base64, language)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).bind(body.brand.trim(), body.filename.trim().slice(0, 200), body.mime_type || "application/octet-stream", sizeBytes, b64, language).run();
+      return jsonResponse({ ok: true, size_bytes: sizeBytes, language });
     }
     // DELETE /admin/api/outreach/attachments/:id
     if (path.startsWith("/admin/api/outreach/attachments/") && request.method === "DELETE") {
       const id = Number(path.split("/").pop());
       if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
       await env.DB.prepare("DELETE FROM outreach_attachments WHERE id = ?").bind(id).run();
+      return jsonResponse({ ok: true });
+    }
+
+    // ── Gmail sender account pool ──
+    // GET /admin/api/gmail/accounts - list (never returns private keys)
+    if (path === "/admin/api/gmail/accounts" && request.method === "GET") {
+      const rows = await env.DB.prepare(
+        `SELECT id, label, credential_type, client_email, delegated_domain, daily_limit, enabled, last_error, cooldown_until, created_at
+         FROM gmail_accounts ORDER BY id`,
+      ).all().catch(() => ({ results: [] }));
+      const accounts = (rows.results ?? []) as Array<Record<string, unknown>>;
+      // Per-account sent-today for the panel quota cards.
+      for (const a of accounts) {
+        const cnt = await env.DB.prepare(
+          `SELECT COUNT(*) AS cnt FROM gmail_send_log WHERE date(sent_at) = date('now') AND status = 'sent' AND sender_client_email = ?`,
+        ).bind(String(a.client_email)).first<{ cnt: number }>().catch(() => null);
+        a.sent_today = cnt?.cnt ?? 0;
+      }
+      return jsonResponse({ accounts });
+    }
+    // POST /admin/api/gmail/accounts - add (JSON: label, credential_type, client_email, private_key, delegated_domain?, daily_limit?)
+    if (path === "/admin/api/gmail/accounts" && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      const clientEmail = typeof body.client_email === "string" ? body.client_email.trim() : "";
+      const privateKey = typeof body.private_key === "string" ? body.private_key.trim() : "";
+      const credentialType = body.credential_type === "oauth_refresh" ? "oauth_refresh" : "service_account";
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clientEmail)) {
+        return jsonResponse({ detail: credentialType === "oauth_refresh"
+          ? "client_email 必须是发件邮箱（OAuth 令牌账号绑定该邮箱）"
+          : "client_email 必须是服务账号邮箱（…@….iam.gserviceaccount.com）" }, 400);
+      }
+      if (credentialType === "service_account") {
+        if (!privateKey.includes("PRIVATE KEY")) {
+          return jsonResponse({ detail: "private_key 必须是 PEM 格式私钥（-----BEGIN PRIVATE KEY-----）" }, 400);
+        }
+      } else {
+        // Refresh tokens are opaque URL-safe strings ~100+ chars; catch obvious mistakes.
+        if (privateKey.length < 40 || /[\s<>"]/.test(privateKey)) {
+          return jsonResponse({ detail: "private_key 应粘贴 OAuth refresh_token（一长串无空格字符）" }, 400);
+        }
+      }
+      const dailyLimitRaw = Number(body.daily_limit);
+      const dailyLimitVal = Number.isSafeInteger(dailyLimitRaw) && dailyLimitRaw > 0 ? dailyLimitRaw : null;
+      // Quick-reference workspace domain (from the From mailbox or manual input).
+      const delegatedDomain = typeof body.delegated_domain === "string" && body.delegated_domain.trim()
+        ? body.delegated_domain.trim().slice(0, 200)
+        : clientEmail.includes("@") && !clientEmail.endsWith(".iam.gserviceaccount.com")
+          ? clientEmail.split("@")[1] || null
+          : null;
+      try {
+        await env.DB.prepare(
+          `INSERT INTO gmail_accounts (label, credential_type, client_email, private_key, delegated_domain, daily_limit, enabled)
+           VALUES (?, ?, ?, ?, ?, ?, 1)`,
+        ).bind(
+          typeof body.label === "string" ? body.label.trim().slice(0, 100) || null : null,
+          credentialType,
+          clientEmail,
+          privateKey,
+          delegatedDomain,
+          dailyLimitVal,
+        ).run();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes("UNIQUE")) return jsonResponse({ detail: "该服务账号已存在" }, 409);
+        return jsonResponse({ detail: `保存失败：${msg}` }, 500);
+      }
+      return jsonResponse({ ok: true });
+    }
+    // POST /admin/api/gmail/accounts/:id/test - verify the key by requesting a Gmail token
+    if (path.startsWith("/admin/api/gmail/accounts/") && path.endsWith("/test") && request.method === "POST") {
+      const id = Number(path.split("/")[path.split("/").length - 2]);
+      if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
+      const acc = await env.DB.prepare(
+        "SELECT credential_type, client_email, private_key FROM gmail_accounts WHERE id = ?",
+      ).bind(id).first<{ credential_type: string | null; client_email: string; private_key: string }>();
+      if (!acc) return jsonResponse({ detail: "Account not found" }, 404);
+      const credType = acc.credential_type === "oauth_refresh" ? "oauth_refresh" as const : "service_account" as const;
+      try {
+        await getAccessToken(env, acc.client_email, acc.private_key, acc.client_email, credType);
+        await noteGmailAccountResult(env, acc.client_email, true);
+        return jsonResponse({ ok: true, detail: credType === "oauth_refresh" ? "refresh token 有效，token 获取成功" : "私钥有效，token 获取成功" });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        await noteGmailAccountResult(env, acc.client_email, false, msg);
+        return jsonResponse({ ok: false, detail: msg }, 200);
+      }
+    }
+    // PATCH /admin/api/gmail/accounts/:id - toggle enabled / daily_limit / label
+    if (path.startsWith("/admin/api/gmail/accounts/") && request.method === "PATCH") {
+      const id = Number(path.split("/").pop());
+      if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
+      const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      const sets: string[] = [];
+      const binds: unknown[] = [];
+      if (typeof body.enabled === "boolean") {
+        sets.push("enabled = ?");
+        binds.push(body.enabled ? 1 : 0);
+        if (body.enabled) {
+          sets.push("cooldown_until = NULL");
+          sets.push("last_error = NULL");
+        }
+      }
+      if (typeof body.label === "string") {
+        sets.push("label = ?");
+        binds.push(body.label.trim().slice(0, 100) || null);
+      }
+      if (body.daily_limit !== undefined) {
+        const n = Number(body.daily_limit);
+        sets.push("daily_limit = ?");
+        binds.push(Number.isSafeInteger(n) && n > 0 ? n : null);
+      }
+      if (sets.length === 0) return jsonResponse({ detail: "No updates" }, 400);
+      sets.push("updated_at = CURRENT_TIMESTAMP");
+      binds.push(id);
+      await env.DB.prepare(`UPDATE gmail_accounts SET ${sets.join(", ")} WHERE id = ?`).bind(...binds).run();
+      return jsonResponse({ ok: true });
+    }
+    // DELETE /admin/api/gmail/accounts/:id
+    if (path.startsWith("/admin/api/gmail/accounts/") && request.method === "DELETE") {
+      const id = Number(path.split("/").pop());
+      if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
+      await env.DB.prepare("DELETE FROM gmail_accounts WHERE id = ?").bind(id).run();
       return jsonResponse({ ok: true });
     }
 
@@ -1185,11 +1337,12 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
         params.push(body.brand);
       }
       const drafts = await env.DB.prepare(
-        `SELECT e.id, e.email_to, e.subject, e.body, e.brand_name, s.sender_email, s.sender_name
+        `SELECT e.id, e.email_to, e.subject, e.body, e.brand_name, s.sender_email, s.sender_name, s.gmail_account, c.country
          FROM outreach_emails e
          LEFT JOIN outreach_settings s ON s.brand_name = e.brand_name
+         LEFT JOIN customers c ON c.id = e.customer_id
          ${clause} ORDER BY e.id LIMIT ?`,
-      ).bind(...params, limit).all<{ id: number; email_to: string; subject: string | null; body: string | null; brand_name: string | null; sender_email: string | null; sender_name: string | null }>();
+      ).bind(...params, limit).all<{ id: number; email_to: string; subject: string | null; body: string | null; brand_name: string | null; sender_email: string | null; sender_name: string | null; gmail_account: string | null; country: string | null }>();
 
       const quota = await getQuota(env);
       const delayMs = sendDelayMs(env);
@@ -1206,6 +1359,10 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
             fromEmail: draft.sender_email,
             fromName: draft.sender_name,
             brandName: draft.brand_name,
+            // Spanish customers get the Spanish catalog, etc.
+            attachmentLanguage: attachmentLangForCountry(draft.country),
+            // Brand-bound service account (empty = auto-pick from the pool).
+            gmailAccount: draft.gmail_account,
           });
           if (r.ok) sent++;
           results.push({ id: draft.id, ok: r.ok, error: r.error });
@@ -1245,8 +1402,12 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
       const id = Number(path.split("/")[path.split("/").length - 2]);
       if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
       const row = await env.DB.prepare(
-        "SELECT id, email_to, subject, body, status, brand_name FROM outreach_emails WHERE id = ?",
-      ).bind(id).first<{ id: number; email_to: string; subject: string | null; body: string | null; status: string; brand_name: string | null }>();
+        `SELECT e.id, e.email_to, e.subject, e.body, e.status, e.brand_name, c.country, s.gmail_account
+         FROM outreach_emails e
+         LEFT JOIN customers c ON c.id = e.customer_id
+         LEFT JOIN outreach_settings s ON s.brand_name = e.brand_name
+         WHERE e.id = ?`,
+      ).bind(id).first<{ id: number; email_to: string; subject: string | null; body: string | null; status: string; brand_name: string | null; country: string | null; gmail_account: string | null }>();
       if (!row) return jsonResponse({ detail: "Email not found" }, 404);
       if (row.status !== "draft") return jsonResponse({ detail: "只有草稿可以发送" }, 400);
       // Resolve the sending identity from the email's brand (falls back to
@@ -1260,7 +1421,13 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
         fromEmail = brand?.sender_email ?? null;
         fromName = brand?.sender_name ?? null;
       }
-      const result = await sendOutreachEmail(env, row, { fromEmail, fromName, brandName: row.brand_name });
+      const result = await sendOutreachEmail(env, row, {
+        fromEmail,
+        fromName,
+        brandName: row.brand_name,
+        attachmentLanguage: attachmentLangForCountry(row.country),
+        gmailAccount: row.gmail_account,
+      });
       const quota = await getQuota(env);
       return jsonResponse({ ok: result.ok, error: result.error, gmail_message_id: result.gmail_message_id, from: fromEmail, quota });
     }
@@ -1277,6 +1444,157 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     return jsonResponse({ detail: `Outreach API Error: ${msg}` }, 500);
+  }
+}
+
+// ── 定向群发 API (targeted outreach: groups + resumable campaigns) ───────
+// Every write here is gated on the same filters as the preview, and a campaign
+// only ever touches customers that were snapshotted into its members table —
+// so "全部发送" is always a bounded, auditable set rather than a live query
+// over a table that is still being rewritten by the research pipeline.
+function parseBatchSize(value: unknown, fallback = 10): number {
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 1) return fallback;
+  return Math.min(n, 50);
+}
+
+async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
+  const body = (await request.json().catch(() => ({}))) as unknown;
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new Error("Invalid JSON body");
+  }
+  return body as Record<string, unknown>;
+}
+
+async function handleCampaignApi(request: Request, env: AdminEnv): Promise<Response> {
+  try {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // POST /admin/api/outreach/segment-preview — count a customer group before
+    // committing any AI or send budget to it.
+    if (path === "/admin/api/outreach/segment-preview" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      const filters = parseSegmentFilters(body.filters ?? body);
+      const brand = typeof body.brand === "string" ? body.brand.trim() || null : null;
+      return jsonResponse(await previewSegment(env, filters, brand));
+    }
+
+    // ── Saved groups (可复用客群) ──
+    if (path === "/admin/api/outreach/groups" && request.method === "GET") {
+      return jsonResponse({ groups: await listGroups(env) });
+    }
+    if (path === "/admin/api/outreach/groups" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      const id = await createGroup(env, {
+        name: String(body.name ?? ""),
+        description: typeof body.description === "string" ? body.description : null,
+        filters: body.filters,
+      });
+      return jsonResponse({ ok: true, id });
+    }
+    if (path.startsWith("/admin/api/outreach/groups/") && request.method === "PATCH") {
+      const id = Number(path.split("/").pop());
+      if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
+      const body = await readJsonBody(request);
+      await updateGroup(env, id, body);
+      return jsonResponse({ ok: true });
+    }
+    if (path.startsWith("/admin/api/outreach/groups/") && request.method === "DELETE") {
+      const id = Number(path.split("/").pop());
+      if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
+      await deleteGroup(env, id);
+      return jsonResponse({ ok: true });
+    }
+
+    // ── Campaigns (群发任务) ──
+    if (path === "/admin/api/outreach/campaigns" && request.method === "GET") {
+      return jsonResponse({ campaigns: await listCampaigns(env) });
+    }
+    if (path === "/admin/api/outreach/campaigns" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      const brandName = String(body.brand ?? "");
+      let filters: ReturnType<typeof parseSegmentFilters>;
+      let groupId: number | null = null;
+      let groupName: string | null = null;
+      if (body.group_id !== undefined && body.group_id !== null && body.group_id !== "") {
+        const gid = Number(body.group_id);
+        if (!Number.isSafeInteger(gid) || gid <= 0) return jsonResponse({ detail: "Invalid group_id" }, 400);
+        const group = await env.DB.prepare(
+          "SELECT id, name, filters FROM outreach_groups WHERE id = ?",
+        ).bind(gid).first<{ id: number; name: string; filters: string }>();
+        if (!group) return jsonResponse({ detail: "客群不存在" }, 404);
+        // A campaign launched from a saved group uses the group's stored
+        // filters, so the preview the operator saw cannot drift from the send.
+        filters = deserializeFilters(group.filters);
+        groupId = group.id;
+        groupName = group.name;
+      } else {
+        filters = parseSegmentFilters(body.filters ?? body);
+      }
+      const created = await createCampaign(env, {
+        name: body.name,
+        brandName,
+        groupId,
+        groupName,
+        filters,
+      });
+      return jsonResponse({ ok: true, ...created });
+    }
+
+    // /admin/api/outreach/campaigns/:id[/members|/generate|/send|/status]
+    const campaignMatch = path.match(/^\/admin\/api\/outreach\/campaigns\/(\d+)(\/[a-z]+)?$/);
+    if (campaignMatch) {
+      const id = Number(campaignMatch[1]);
+      if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
+      const action = campaignMatch[2] ?? "";
+
+      if (action === "" && request.method === "GET") {
+        const campaign = await getCampaign(env, id);
+        if (!campaign) return jsonResponse({ detail: "群发任务不存在" }, 404);
+        return jsonResponse({ campaign });
+      }
+      if (action === "" && request.method === "DELETE") {
+        await deleteCampaign(env, id);
+        return jsonResponse({ ok: true });
+      }
+      if (action === "/members" && request.method === "GET") {
+        const campaign = await getCampaign(env, id);
+        if (!campaign) return jsonResponse({ detail: "群发任务不存在" }, 404);
+        const result = await listCampaignMembers(env, id, {
+          status: url.searchParams.get("status") || undefined,
+          limit: Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200),
+          offset: Math.max(Number(url.searchParams.get("offset")) || 0, 0),
+        });
+        return jsonResponse({ campaign, ...result });
+      }
+      if (action === "/generate" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        return jsonResponse(await runCampaignGenerate(env, id, parseBatchSize(body.limit, 10)));
+      }
+      if (action === "/send" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        return jsonResponse(await runCampaignSend(env, id, parseBatchSize(body.limit, 10)));
+      }
+      if (action === "/status" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const status = String(body.status ?? "");
+        if (status !== "draft" && status !== "paused" && status !== "done") {
+          return jsonResponse({ detail: "status must be draft, paused or done" }, 400);
+        }
+        await setCampaignStatus(env, id, status);
+        return jsonResponse({ ok: true });
+      }
+    }
+
+    return jsonResponse({ detail: "Not Found" }, 404);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    // Input problems (bad filter JSON, unknown brand, empty match) are the
+    // operator's to fix — 400 keeps the panel message actionable instead of
+    // reporting a server fault.
+    const isUserError = /不能为空|必须是|最多|不存在|未启用|尚未配置|没有匹配|已存在|超出|Invalid/.test(msg);
+    return jsonResponse({ detail: msg }, isUserError ? 400 : 500);
   }
 }
 
@@ -1406,7 +1724,18 @@ export async function handleAdminRequest(
     return handleSecretsApi(request, env);
   }
 
-  if (url.pathname.startsWith("/admin/api/outreach")) {
+  // Outreach + Gmail sender pool: both live in handleOutreachApi. The pool was
+  // unreachable (404) when only the outreach prefix was routed here.
+  // 定向群发 (segment-preview / groups / campaigns) is checked first because
+  // handleCampaignApi owns those paths; everything else falls through.
+  if (url.pathname.startsWith("/admin/api/outreach/segment-preview")
+    || url.pathname.startsWith("/admin/api/outreach/groups")
+    || url.pathname.startsWith("/admin/api/outreach/campaigns")) {
+    if (!(await isAuthenticated(request, env))) return authFailure(request);
+    return handleCampaignApi(request, env);
+  }
+
+  if (url.pathname.startsWith("/admin/api/outreach") || url.pathname.startsWith("/admin/api/gmail")) {
     if (!(await isAuthenticated(request, env))) return authFailure(request);
     return handleOutreachApi(request, env);
   }
@@ -1590,13 +1919,36 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 .email-card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin-bottom:12px}.email-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.email-subject{font-weight:700;font-size:15px;color:#111827}.email-meta{font-size:12px;color:#6b7280;margin-bottom:8px}.email-body{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px;white-space:pre-wrap;font-size:13px;line-height:1.6;color:#374151}
 .badge{display:inline-block;border-radius:20px;padding:3px 10px;font-size:12px;font-weight:600}.badge-draft{background:#fef3c7;color:#92400e}.badge-sent{background:#d1fae5;color:#065f46}
 .toast{position:fixed;top:20px;right:20px;padding:14px 20px;border-radius:10px;color:#fff;font-weight:600;z-index:9999;display:none}.toast.success{background:#059669}.toast.error{background:#dc2626}
+.cp-bar{height:8px;border-radius:4px;background:#e2e8f0;overflow:hidden;display:flex;margin:6px 0}.cp-seg{height:100%}.cp-sent{background:#059669}.cp-generated{background:#0ea5e9}.cp-pending{background:#cbd5e1}.cp-failed{background:#dc2626}.cp-legend{font-size:12px;color:#6b7280;display:flex;gap:12px;flex-wrap:wrap}.cp-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px}
+.cp-card{border:1px solid #d1d5db;border-radius:10px;padding:14px;margin-bottom:12px;background:#fff}.cp-card.done{border-color:#99f6e4;background:#f0fdfa}
+.cp-table{width:100%;border-collapse:collapse;margin-top:8px;font-size:13px}.cp-table th,.cp-table td{text-align:left;padding:6px 8px;border-bottom:1px solid #f1f5f9}.cp-table th{background:#f8fafc;font-weight:600;white-space:nowrap}
+.cp-chip{display:inline-block;background:#f1f5f9;border-radius:20px;padding:2px 8px;font-size:11px;margin:2px}
+.cp-hint{font-size:12px;color:#6b7280;line-height:1.7;margin:6px 0}
 @media(max-width:700px){.top{flex-direction:column}.stats{grid-template-columns:1fr 1fr}.email-header{flex-direction:column;align-items:flex-start;gap:6px}}
 </style></head><body>
 <header class="top"><h1>📧 开发信管理</h1><div style="display:flex;gap:10px;align-items:center"><a href="/admin" style="color:#fff;text-decoration:none;font-weight:600">← 返回客户管理</a><form method="post" action="/admin/logout"><button class="btn btn-sm" style="background:rgba(255,255,255,.2);color:#fff" type="submit">退出</button></form></div></header>
 <main class="wrap">
-<div class="tabs"><div class="tab active" data-tab="settings">⚙️ 品牌设置</div><div class="tab" data-tab="generate">🤖 生成开发信</div><div class="tab" data-tab="emails">📬 开发信列表</div></div>
+<div class="tabs"><div class="tab active" data-tab="settings">⚙️ 品牌设置</div><div class="tab" data-tab="gmail">📮 发信账号</div><div class="tab" data-tab="generate">🤖 生成开发信</div><div class="tab" data-tab="campaign">🎯 定向群发</div><div class="tab" data-tab="emails">📬 开发信列表</div></div>
 <div id="tab-settings" class="tab-content">
 <div class="section-title">品牌配置</div><div id="brandsArea"></div>
+</div>
+<div id="tab-gmail" class="tab-content" style="display:none">
+<div class="section-title">📮 Gmail 发信账号池</div>
+<div class="panel"><p style="font-size:13px;color:#475569;margin:0 0 10px">添加多个发信账号组成账号池，每封邮件自动选择剩余配额最多的健康账号；品牌可单独绑定账号。被 Google 拒绝的账号自动冷却 6 小时。每日总配额 = 各账号配额之和。</p>
+<details style="margin:0 0 10px;font-size:13px;color:#334155"><summary style="cursor:pointer;font-weight:600">🟢 如何获取 OAuth 令牌（refresh_token）？点开看步骤</summary>
+<ol style="margin:8px 0 0 18px;line-height:1.8">
+<li>Google Cloud Console → 启用 <b>Gmail API</b>；OAuth 同意屏幕选 <b>内部</b>，范围加 <code>gmail.send</code>；</li>
+<li>凭据 → 创建 <b>OAuth 客户端 ID</b>，类型选 <b>桌面应用</b>，记下客户端 ID/密钥；</li>
+<li>把客户端 ID 配到 Worker：<code>npx wrangler secret put GMAIL_OAUTH_CLIENT_ID</code>（密钥同理 <code>GMAIL_OAUTH_CLIENT_SECRET</code>）；</li>
+<li>本地运行 <code>python3 scripts/get-gmail-refresh-token.py --client-id …</code>，浏览器登录发件邮箱并授权，得到 refresh_token；</li>
+<li>在本页凭据类型选 <b>OAuth 令牌</b>，粘贴邮箱 + refresh_token → 添加 → 点 🔌 测试。</li>
+</ol>
+<p style="margin:6px 0 0;color:#6b7280">完整说明见仓库 <code>crm-ai-worker/docs/gmail-account-setup.md</code>。服务账号需全域委托；OAuth 令牌不需要，适合少量固定发件邮箱。</p></details>
+<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><select id="gaType" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"><option value="oauth_refresh">OAuth 令牌（推荐，无需服务账号密钥）</option><option value="service_account">服务账号（需全域委托）</option></select><input id="gaLabel" placeholder="备注（如：主账号）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:150px"><input id="gaEmail" class="ga-email-input" placeholder="发件邮箱 helen@isupfactory.com" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;flex:1;min-width:240px;font-family:monospace"><input id="gaLimit" type="number" min="1" placeholder="每日配额（默认 400）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:150px"></div>
+<div style="margin-top:8px"><textarea id="gaKey" rows="3" placeholder="粘贴 refresh_token（一长串无空格字符）" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;font-family:monospace"></textarea></div>
+<div style="margin-top:8px;display:flex;gap:8px;align-items:center"><button class="btn btn-primary" id="gaAdd">➕ 添加账号</button><span style="font-size:12px;color:#6b7280">私钥仅存入 D1，不会回显</span></div>
+<div id="gaMsg" style="margin-top:8px;font-size:13px"></div></div>
+<div id="gaList"></div>
 </div>
 <div id="tab-generate" class="tab-content" style="display:none">
 <div class="section-title">生成开发信</div>
@@ -1606,6 +1958,50 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 <select id="genLimit" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit"><option value="5">5封</option><option value="10" selected>10封</option><option value="20">20封</option><option value="50">50封</option></select>
 <button class="btn btn-primary" id="genBtn">🚀 开始生成</button>
 </div><div id="genMsg" style="margin-top:12px"></div></div>
+</div>
+<div id="tab-campaign" class="tab-content" style="display:none">
+<div class="section-title">🎯 定向群发（按客户群体群发）</div>
+<div class="panel">
+<p style="font-size:13px;color:#475569;margin:0 0 10px">用与「客户管理 → 海选过滤器」相同的条件圈出一群客户，保存为可复用客群，创建群发任务后可<b>分批生成开发信、分批发送</b>。每批都记进度，关掉页面随时续发。</p>
+<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+<select id="cgBrand" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;min-width:180px"></select>
+<select id="cgGroup" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;min-width:190px"><option value="">— 不使用已保存客群 —</option></select>
+<button class="btn btn-sm btn-secondary" id="cgLoadGroup">载入客群条件</button>
+<button class="btn btn-sm btn-secondary" id="cgDeleteGroup" style="display:none">删除该客群</button>
+</div>
+<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+<input id="cgCountries" placeholder="国家（逗号分隔）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:170px">
+<input id="cgSegments" placeholder="细分（如 Distributor）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:170px">
+<input id="cgProducts" placeholder="产品（如 SUP）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:140px">
+<input id="cgKeywords" placeholder="关键词（公司/描述）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:160px">
+<input id="cgMinScore" type="number" min="0" max="100" placeholder="最低分" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:78px">
+<label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="cgExcludeSent" checked> 排除本品牌已发送</label>
+<button class="btn btn-primary btn-sm" id="cgPreview">🔍 统计客群</button>
+</div>
+<p class="cp-hint">只统计已完成研究（<code>status=completed</code>）且<b>有邮箱</b>的客户——没有研究档案无法生成个性化开发信，没有邮箱无法发送。手工勾选的客户会与其余条件取交集。</p>
+<div id="cgPickedWrap" style="margin-top:8px">
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span style="font-size:13px">手工勾选：</span><span id="cgPicked" class="cp-chip"></span><button class="btn btn-sm btn-secondary" id="cgClearPicked">清空</button></div>
+<div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap"><input id="cgPickSearch" placeholder="搜索公司名/网址/国家以勾选客户" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;flex:1;min-width:220px"><button class="btn btn-sm btn-secondary" id="cgPickSearchBtn">🔎 搜索并勾选</button></div>
+<div id="cgPickResults" style="max-height:230px;overflow:auto;margin-top:6px"></div>
+</div>
+<div id="cgPreviewBox" style="margin-top:10px"></div>
+<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px;padding-top:12px;border-top:1px solid #e5e7eb">
+<input id="cgGroupName" placeholder="客群名称（保存后可复用）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:220px">
+<button class="btn btn-sm btn-secondary" id="cgSaveGroup">💾 保存为客群</button>
+<span style="width:1px;height:24px;background:#e5e7eb"></span>
+<input id="cgName" placeholder="群发任务名称（可选）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:200px">
+<button class="btn btn-primary btn-sm" id="cgCreate">🚀 创建群发任务</button>
+</div>
+<div id="cgMsg" style="margin-top:10px"></div>
+</div>
+<div class="section-title" style="margin-top:22px">群发任务</div>
+<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+<label style="font-size:13px">每批数量</label>
+<select id="cgBatch" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"><option value="5">5 封</option><option value="10" selected>10 封</option><option value="20">20 封</option><option value="30">30 封</option><option value="50">50 封</option></select>
+<button class="btn btn-sm btn-secondary" id="cgRefresh">刷新</button>
+<span id="cgQuota" style="font-size:13px;color:#475569"></span>
+</div>
+<div id="cgList"></div>
 </div>
 <div id="tab-emails" class="tab-content" style="display:none">
 <div class="stats" id="statsArea"></div>
@@ -1629,7 +2025,47 @@ function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){retur
 function api(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin/outreach';throw new Error('登录过期')}var ct=r.headers.get('content-type')||'';if(ct.indexOf('json')===-1){return r.text().then(function(t){throw new Error('非JSON响应: '+t.slice(0,100))})}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败');return d})})}
 
 // Tab switching
-document.querySelectorAll('.tab').forEach(function(tab){tab.onclick=function(){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tab-content').forEach(function(c){c.style.display='none'});tab.classList.add('active');document.getElementById('tab-'+tab.dataset.tab).style.display='block';if(tab.dataset.tab==='settings')loadBrands();if(tab.dataset.tab==='emails'){loadStats();loadEmails();loadQuota()}}});
+document.querySelectorAll('.tab').forEach(function(tab){tab.onclick=function(){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tab-content').forEach(function(c){c.style.display='none'});tab.classList.add('active');document.getElementById('tab-'+tab.dataset.tab).style.display='block';if(tab.dataset.tab==='settings')loadBrands();if(tab.dataset.tab==='gmail')loadGmailAccounts();if(tab.dataset.tab==='campaign'){loadCampaignBrand();loadGroups();loadCampaigns();loadQuota()}if(tab.dataset.tab==='emails'){loadStats();loadEmails();loadQuota()}}});
+
+// ── Gmail sender account pool ──
+var GA_TYPE_HINTS={
+  oauth_refresh:{email:'发件邮箱（如 helen@isupfactory.com）',key:'粘贴 refresh_token（一长串无空格字符，用本地脚本获取，见 docs/gmail-account-setup.md）'},
+  service_account:{email:'服务账号邮箱 …@….iam.gserviceaccount.com',key:'粘贴私钥 PEM（-----BEGIN PRIVATE KEY-----…）'}
+};
+document.getElementById('gaType').onchange=function(){
+  var t=this.value,h=GA_TYPE_HINTS[t];
+  document.querySelector('.ga-email-input').placeholder=h.email;
+  document.getElementById('gaKey').placeholder=h.key;
+};
+function loadGmailAccounts(){
+  api('/admin/api/gmail/accounts').then(function(d){
+    var list=document.getElementById('gaList');
+    if(!d.accounts.length){list.innerHTML='<div class="panel"><p style="color:#6b7280;margin:0">暂无账号。未添加时使用服务器 Secrets 中的 GMAIL_SERVICE_ACCOUNT_* 配置。</p></div>';return}
+    list.innerHTML=d.accounts.map(function(a){
+      var isOa=a.credential_type==='oauth_refresh';
+      var typeBadge=isOa?'<span style="font-size:11px;color:#0f766e;background:#ccfbf1;border-radius:10px;padding:1px 8px">OAuth 令牌</span>':'<span style="font-size:11px;color:#92400e;background:#fef3c7;border-radius:10px;padding:1px 8px">服务账号</span>';
+      var status=a.enabled?(a.cooldown_until?'<span style="color:#d97706">❄️ 冷却中（至 '+esc(a.cooldown_until)+'）</span>':'<span style="color:#059669">✅ 正常</span>'):'<span style="color:#dc2626">⛔ 已停用</span>';
+      var err=a.last_error?'<div style="font-size:12px;color:#b91c1c;margin-top:4px;word-break:break-all">最近错误：'+esc(a.last_error)+'</div>':'';
+      return '<div class="panel" style="padding:14px"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center"><div><b style="font-size:14px">'+esc(a.label||'（无备注）')+'</b> '+typeBadge+' <span style="font-family:monospace;font-size:12px;color:#475569">'+esc(a.client_email)+'</span></div><div style="display:flex;gap:6px;align-items:center">'+status+' <span style="font-size:12px;color:#475569">今日 '+a.sent_today+'/'+(a.daily_limit||'默认')+'</span> <button class="btn btn-sm btn-secondary ga-test" data-id="'+a.id+'">🔌 测试</button> <button class="btn btn-sm '+(a.enabled?'btn-danger':'btn-primary')+' ga-toggle" data-id="'+a.id+'" data-enabled="'+(a.enabled?1:0)+'">'+(a.enabled?'停用':'启用')+'</button> <button class="btn btn-sm btn-danger ga-del" data-id="'+a.id+'">删除</button></div></div>'+err+'</div>';
+    }).join('');
+    list.querySelectorAll('.ga-test').forEach(function(b){b.onclick=function(){b.disabled=true;b.textContent='⏳…';api('/admin/api/gmail/accounts/'+b.dataset.id+'/test',{method:'POST'}).then(function(r){showToast(r.detail,r.ok);loadGmailAccounts()}).catch(function(e){showToast(e.message,false);b.disabled=false;b.textContent='🔌 测试'})}});
+    list.querySelectorAll('.ga-toggle').forEach(function(b){b.onclick=function(){var enable=b.dataset.enabled==='0';api('/admin/api/gmail/accounts/'+b.dataset.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enable})}).then(function(){showToast(enable?'已启用':'已停用',true);loadGmailAccounts()}).catch(function(e){showToast(e.message,false)})}});
+    list.querySelectorAll('.ga-del').forEach(function(b){b.onclick=function(){if(!confirm('确定删除该发信账号？'))return;api('/admin/api/gmail/accounts/'+b.dataset.id,{method:'DELETE'}).then(function(){showToast('已删除',true);loadGmailAccounts()}).catch(function(e){showToast(e.message,false)})}});
+  }).catch(function(e){document.getElementById('gaList').innerHTML='<div class="panel"><p style="color:red">'+esc(e.message)+'</p></div>'});
+}
+document.getElementById('gaAdd').onclick=function(){
+  var type=document.getElementById('gaType').value;
+  var label=document.getElementById('gaLabel').value.trim();
+  var email=document.getElementById('gaEmail').value.trim();
+  var key=document.getElementById('gaKey').value.trim();
+  var limit=document.getElementById('gaLimit').value;
+  if(!email||!key){var m=document.getElementById('gaMsg');m.textContent='❌ 邮箱和凭据均为必填';m.style.color='#dc2626';return}
+  var btn=this;btn.disabled=true;btn.textContent='⏳ 保存中…';
+  api('/admin/api/gmail/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:label,credential_type:type,client_email:email,private_key:key,daily_limit:limit?Number(limit):undefined})})
+    .then(function(){document.getElementById('gaMsg').textContent='✅ 账号已添加';document.getElementById('gaMsg').style.color='#059669';document.getElementById('gaEmail').value='';document.getElementById('gaKey').value='';document.getElementById('gaLabel').value='';document.getElementById('gaLimit').value='';showToast('发信账号已添加',true);loadGmailAccounts()})
+    .catch(function(e){var m=document.getElementById('gaMsg');m.textContent='❌ '+e.message;m.style.color='#dc2626'})
+    .finally(function(){btn.disabled=false;btn.textContent='➕ 添加账号'});
+};
 
 // Brand settings
 function loadBrands(){
@@ -1638,8 +2074,10 @@ function loadBrands(){
     d.settings.forEach(function(b){
       h+='<div class="brand-card"><div class="brand-header"><div><span class="brand-name">'+esc(b.brand_name)+'</span> <span class="brand-category">'+esc(b.product_category)+'</span></div><label class="toggle"><input type="checkbox" '+(b.enabled?'checked':'')+' data-brand="'+esc(b.brand_name)+'" class="enable-toggle"><span class="slider"></span></label></div>'+
         '<label style="font-weight:600;font-size:13px;color:#475569">发件身份（From 邮箱 / 显示名）</label><div style="display:flex;gap:8px;margin-top:4px"><input class="sender-email" data-brand="'+esc(b.brand_name)+'" placeholder="sender@yourdomain.com" value="'+esc(b.sender_email||'')+'" style="flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"><input class="sender-name" data-brand="'+esc(b.brand_name)+'" placeholder="Toby | Afarer Team" value="'+esc(b.sender_name||'')+'" style="flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"></div>'+
+        '<label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">公司名义（邮件正文署名的公司主体，留空则用品牌名）</label><input class="company-entity" data-brand="'+esc(b.brand_name)+'" placeholder="SUP DIVISION OF QINGDAO VATRAD GROUP CO., LTD" value="'+esc(b.company_entity||'')+'" style="width:100%;margin-top:4px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px">'+
         '<label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件签名（原样附加在正文末尾）</label><textarea class="signature-textarea" data-brand="'+esc(b.brand_name)+'" style="width:100%;min-height:70px;margin-top:4px;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-family:monospace">'+esc(b.signature||'')+'</textarea>'+
-        '<label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件附件（最多 5 个，每个 ≤1.4MB，发送时自动附带）</label><div class="att-list" data-brand="'+esc(b.brand_name)+'" style="margin-top:4px;font-size:13px;color:#334155">加载中…</div><div style="display:flex;gap:8px;margin-top:6px;align-items:center"><input type="file" class="att-file" data-brand="'+esc(b.brand_name)+'" style="font-size:13px"><button class="btn btn-sm btn-primary att-upload" data-brand="'+esc(b.brand_name)+'">⬆ 上传附件</button></div>'+
+        '<label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件附件（最多 5 个，每个 ≤1.4MB；按收件人语言自动附带对应画册）</label><div class="att-list" data-brand="'+esc(b.brand_name)+'" style="margin-top:4px;font-size:13px;color:#334155">加载中…</div><div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap"><input type="file" class="att-file" data-brand="'+esc(b.brand_name)+'" style="font-size:13px"><select class="att-lang" data-brand="'+esc(b.brand_name)+'" style="padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"><option value="all">🌐 通用（所有客户）</option><option value="es">🇪🇸 西班牙语</option><option value="en">🇬🇧 英语</option><option value="de">🇩🇪 德语</option><option value="fr">🇫🇷 法语</option><option value="pt">🇵🇹 葡萄牙语</option><option value="it">🇮🇹 意大利语</option><option value="nl">🇳🇱 荷兰语</option><option value="ru">🇷🇺 俄语</option><option value="pl">🇵🇱 波兰语</option><option value="ar">🇸🇦 阿拉伯语</option><option value="ja">🇯🇵 日语</option><option value="ko">🇰🇷 韩语</option></select><button class="btn btn-sm btn-primary att-upload" data-brand="'+esc(b.brand_name)+'">⬆ 上传附件</button></div>'+
+        '<label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">绑定发信账号（📮 发信账号池中的账号，留空=自动分配）</label><input class="gmail-account" data-brand="'+esc(b.brand_name)+'" placeholder="留空自动分配，或填账号池中的邮箱（服务账号或 OAuth 发件邮箱）" value="'+esc(b.gmail_account||'')+'" style="width:100%;margin-top:4px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-family:monospace">'+
         '<label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">公司简介</label><textarea class="intro-textarea" data-brand="'+esc(b.brand_name)+'">'+esc(b.company_intro)+'</textarea><div style="margin-top:10px;text-align:right"><button class="btn btn-primary btn-sm save-brand" data-brand="'+esc(b.brand_name)+'">💾 保存配置</button></div></div>';
     });
     document.getElementById('brandsArea').innerHTML=h||'<p>暂无品牌配置</p>';
@@ -1663,12 +2101,14 @@ function loadBrands(){
         if(!input.files||!input.files[0]){showToast('请选择文件',false);return}
         var file=input.files[0];
         if(file.size>1400000){showToast('文件超过 1.4MB（D1 存储限制）',false);return}
+        var langSel=document.querySelector('.att-lang[data-brand="'+brand+'"]');
+        var language=langSel?langSel.value:'all';
         var btn=el;btn.disabled=true;btn.textContent='⏳ 上传中…';
         var reader=new FileReader();
         reader.onload=function(){
           var b64=reader.result.split(',')[1];
-          api('/admin/api/outreach/attachments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:brand,filename:file.name,mime_type:file.type||'application/octet-stream',content_base64:b64})})
-            .then(function(){showToast('附件已上传',true);loadAttachments(brand)})
+          api('/admin/api/outreach/attachments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:brand,filename:file.name,mime_type:file.type||'application/octet-stream',content_base64:b64,language:language})})
+            .then(function(){showToast('附件已上传（'+(LANG_LABELS[language]||language)+'）',true);loadAttachments(brand)})
             .catch(function(e){showToast(e.message,false)})
             .finally(function(){btn.disabled=false;btn.textContent='⬆ 上传附件';input.value=''});
         };
@@ -1682,7 +2122,9 @@ function loadBrands(){
         var se=document.querySelector('.sender-email[data-brand="'+brand+'"]');
         var sn=document.querySelector('.sender-name[data-brand="'+brand+'"]');
         var sg=document.querySelector('.signature-textarea[data-brand="'+brand+'"]');
-        api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({company_intro:ta.value,sender_email:se.value,sender_name:sn.value,signature:sg.value})})
+        var ce=document.querySelector('.company-entity[data-brand="'+brand+'"]');
+        var ga=document.querySelector('.gmail-account[data-brand="'+brand+'"]');
+        api('/admin/api/outreach/settings/'+encodeURIComponent(brand),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({company_intro:ta.value,sender_email:se.value,sender_name:sn.value,company_entity:ce.value,signature:sg.value,gmail_account:ga?ga.value:''})})
           .then(function(){showToast(brand+' 配置已保存（签名已更新）',true)})
           .catch(function(e){showToast(e.message,false)});
       };
@@ -1692,7 +2134,8 @@ function loadBrands(){
   });
 }
 
-function loadAttachments(brand){var box=document.querySelector('.att-list[data-brand="'+brand+'"]');if(!box)return;api('/admin/api/outreach/attachments?brand='+encodeURIComponent(brand)).then(function(d){if(!d.attachments.length){box.innerHTML='<span style="color:#6b7280">暂无附件</span>';return}box.innerHTML=d.attachments.map(function(a){return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0"><span>📄 '+esc(a.filename)+' ('+Math.round(a.size_bytes/1024)+' KB)</span><button class="btn btn-sm btn-danger att-del" data-id="'+a.id+'" data-brand="'+esc(brand)+'">删除</button></div>'}).join('');box.querySelectorAll('.att-del').forEach(function(btn){btn.onclick=function(){api('/admin/api/outreach/attachments/'+btn.dataset.id,{method:'DELETE'}).then(function(){showToast('附件已删除',true);loadAttachments(btn.dataset.brand)}).catch(function(e){showToast(e.message,false)})}})}).catch(function(){box.innerHTML='<span style="color:#6b7280">附件加载失败</span>'})}
+var LANG_LABELS={all:'🌐 通用',es:'🇪🇸 西班牙语',en:'🇬🇧 英语',de:'🇩🇪 德语',fr:'🇫🇷 法语',pt:'🇵🇹 葡萄牙语',it:'🇮🇹 意大利语',nl:'🇳🇱 荷兰语',ru:'🇷🇺 俄语',pl:'🇵🇱 波兰语',ar:'🇸🇦 阿拉伯语',ja:'🇯🇵 日语',ko:'🇰🇷 韩语'};
+function loadAttachments(brand){var box=document.querySelector('.att-list[data-brand="'+brand+'"]');if(!box)return;api('/admin/api/outreach/attachments?brand='+encodeURIComponent(brand)).then(function(d){if(!d.attachments.length){box.innerHTML='<span style="color:#6b7280">暂无附件</span>';return}box.innerHTML=d.attachments.map(function(a){var langLabel=LANG_LABELS[a.language]||(a.language?'🌐 '+esc(a.language):'🌐 通用');return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0"><span>📄 '+esc(a.filename)+' ('+Math.round(a.size_bytes/1024)+' KB) <span style="font-size:11px;color:#0f766e;background:#ccfbf1;border-radius:10px;padding:1px 8px;margin-left:4px">'+langLabel+'</span></span><button class="btn btn-sm btn-danger att-del" data-id="'+a.id+'" data-brand="'+esc(brand)+'">删除</button></div>'}).join('');box.querySelectorAll('.att-del').forEach(function(btn){btn.onclick=function(){api('/admin/api/outreach/attachments/'+btn.dataset.id,{method:'DELETE'}).then(function(){showToast('附件已删除',true);loadAttachments(btn.dataset.brand)}).catch(function(e){showToast(e.message,false)})}})}).catch(function(){box.innerHTML='<span style="color:#6b7280">附件加载失败</span>'})}
 
 // Generate
 api('/admin/api/outreach/settings').then(function(d){var sel=document.getElementById('genBrand');sel.innerHTML='';d.settings.forEach(function(b){if(b.enabled){var opt=document.createElement('option');opt.value=b.brand_name;opt.textContent=b.brand_name+' ('+b.product_category+')';sel.appendChild(opt)}});if(!sel.options.length){sel.innerHTML='<option value="">-- 请先启用品牌 --</option>'}});
@@ -1768,6 +2211,246 @@ document.getElementById('filterBrand').onchange=function(){emailState.offset=0;l
 document.getElementById('filterStatus').onchange=function(){emailState.offset=0;loadEmails()};
 document.getElementById('emailPrev').onclick=function(){if(emailState.offset>0){emailState.offset=Math.max(0,emailState.offset-emailState.limit);loadEmails()}};
 document.getElementById('emailNext').onclick=function(){if(emailState.offset+emailState.limit<emailState.total){emailState.offset+=emailState.limit;loadEmails()}};
+
+/* ══ 定向群发 (targeted campaigns) ══
+   Flow: filters (same criteria as the 海选 tab) → preview → save as a reusable
+   客群 → create a campaign (membership is snapshotted server-side) → generate
+   drafts in batches → send in batches. Every step is resumable, so a closed
+   tab or a spent daily quota never loses progress. */
+var cgPickedIds=[];
+var cgBusy={};
+function cgMsg(t,g){var e=document.getElementById('cgMsg');e.textContent=t;e.style.color=g?'#059669':'#dc2626';e.style.fontSize='13px'}
+function cgFilters(){
+  var min=Number(document.getElementById('cgMinScore').value);
+  return {countries:document.getElementById('cgCountries').value,segments:document.getElementById('cgSegments').value,products:document.getElementById('cgProducts').value,keywords:document.getElementById('cgKeywords').value,min_lead_score:min>0?min:0,exclude_sent:document.getElementById('cgExcludeSent').checked,customer_ids:cgPickedIds};
+}
+function cgSetFilters(f){
+  f=f||{};
+  document.getElementById('cgCountries').value=Array.isArray(f.countries)?f.countries.join(','):(f.countries||'');
+  document.getElementById('cgSegments').value=Array.isArray(f.segments)?f.segments.join(','):(f.segments||'');
+  document.getElementById('cgProducts').value=Array.isArray(f.products)?f.products.join(','):(f.products||'');
+  document.getElementById('cgKeywords').value=Array.isArray(f.keywords)?f.keywords.join(','):(f.keywords||'');
+  document.getElementById('cgMinScore').value=f.min_lead_score||'';
+  document.getElementById('cgExcludeSent').checked=f.exclude_sent!==false;
+  cgPickedIds=Array.isArray(f.customer_ids)?f.customer_ids.slice():[];
+  cgRenderPicked();
+}
+function cgRenderPicked(){
+  document.getElementById('cgPicked').textContent=cgPickedIds.length?('已选 '+cgPickedIds.length+' 家：'+cgPickedIds.slice(0,20).join(', ')+(cgPickedIds.length>20?' …':'')):'未勾选';
+}
+function loadCampaignBrand(){
+  api('/admin/api/outreach/settings').then(function(d){
+    var sel=document.getElementById('cgBrand'),cur=sel.value;
+    sel.innerHTML='';
+    d.settings.forEach(function(b){
+      var o=document.createElement('option');
+      o.value=b.brand_name;o.textContent=b.brand_name+' ('+b.product_category+')'+(b.enabled?'':' ⚠️未启用');
+      sel.appendChild(o);
+    });
+    // Default to the first ENABLED brand: an unconfigured brand cannot
+    // generate or send, so defaulting to it would only produce errors.
+    var en=d.settings.filter(function(b){return b.enabled});
+    if(en.length){
+      var still=d.settings.some(function(b){return b.brand_name===cur&&b.enabled});
+      if(!still)sel.value=en[0].brand_name;
+    }
+  }).catch(function(){});
+}
+function loadGroups(){
+  return api('/admin/api/outreach/groups').then(function(d){
+    var sel=document.getElementById('cgGroup'),cur=sel.value;
+    sel.innerHTML='<option value="">— 不使用已保存客群 —</option>';
+    d.groups.forEach(function(g){var o=document.createElement('option');o.value=g.id;o.textContent=g.name;sel.appendChild(o)});
+    sel.value=cur;
+    document.getElementById('cgDeleteGroup').style.display=cur?'inline-block':'none';
+  });
+}
+document.getElementById('cgGroup').onchange=function(){document.getElementById('cgDeleteGroup').style.display=this.value?'inline-block':'none'};
+document.getElementById('cgLoadGroup').onclick=function(){
+  var id=document.getElementById('cgGroup').value;
+  if(!id){showToast('请先选择要载入的客群',false);return}
+  api('/admin/api/outreach/groups').then(function(d){
+    var g=d.groups.filter(function(x){return String(x.id)===String(id)})[0];
+    if(!g){showToast('客群不存在',false);return}
+    cgSetFilters(JSON.parse(g.filters));
+    showMsg('cgMsg','✅ 已载入客群「'+g.name+'」的筛选条件，可直接统计预览',true);
+  }).catch(function(e){showMsg('cgMsg','❌ '+e.message,false)});
+};
+document.getElementById('cgDeleteGroup').onclick=function(){
+  var id=document.getElementById('cgGroup').value;
+  if(!id||!confirm('确定删除该客群？（已创建的群发任务不受影响）'))return;
+  api('/admin/api/outreach/groups/'+id,{method:'DELETE'}).then(function(){showToast('客群已删除',true);loadGroups()}).catch(function(e){showToast(e.message,false)});
+};
+document.getElementById('cgSaveGroup').onclick=function(){
+  var name=document.getElementById('cgGroupName').value.trim();
+  if(!name){showMsg('cgMsg','❌ 请填写客群名称',false);return}
+  api('/admin/api/outreach/groups',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,filters:cgFilters()})})
+    .then(function(){document.getElementById('cgGroupName').value='';showMsg('cgMsg','✅ 客群已保存，可随时载入复用',true);return loadGroups()})
+    .catch(function(e){showMsg('cgMsg','❌ '+e.message,false)});
+};
+document.getElementById('cgPreview').onclick=function(){
+  var btn=this;btn.disabled=true;btn.textContent='⏳ 统计中…';
+  api('/admin/api/outreach/segment-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:document.getElementById('cgBrand').value,filters:cgFilters()})})
+    .then(function(d){
+      var box=document.getElementById('cgPreviewBox');
+      var countries=(d.by_country||[]).map(function(c){return esc(c.country||'（未知国家）')+' ×'+c.n}).join('　');
+      var rows=(d.sample||[]).map(function(c){return '<tr><td>'+esc(c.display_id||c.id)+'</td><td>'+esc(c.company_name||'-')+'</td><td>'+esc(c.country||'-')+'</td><td>'+(c.lead_score==null?'—':c.lead_score)+'</td><td>'+esc((c.customer_segment||'-').slice(0,26))+'</td><td>'+esc((c.email||'-').slice(0,30))+'</td><td>'+(c.has_draft?'📄 已有草稿':'待生成')+'</td></tr>'}).join('');
+      box.innerHTML='<div style="background:#f0fdfa;border:1px solid #99f6e4;border-radius:10px;padding:14px">'
+        +'<div style="font-size:15px;font-weight:700;color:#0f766e">匹配 '+d.matching+' 家客户</div>'
+        +'<div style="font-size:13px;color:#475569;margin-top:4px">其中 <b>'+d.already+'</b> 家该品牌已有开发信（直接沿用，不再花 AI 费用），<b>'+d.pending+'</b> 家需要生成</div>'
+        +(countries?'<div style="font-size:12px;color:#6b7280;margin-top:6px">国家分布：'+countries+'</div>':'')
+        +(rows?'<table class="cp-table"><thead><tr><th>客户ID</th><th>公司</th><th>国家</th><th>评分</th><th>细分</th><th>邮箱</th><th>开发信</th></tr></thead><tbody>'+rows+'</tbody></table><div class="cp-hint">仅预览前 20 家（按评分优先）</div>':'')
+        +'</div>';
+    })
+    .catch(function(e){document.getElementById('cgPreviewBox').innerHTML='<div style="color:#dc2626;font-size:13px">❌ '+esc(e.message)+'</div>'})
+    .finally(function(){btn.disabled=false;btn.textContent='🔍 统计客群'});
+};
+/* 手工勾选客户：reuses the customer list API so the picker searches the same
+   data the 客户管理 screen shows. */
+document.getElementById('cgPickSearchBtn').onclick=function(){
+  var q=document.getElementById('cgPickSearch').value.trim();
+  if(!q){showMsg('cgMsg','❌ 请输入搜索关键词',false);return}
+  var p=new URLSearchParams({q:q,status:'completed',limit:'30',offset:'0'});
+  api('/admin/api/customers?'+p.toString()).then(function(d){
+    var box=document.getElementById('cgPickResults');
+    if(!d.items.length){box.innerHTML='<div class="cp-hint">没有匹配的客户</div>';return}
+    box.innerHTML='<table class="cp-table"><thead><tr><th style="width:36px">选</th><th>客户ID</th><th>公司</th><th>国家</th><th>邮箱</th></tr></thead><tbody>'
+      +d.items.map(function(c){
+        var on=cgPickedIds.indexOf(c.id)>=0;
+        return '<tr><td style="text-align:center"><input type="checkbox" data-id="'+c.id+'"'+(on?' checked':'')+'></td><td>'+esc(c.display_id||c.id)+'</td><td>'+esc(c.company_name||'-')+'</td><td>'+esc(c.country||'-')+'</td><td>'+esc((c.email||'（无邮箱）').slice(0,32))+'</td></tr>';
+      }).join('')+'</tbody></table>';
+    box.querySelectorAll('input[type=checkbox]').forEach(function(cb){
+      cb.onchange=function(){
+        var id=Number(cb.dataset.id),i=cgPickedIds.indexOf(id);
+        if(cb.checked){if(i<0)cgPickedIds.push(id)}else if(i>=0)cgPickedIds.splice(i,1);
+        cgRenderPicked();
+      };
+    });
+  }).catch(function(e){document.getElementById('cgPickResults').innerHTML='<div style="color:#dc2626;font-size:13px">❌ '+esc(e.message)+'</div>'});
+};
+document.getElementById('cgClearPicked').onclick=function(){cgPickedIds=[];cgRenderPicked();document.getElementById('cgPickResults').innerHTML=''};
+cgRenderPicked();
+document.getElementById('cgPickSearch').onkeydown=function(e){if(e.key==='Enter'){e.preventDefault();document.getElementById('cgPickSearchBtn').onclick()}};
+
+document.getElementById('cgCreate').onclick=function(){
+  var brand=document.getElementById('cgBrand').value;
+  var gid=document.getElementById('cgGroup').value;
+  var name=document.getElementById('cgName').value.trim();
+  if(!brand){showMsg('cgMsg','❌ 请选择品牌',false);return}
+  if(!confirm('将为「'+brand+'」创建一个群发任务。\\n\\n创建时会按当前筛选条件把客户名单快照进任务，之后按批次生成和发送。\\n\\n确定继续？'))return;
+  var btn=this;btn.disabled=true;btn.textContent='⏳ 创建中…';
+  var payload=gid?{brand:brand,group_id:Number(gid),name:name||null}:{brand:brand,name:name||null,filters:cgFilters()};
+  api('/admin/api/outreach/campaigns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+    .then(function(d){
+      var msg='✅ 群发任务已创建：共 '+d.total+' 家客户'+(d.capped?'（超过单任务上限，已截取评分最高的 '+d.total+' 家）':'')+'。点「生成草稿」开始分批生成。';
+      showMsg('cgMsg',msg,true);showToast('群发任务已创建',true);
+      document.getElementById('cgName').value='';
+      loadCampaigns();
+    })
+    .catch(function(e){showMsg('cgMsg','❌ '+e.message,false)})
+    .finally(function(){btn.disabled=false;btn.textContent='🚀 创建群发任务'});
+};
+function cgBar(c){
+  var t=c.total||1;
+  var seg=function(n,cls){return n?'<div class="cp-seg '+cls+'" style="width:'+(n/t*100)+'%"></div>':''};
+  return '<div class="cp-bar">'+seg(c.sent,'cp-sent')+seg(c.generated,'cp-generated')+seg(c.pending,'cp-pending')+seg(c.failed,'cp-failed')+'</div>'
+    +'<div class="cp-legend"><span><i class="cp-sent"></i>已发送 '+c.sent+'</span><span><i class="cp-generated"></i>待发送 '+c.generated+'</span><span><i class="cp-pending"></i>待生成 '+c.pending+'</span><span><i class="cp-failed"></i>失败 '+c.failed+'</span>'
+    +(c.skipped?'<span>跳过 '+c.skipped+'</span>':'')+'<span>共 '+c.total+'</span></div>';
+}
+function loadCampaigns(){
+  return Promise.all([
+    api('/admin/api/outreach/campaigns'),
+    api('/admin/api/outreach/quota').catch(function(){return null})
+  ]).then(function(res){
+    var campaigns=res[0].campaigns||[],q=res[1];
+    if(q)document.getElementById('cgQuota').textContent='📧 Gmail 今日 '+q.sent_today+'/'+q.daily_limit+'，剩余 '+q.remaining;
+    var box=document.getElementById('cgList');
+    if(!campaigns.length){box.innerHTML='<div class="panel"><p style="color:#6b7280;margin:0">还没有群发任务。用上面的筛选条件统计客群 → 创建群发任务。</p></div>';return}
+    box.innerHTML=campaigns.map(function(c){
+      var state=c.done?'<span class="badge badge-sent">已完成</span>':(c.status==='paused'?'<span class="badge badge-draft">已暂停</span>':'<span class="badge" style="background:#dbeafe;color:#1e40af">进行中</span>');
+      var err=c.last_error?'<div style="font-size:12px;color:#b91c1c;margin-top:6px">最近错误：'+esc(c.last_error)+'</div>':'';
+      var canGen=c.pending>0,canSend=c.generated>0;
+      return '<div class="cp-card'+(c.done?' done':'')+'">'
+        +'<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center">'
+        +'<div><b style="font-size:15px">'+esc(c.name)+'</b> <span class="cp-chip">'+esc(c.brand_name)+'</span> '+state
+        +'<div class="cp-hint" style="margin:2px 0">创建于 '+esc(c.created_at||'')+(c.group_id?' · 来自已保存客群':'')+'</div></div>'
+        +'<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">'
+        +'<button class="btn btn-sm btn-secondary cg-gen" data-id="'+c.id+'"'+(canGen&&!c.done?'':' disabled style="opacity:.45"')+'>🤖 生成草稿</button>'
+        +'<button class="btn btn-sm btn-primary cg-send" data-id="'+c.id+'"'+(canSend&&!c.done?'':' disabled style="opacity:.45"')+'>📤 继续发送</button>'
+        +'<button class="btn btn-sm '+(c.status==='paused'?'btn-primary':'btn-secondary')+' cg-pause" data-id="'+c.id+'" data-status="'+esc(c.status)+'"'+(c.done?' disabled style="opacity:.45"':'')+'>'+(c.status==='paused'?'▶ 恢复':'⏸ 暂停')+'</button>'
+        +'<button class="btn btn-sm btn-secondary cg-members" data-id="'+c.id+'">名单</button>'
+        +'<button class="btn btn-sm btn-danger cg-del" data-id="'+c.id+'">删除</button>'
+        +'</div></div>'+cgBar(c)+err+'</div>';
+    }).join('');
+    box.querySelectorAll('.cg-gen').forEach(function(b){b.onclick=function(){
+      var id=b.dataset.id,limit=Number(document.getElementById('cgBatch').value);
+      if(cgBusy[id])return;
+      if(!confirm('为该任务分批生成开发信（每批 '+limit+' 家）。\\n\\n生成只针对「尚无该品牌开发信」的客户，每家调用一次 AI。'))return;
+      cgBusy[id]=1;b.disabled=true;b.textContent='⏳ 生成中…';
+      api('/admin/api/outreach/campaigns/'+id+'/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:limit})})
+        .then(function(d){
+          showToast('已处理 '+d.processed+' 家：新生成 '+d.generated+'，沿用已有 '+d.skipped+'，失败 '+d.failed+'（剩余 '+d.remaining+'）',d.failed===0);
+          cgBusy[id]=0;loadCampaigns();
+        })
+        .catch(function(e){showToast(e.message,false);cgBusy[id]=0;loadCampaigns()});
+    }});
+    box.querySelectorAll('.cg-send').forEach(function(b){b.onclick=function(){
+      var id=b.dataset.id,limit=Number(document.getElementById('cgBatch').value);
+      if(cgBusy[id])return;
+      if(!confirm('继续发送该任务的待发开发信（每批 '+limit+' 封），受今日 Gmail 配额限制。\\n\\n发送期间请勿关闭页面。'))return;
+      cgBusy[id]=1;b.disabled=true;b.textContent='⏳ 发送中…';
+      api('/admin/api/outreach/campaigns/'+id+'/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:limit})})
+        .then(function(d){
+          var fails=(d.results||[]).filter(function(r){return !r.ok});
+          var qq=d.quota?('（今日 '+d.quota.sent_today+'/'+d.quota.daily_limit+'）'):'';
+          // A quota stop is expected, not a failure: those members stay queued
+          // for the next day, so say so instead of showing a red error.
+          if(d.quotaStop){
+            showMsg('cgMsg','⏸ 今日 Gmail 配额已用完（'+d.quota.sent_today+'/'+d.quota.daily_limit+'）。本批已发 '+d.generated+' 封，剩余 '+d.remaining+' 封保留在队列中，明天点「继续发送」即可接着发。',true);
+            showToast('配额已满，剩余 '+d.remaining+' 封明天续发',true);
+            cgBusy[id]=0;loadCampaigns();
+            return;
+          }
+          showToast('发送完成：成功 '+d.generated+' 封，失败 '+d.failed+' 封，剩余 '+d.remaining+qq,d.failed===0);
+          if(fails.length)alert('前 3 条失败原因：\\n'+fails.slice(0,3).map(function(f){return '#'+f.customer_id+': '+f.error}).join('\\n'));
+          cgBusy[id]=0;loadCampaigns();
+        })
+        .catch(function(e){showToast(e.message,false);cgBusy[id]=0;loadCampaigns()});
+    }});
+    box.querySelectorAll('.cg-del').forEach(function(b){b.onclick=function(){
+      var id=b.dataset.id;
+      if(!confirm('删除该群发任务？\\n\\n已发送的邮件无法撤回；已生成的草稿会保留在「开发信列表」中。'))return;
+      api('/admin/api/outreach/campaigns/'+id,{method:'DELETE'}).then(function(){showToast('任务已删除',true);loadCampaigns()}).catch(function(e){showToast(e.message,false)});
+    }});
+    box.querySelectorAll('.cg-pause').forEach(function(b){b.onclick=function(){
+      var id=b.dataset.id,paused=b.dataset.status==='paused';
+      if(!paused&&!confirm('暂停该群发任务？\\n\\n暂停后不能生成或发送；已发出的邮件无法撤回。'))return;
+      api('/admin/api/outreach/campaigns/'+id+'/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:paused?'draft':'paused'})})
+        .then(function(){showToast(paused?'已恢复':'已暂停',true);loadCampaigns()})
+        .catch(function(e){showToast(e.message,false)});
+    }});
+    box.querySelectorAll('.cg-members').forEach(function(b){b.onclick=function(){cgShowMembers(b.dataset.id)}});
+  }).catch(function(e){
+    document.getElementById('cgList').innerHTML='<div class="panel"><p style="color:#dc2626;margin:0">❌ '+esc(e.message)+'</p></div>';
+  });
+}
+function cgShowMembers(id){
+  var box=document.getElementById('cgList');
+  api('/admin/api/outreach/campaigns/'+id+'/members?limit=200').then(function(d){
+    var LBL={pending:'待生成',generated:'待发送',sent:'已发送',skipped:'跳过',failed:'失败'};
+    var rows=(d.items||[]).map(function(m){
+      return '<tr><td>'+esc(m.display_id||m.customer_id)+'</td><td>'+esc(m.company_name||'-')+'</td><td>'+esc(m.country||'-')+'</td>'
+        +'<td>'+esc((m.email_to||'-').slice(0,30))+'</td><td><span class="cp-chip">'+(LBL[m.status]||esc(m.status))+'</span></td>'
+        +'<td style="font-size:12px;color:'+(m.status==='failed'?'#dc2626':'#6b7280')+'">'+esc((m.error||'').slice(0,60))+'</td></tr>';
+    }).join('');
+    var head='<div class="panel" style="background:#f8fafc"><div style="display:flex;justify-content:space-between;align-items:center"><b>任务 #'+id+' 名单（'+d.campaign.name+'，共 '+d.campaign.total+' 家）</b><button class="btn btn-sm btn-secondary cg-close-members">关闭</button></div>'
+      +(rows?'<table class="cp-table"><thead><tr><th>客户ID</th><th>公司</th><th>国家</th><th>收件人</th><th>状态</th><th>备注</th></tr></thead><tbody>'+rows+'</tbody></table>':'<p class="cp-hint">名单为空</p>')
+      +'<div class="cp-hint">最多显示 200 家。</div></div>';
+    box.innerHTML=head+box.innerHTML;
+    box.querySelector('.cg-close-members').onclick=loadCampaigns;
+  }).catch(function(e){showToast(e.message,false)});
+}
+document.getElementById('cgRefresh').onclick=function(){loadCampaigns();loadQuota()};
 
 // Init
 loadBrands();

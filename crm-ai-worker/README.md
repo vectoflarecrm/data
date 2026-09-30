@@ -133,6 +133,7 @@ evidence 表:        每条核心判断的 source_url + evidence_text + confiden
 /admin/keys            动态 Key 池（D1，即时生效）/ 冷却监控 / 用量卡片
 /admin/secrets         经 Cloudflare API 直写 Worker Secrets（40 槽位）
 /admin/outreach        开发信生成与 Gmail 发送（结构化档案驱动，按国家语言）
+                       └─「🎯 定向群发」标签页：客群圈选 / 保存客群 / 分批续发
 GET  /admin/api/customers?min_lead_score=   列表/筛选
 POST /admin/api/customers/import            CSV 原始层 → 去重入队
 GET  /admin/api/customers/pre-filter        SQL 海选（不花 AI token）
@@ -140,6 +141,24 @@ GET  /admin/api/customers/lead-score-histogram  评分分布
 GET  /admin/api/customers/:id               详情（含 contacts + evidence）
 GET  /admin/api/keys/usage                  平台用量/容量汇总
 ```
+
+#### 定向群发（`outreach_campaigns`）
+
+`/admin/outreach` 的第二个标签页，把「给一批客户发开发信」从一次性脚本变成可续跑的任务：
+
+- **圈客**：复用 `/admin` 海选的同一套筛选条件（`buildSegmentWhere`），或手工勾选客户（≤500）；
+  筛选后可选「排除已发送过的客户」。
+- **快照**：创建任务时把命中的 customer id 写入 `outreach_campaign_members`，
+  之后每一步都按这份名单走。管道会持续改写 `customers`，若每步重跑筛选，
+  「预览 N 家」和「实际发出 N 家」会对不上。
+- **两步续跑**：`生成草稿` 只处理 `pending` 成员，且只给「尚无该品牌开发信」的客户调 AI；
+  `继续发送` 只处理 `generated` 成员。每步一批（1–50），关页面不丢进度。
+- **配额语义**：Gmail 400 封/天用完时按**批次中止**处理，成员留在 `generated`，
+  明天接着发 —— 绝不标记为 `failed`（那等于永久排除，是这里最容易写反的地方）。
+- **错误分类**：429/超时/5xx 保留成员为 `pending` 可重试；其余标记 `failed` 让任务能收尾。
+  任一步成功后会清掉 `last_error`，避免早上的限流提示一直挂在界面上。
+- AI 与 Gmail 调用通过 `CampaignDeps` 注入，状态机因此可在不发真邮件、不花 token 的情况下测试。
+
 
 ### 关键设计决策与理由（评估替代方案时的对照基线）
 
@@ -543,6 +562,7 @@ pending → processing → completed
 - AI 使用 Gemini → Groq → Cerebras → Zhipu → NVIDIA → Mistral → DeepSeek → OpenRouter 的回退链，Key 被限流时进入冷却，避免重复调用受限 Key；
 - AI 只能处理网页文本并写入画像字段，不能执行任意 SQL；
 - outreach 面板支持 Afarer（SUPs）和 Neptunor（RIB Boats + Inflatable Boats）两种品牌身份，可分别设置发件人、签名和附件；
+- **Gmail 发信账号池**：面板「📮 发信账号」页可添加多个发信身份，支持两种凭据——OAuth 令牌（推荐，无需服务账号密钥，用 `scripts/get-gmail-refresh-token.py` 一次性授权）和传统服务账号（全域委托）；每封邮件自动选用剩余配额最多的健康账号；被 Google 拒绝的账号自动冷却 6 小时；品牌可绑定指定账号；每日总配额 = 各账号之和；详见 `docs/gmail-account-setup.md`；
 - D1 写回使用 `WHERE id = ? AND status = 'processing'`，避免过期任务覆盖新状态。
 
 ## D1 Schema
@@ -557,11 +577,17 @@ schema.sql
 
 ```text
 customers: id, company_id, domain, status, customer_segment, personas_and_solutions, remarks, updated_at
-outreach_settings: brand_name, product_category, company_intro, sender_email, sender_name, signature, enabled
-outreach_attachments: brand_name, filename, mime_type, size_bytes, content_base64
+outreach_settings: brand_name, product_category, company_intro, sender_email, sender_name, company_entity（发送主体名义，正文署名用，留空则用品牌名）, signature, enabled
+outreach_attachments: brand_name, filename, mime_type, size_bytes, content_base64, language（es/de/fr/… 或 all=通用）
+gmail_accounts: label, credential_type（oauth_refresh / service_account）, client_email, private_key（refresh_token 或 PEM，不回显）, delegated_domain, daily_limit, enabled, last_error, cooldown_until
 outreach_emails: customer_id, email_to, brand_name, subject, body, status, sent_at
+outreach_groups: name（唯一）, description, filters（SegmentFilters 的 JSON）
+outreach_campaigns: name, brand_name, group_id, filters, total（创建时的快照人数）, status（draft/paused/done）, last_error
+outreach_campaign_members: campaign_id + customer_id（联合主键）, status（pending/generated/sent/failed）, outreach_email_id, error
 api_key_health: provider, key_index, exhausted_until, last_error
 gmail_send_log: outreach_email_id, recipient, status, detail, sent_at
 ```
 
-并为 `status` 和 `company_id` 建立索引。
+并为 `status` 和 `company_id` 建立索引。`outreach_campaign_members` 另按
+`(campaign_id, status)` 建索引（`idx_campaign_members_queue`）——
+两个步骤的「取下一批」都走这条。

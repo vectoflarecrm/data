@@ -7,3 +7,10 @@ dist/
 
 # Private D1 backup repo working copy (separate repository, must never enter this repo)
 crm-db-backup/
+
+# Local D1 dumps: real customer PII (names, mobiles, WhatsApp, email).
+# Query remotely instead — see crm-ai-worker/README.md "本地查询远程 D1".
+db_export/
+
+# Local office documents
+*.wps
