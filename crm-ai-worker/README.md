@@ -96,6 +96,12 @@ completed / failed
         输出 JSON：segment/categories/size/coverage/personas/found_contacts/
         company_profile/outreach_context/field_evidence/buying_signals/remarks。
 
+阶段 7.5  相关性预检（免费，零付费 token）
+        在阶段 7 之前先问 @cf/meta/llama-3.1-8b-instruct-fast（Workers AI
+        免费 Neurons）该客户是否相关。不相关直接置 segment=不相关，不进入
+        全量分析，约 30-40% 的客户因此零付费 token。解析失败或模型不可用时
+        fail-open 放行 —— 宁可多花 token 也不漏客户。RELEVANCE_PRECHECK=off 关闭。
+
 阶段 8  写回（一次 env.DB.batch()）
         联系人指纹去重（姓名|邮箱|电话|wa 全小写拼接）→ contacts 表；
         field_evidence 删旧插新 → evidence 表（字段级来源 URL + 原文引用
@@ -122,24 +128,63 @@ customers.status:   pending → processing → completed / failed
                     （remarks 内 [retry:N] 标签）；403 反爬 = 人工复审
 api_key_usage:      provider × key_index × day 的成功计数（面板 📊 卡片）
 api_key_health:     被限 Key 的冷却截止时间与最近错误（面板 🧊 可一键清除）
+                   key_index = "<provider>:<api_configs.id>"，每个 Key 独立槽位
 evidence 表:        每条核心判断的 source_url + evidence_text + confidence
                     （详情弹窗「证据链」区展示，无需重爬即可核验）
 ```
+
+### 面板安全边界
+
+三处改动都源自同一个前提：仓库是公开的，`/admin/login` 的存在与形式都不算秘密，
+而猜中 token 等于交出 D1 里的全部 API Key。
+
+```text
+登录限流（D1 表 admin_login_attempts）
+  scope='ip' 5 次失败 → 锁 15 分钟（Retry-After 告知剩余秒数）
+  scope='global' 30 次 → 全体短锁（覆盖轮换来源地址的分布式喷洒）
+  登录成功清掉该 IP 记录 —— 否则操作员输错几次就把自己锁在门外
+  锁在读取 token 之前判断：被锁时即使 token 正确也拒绝，
+    且响应不含任何关于该 token 是否正确的信息（否则限流即成猜测探针）
+  CF-Connecting-IP 仅接受 IP 字面量，非法值全部归入同一桶 ——
+    否则伪造 header 可无限造行，既撑爆表又让限流永不触发
+  存 D1 而非 isolate 内存：isolate 会重启且可能多实例
+  过期行在检查时顺带删除，不额外占用 cron
+
+错误脱敏
+  500 一律不回显内部错误（D1 约束名、供应商 URL 等），
+    只返回 request_id，完整堆栈进 Worker 日志
+  400 保持原文 —— 那些是写给操作员的提示（"名称不能为空"），
+    脱敏只会让面板无从下手
+```
+
+**踩过的坑**：`handleAdminRequest` 曾用裸 `return someHandler(...)` 在 try 块里分发。
+返回的 promise 在 try 退出后才 settle，异步抛错会整个跳过 catch 逃出路由器 ——
+也就是脱敏根本没生效。5 个分发点现已全部 `await`；**往这个路由器加 handler 时务必注意**。
+
+凭据加密的边界与上线流程见下文「凭据加密」。
 
 ### 面板端点一览
 
 ```text
 /admin                 客户 CRUD + 评分分布卡 + CSV 导入 + 海选预过滤
-/admin/keys            动态 Key 池（D1，即时生效）/ 冷却监控 / 用量卡片
+/admin/keys            动态 Key 池（D1，即时生效）/ 冷却监控 / 用量卡片 / 凭据加密
 /admin/secrets         经 Cloudflare API 直写 Worker Secrets（40 槽位）
 /admin/outreach        开发信生成与 Gmail 发送（结构化档案驱动，按国家语言）
                        └─「🎯 定向群发」标签页：客群圈选 / 保存客群 / 分批续发
+POST /admin/login      面板登录。限流在读取提交的 token 之前判断；被锁时即使 token
+                       正确也拒绝，且响应不透露该 token 是否正确（否则限流本身
+                       就成了猜测正确值的探针）
 GET  /admin/api/customers?min_lead_score=   列表/筛选
 POST /admin/api/customers/import            CSV 原始层 → 去重入队
 GET  /admin/api/customers/pre-filter        SQL 海选（不花 AI token）
 GET  /admin/api/customers/lead-score-histogram  评分分布
 GET  /admin/api/customers/:id               详情（含 contacts + evidence）
+GET  /admin/api/keys                        Key 列表（只回 key_hint）+ encryption 状态
 GET  /admin/api/keys/usage                  平台用量/容量汇总
+POST /admin/api/keys                        新增单把 Key（未配置加密密钥则 400）
+POST /admin/api/keys/bulk                   批量导入（按 HMAC 指纹去重）
+POST /admin/api/keys/encryption-key         生成 32 字节 base64 候选密钥（只返回不保存）
+POST /admin/api/keys/encrypt-all            存量明文就地加密（幂等，返回转换/剩余数）
 ```
 
 #### 定向群发（`outreach_campaigns`）
@@ -159,6 +204,50 @@ GET  /admin/api/keys/usage                  平台用量/容量汇总
   任一步成功后会清掉 `last_error`，避免早上的限流提示一直挂在界面上。
 - AI 与 Gmail 调用通过 `CampaignDeps` 注入，状态机因此可在不发真邮件、不花 token 的情况下测试。
 
+#### 凭据加密（`CREDENTIAL_ENC_KEY`）
+
+`api_configs.api_key` 曾以明文存放全部 27 把 Key —— D1 一旦泄露（CF 凭据泄露、误导出、
+日志外泄）就等于交出整个 Key 池。现改为 AES-GCM 密文存储，格式 `enc:v1:<iv>:<密文>`。
+
+**收益边界（先讲清，避免高估）**：加密密钥存 Worker Secret，保护等级与 `ADMIN_PANEL_TOKEN`
+相同——持有者本就能控制本 Worker。因此它**不防御面板被攻破**，只防御「D1 单独泄露」。
+
+渐进式上线（不中断管道）：
+
+```text
+未配置密钥:  存量明文行照常解析（无 enc:v1: 前缀即按明文透传），AI 管道不受影响
+             新增/导入被拒绝（400），不静默写回明文
+配置密钥后:  面板「一键加密存量」就地改写，可重复执行（幂等）
+```
+
+加密的三个必然代价，以及各自的对策：
+
+```text
+密文没有可切的前缀      → key_hint 在加密前算好（AIzaSy…x7f2），面板只显示它
+随机 IV 使密文逐行不同  → key_fingerprint（HMAC-SHA256 前 128 位）承担去重；
+                          为 NULL 的老行用解密值现算，混合状态下仍能正确去重
+需要 AES + HMAC 两种用途 → HKDF 从主密钥派生两把子密钥，不跨算法复用同一材料
+```
+
+单行解密失败（如换过 `CREDENTIAL_ENC_KEY`）只跳过该行，不拖垮整个 provider。
+相关测试：`tests/credential-crypto.test.ts`（19）、`tests/credential-api.test.ts`（18）。
+
+
+### 源码结构
+
+```text
+src/index.ts            Cron 入口：认领 → 抓取 → 清洗 → AI 分析 → 回写（2100 行）
+src/admin.ts            面板路由与 5 个 *_HTML 面板模板（3054 行）
+src/campaigns.ts        定向群发：筛选 DSL、客群 CRUD、生成/发送两步状态机
+src/outreach.ts         开发信生成（结构化档案 → 按国家语言）
+src/gmail.ts            OAuth 发信、配额查询、失败冷却
+src/provider-keys.ts    Key 池解析（D1 优先 / env 兜底）+ 30s isolate 缓存
+src/credential-crypto.ts AES-GCM 加解密 + HMAC 指纹 + HKDF 密钥派生（173 行）
+src/rate-limit.ts       AI provider 的 per-isolate RPM 滑动窗口
+src/key-pool.ts         回退链 / 用量记录
+src/bulk-keys.ts        批量粘贴解析（`,` / Tab / `|` 分隔）
+tests/                  10 个文件 / 148 个测试
+```
 
 ### 关键设计决策与理由（评估替代方案时的对照基线）
 
@@ -173,10 +262,20 @@ GET  /admin/api/keys/usage                  平台用量/容量汇总
 4. per-isolate 滑动窗口限流 无需 Durable Objects：Cron 单并发 + 免费档
    低流量下足够；若未来多 Worker 并发写同一上游，需迁移到 DO 全局限流。
 5. D1 即 Key 池 + 冷却状态  面板改 Key 即时生效、免部署；env Secrets
-   兜底保证面板清空不停服。
+   兜底保证面板清空不停服。冷却槽位以 api_configs.id 为标识，
+   每个 Key 独立，互不牵连。
 6. 结构化输出双路径        Gemini 用 responseSchema 硬约束；OpenAI 兼容
    平台用 json_object + 提示词 + parseAnalysis 校验 —— 保证任何一家
    顶上时输出结构一致。
+7. 加密用前缀而非迁移状态位  api_key 保留 NOT NULL 约束，密文以 enc:v1:
+   开头。无前缀 = 存量明文 = 直接透传，于是「能否读取」与「是否已加密」
+   解耦，部署不依赖人工先跑迁移，加密也就地可回滚。
+8. 限流计数落 D1 而非内存   rate-limit.ts 的桶是 per-isolate 的 Map，isolate
+   重启即清零、多实例下互不可见。登录限流要跨重启、跨实例生效，故存 D1
+   （admin_login_attempts），读取时顺带清理过期行以免另加 cron。
+9. 可修复错误不脱敏        500 一律脱敏（只回 request_id + 日志），但我们自己
+   写给操作员的 400 保持原文——把「名称不能为空」换成 request_id 只会让
+   面板无从下手。
 ```
 
 ## 现有瓶颈与替代方案评估（持续优化清单）
@@ -186,7 +285,7 @@ GET  /admin/api/keys/usage                  平台用量/容量汇总
 | # | 现状与瓶颈 | 候选替代方案 | 收益 | 代价 |
 |---|---|---|---|---|
 | 1 | 吞吐受 50 子请求/调用限制，BATCH_SIZE=3 封顶 | **Cloudflare Queues**：每客户一条消息，消费者逐条处理，天然并行且无子请求聚合问题 | 吞吐与队列深度线性扩展，不再受单调用限制 | 付费计划（$5/月起，Queues 需 Workers Paid） |
-| 2 | per-isolate 限流窗口在多 Worker/多区域并发时会低估真实 RPM | **Durable Objects** 全局限流器（强一致单例） | 精准保护上游免费档，杜绝多节点叠加 429 | 增加一跳 DO 调用延迟；免费额度够用但代码复杂度上升 |
+| 2 | AI provider 的 per-isolate 限流窗口在多 Worker/多区域并发时会低估真实 RPM | **Durable Objects** 全局限流器（强一致单例） | 精准保护上游免费档，杜绝多节点叠加 429 | 增加一跳 DO 调用延迟；免费额度够用但代码复杂度上升 |
 | 3 | 同一域名重新研究时仍会重新抓主站（仅复用 full_research_text） | **KV 页面缓存**：URL→文本 24h TTL | 跨行去重（同集团多客户）、人工复审后重跑省抓取 | KV 读免费档 10 万次/天充裕；需失效策略 |
 | 4 | ~~AI 每客户一次全量分析~~ **已实现**：`runRelevancePrecheck`（`@cf/meta/llama-3.1-8b-instruct-fast`，免费 Neurons）在 Gemini 分析前判定相关性，不相关客户直接置 `segment=不相关`（0 付费 token）；解析失败/绑定缺失自动放行（fail-open），`RELEVANCE_PRECHECK=off` 可关闭 | 已落地；后续可迭代：不相关行积累后回看预检准确率，必要时改为「低置信送全量分析」 | 不相关客户（约 30-40%）零付费 token | 预检误杀会漏掉边缘客户（保守提示词缓解） |
 | 5 | 文本清洗基于行模式与哈希去重，近似重复（同一新闻多站转载）仍会通过 | **Embedding 近似去重**（Workers AI bge-m3 + Vectorize） | 再省 10-20% 输入 token；可顺带做客户相似度聚类 | 首条需入库向量；增加一次 embedding 调用/来源块 |
@@ -195,6 +294,8 @@ GET  /admin/api/keys/usage                  平台用量/容量汇总
 | 8 | 搜索依赖 SaaS（Tavily/Exa/Brave）月额度 | **SearXNG 自托管**（VPS）作最后兜底（现已用 DuckDuckGo HTML 兜底，稳定性一般） | 搜索无额度上限 | 需维护一台 VPS；自托管引擎有被封锁风险 |
 | 9 | 研究文本 50k 字符全量存 D1（行数多后表体积大） | **R2 归档**：>30 天的 full_research_text 移到 R2，D1 只留摘要 | D1 行读成本与体积下降 | 需归档 cron 与读取回源逻辑 |
 | 10 | 回退链固定顺序，未按「每 token 实际产出质量」动态排序 | 按 provider 记录 lead_score 达成率，动态调整链序 | 同 token 产出更高分客户 | 需要统计窗口与再平衡逻辑 |
+| 11 | 单个 `ADMIN_PANEL_TOKEN` 无 WebAuthn/2FA；加密密钥与它同级保护，攻破面板即等于拿到明文 Key | WebAuthn 通行密钥（passkey）替代共享 token；密钥改用 KMS/Seal 托管 | 去掉共享秘密与可重放的静态凭据 | 需自定义域与更严格的 cookie/CSP 改造；passkey 需额外备份恢复路径 |
+| 12 | D1 写入权限等同全表读写，面板 SQL 出口无细粒度限制 | 拆分 D1：客户库与凭据库分离，凭据库只允许存储过程式访问 | 即使面板被攻破也难触及 Key 表 | 跨库查询受限，热路径（每请求读 Key）要重新设计 |
 
 **结论基线**：当前架构在免费额度内的单位成本约为「每客户 1 次搜索消耗 + 5-6k AI input tokens」；上述 1/3/4/5 任一落地都可再降 30%+ 成本或翻倍吞吐。若项目升级为生产级批量（>5 万客户/月），优先做 #1（Queues）+ #4（两级过滤）组合。
 
@@ -442,6 +543,21 @@ ADMIN_PANEL_TOKEN
 
 只有修改 `crm-ai-worker/**` 或 `.github/workflows/deploy-worker.yml` 并推送到 `main` 时，workflow 才会自动执行类型检查、Worker 部署并同步 AI、搜索和 Gmail Secrets；修改 Python 主项目不会触发 Worker 部署。也可以在 GitHub Actions 页面选择 `Deploy CRM AI Worker`，点击 `Run workflow` 手动触发。
 
+workflow 的步骤顺序（任一步失败即中止，不会带着半迁移的库部署）：
+
+```text
+Ensure D1 database exists          幂等创建
+Configure D1 database ID           把真实 ID 注入 wrangler.toml（占位符替换）
+Initialize / Verify remote schema 跑 schema.sql + 校验关键表存在
+Migrate customers profile columns  ALTER 逐条执行，容忍 duplicate column
+Migrate api_configs credential cols 同上（key_hint / key_fingerprint）
+Typecheck → Unit tests → Deploy
+```
+
+两处 `ALTER` 迁移之所以逐条执行：D1 遇到重复列会**整批失败**，而 CI 每次部署都跑，
+所以必须能重复执行。`schema.sql` 里保留 `CREATE TABLE` 定义（含新列）供全新库使用，
+`ALTER` 只留给已存在的库。
+
 Cloudflare API Token 建议创建为 **Account API Token → Custom token**，并限制到部署 Worker 的单个 Cloudflare Account。仅运行 `wrangler deploy` 时需要：
 
 ```text
@@ -488,6 +604,23 @@ npx wrangler dev --test-scheduled
 curl "http://127.0.0.1:8787/__scheduled?cron=*/5%20*%20*%20*%20*"
 ```
 
+单测（无需网络、无需真实密钥、不花 token、不发邮件）：
+
+```bash
+npm test
+```
+
+10 个测试文件 / 148 个测试，全部离线运行（不花 token、不发邮件、不需真实密钥）：
+
+```text
+campaign-steps.test.ts    群发状态机（CampaignDeps 注入假 AI/Gmail）652 行
+campaigns.test.ts         筛选 DSL、客群 CRUD、预览
+credential-api.test.ts    凭据加密端到端（明文兼容、去重、幂等迁移）340 行
+admin-hardening.test.ts   登录限流、错误脱敏（含 `return promise` 逃逸的回归测试）
+provider-keys.test.ts     Key 池解析与冷却槽位（含 id 遗漏的回归测试）
+relevance.test.ts  key-pool.test.ts  rate-limit.test.ts  bulk-keys.test.ts
+```
+
 开发服务器使用本地 D1 数据库；先用 `--local` 初始化 Schema 并插入测试数据：
 
 ```bash
@@ -499,6 +632,15 @@ npx wrangler d1 execute crm-ai-db --local --command="INSERT INTO customers (comp
 ```bash
 npm run typecheck
 ```
+
+面板模板自检（5 个 `*_HTML` 面板全部覆盖：JS 可解析、id 唯一、`getElementById` 有对应元素）：
+
+```bash
+node scripts/check-panel.mjs
+```
+
+面板 HTML 是 TypeScript 模板字符串，里面手写 JS。**一个字面换行必须写成 `\\n`**
+（单写 `\n` 会变成真实换行而破坏解析），这个坑已经踩过三次。改动面板后务必跑上面的脚本。
 
 ### 本地查询远程 D1（免改动 wrangler.toml）
 
