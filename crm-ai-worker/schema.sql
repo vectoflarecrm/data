@@ -302,3 +302,26 @@ CREATE TABLE IF NOT EXISTS outreach_campaign_members (
 );
 
 CREATE INDEX IF NOT EXISTS idx_campaign_members_queue ON outreach_campaign_members(campaign_id, status);
+
+-- Login brute-force throttling for /admin/login.
+--
+-- 'ip' throttles a single caller; 'global' is the floor that a distributed
+-- spray still hits, since a per-IP-only limit is defeated by rotating source
+-- addresses. The repo is public and the endpoint is trivially discoverable,
+-- so the token is the only thing between a stranger and every API key in D1.
+--
+-- Rows are keyed by (scope, ident) and pruned during a check rather than by a
+-- cron, so the table stays small without another scheduled job. 'ident' is
+-- validated to be an IP literal before it is ever written — an unvalidated
+-- header would let a caller mint unbounded rows.
+CREATE TABLE IF NOT EXISTS admin_login_attempts (
+  scope TEXT NOT NULL CHECK (scope IN ('ip', 'global')),
+  ident TEXT NOT NULL,
+  failures INTEGER NOT NULL DEFAULT 0,
+  window_start TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  locked_until TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (scope, ident)
+);
+
+CREATE INDEX IF NOT EXISTS idx_login_attempts_updated ON admin_login_attempts(updated_at);

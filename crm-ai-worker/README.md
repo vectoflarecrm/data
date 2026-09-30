@@ -526,6 +526,19 @@ ADMIN_PANEL_TOKEN
 
 请使用随机长字符串作为值，不要将其写入代码或发送到聊天。部署 workflow 会自动同步该 Secret；未设置时 `/admin` 会保持禁用。
 
+仓库是公开的，`/admin/login` 的存在与形式都不算秘密，而猜中 token 等于交出 D1 里的全部 API Key，因此登录失败会计数并锁定：
+
+- 同一 IP 连续 **5 次**失败 → 锁定 **15 分钟**（`Retry-After` 告知剩余秒数）。
+- 全局计数器 30 次失败 → 全体短暂锁定，覆盖轮换来源地址的分布式喷洒。
+- 登录成功会清掉该 IP 的记录，避免操作员输错几次后把自己锁在门外。
+- 计数存 D1（`admin_login_attempts`）而非内存：isolate 会重启且可能多实例。
+- 限流在读取提交的 token **之前**判断；被锁时即使提交了正确 token 也拒绝，
+  且响应不含任何关于该 token 是否正确的信息。
+- `CF-Connecting-IP` 只接受 IP 字面量，非法值全部归入同一个桶 ——
+  否则伪造 header 可以无限造行，既撑爆表又让限流永远不触发。
+- 500 响应不回显内部错误（D1 约束名、供应商 URL 等），只返回 `request_id`，
+  完整堆栈进 Worker 日志。400 的操作员可修复提示保持原文。
+
 面板支持搜索、分页、查看详情、修改客户字段，以及将客户设为 `pending` 重新处理。`id` 和 `company_id` 始终只读。
 
 查看 Worker 日志：
@@ -584,6 +597,7 @@ outreach_emails: customer_id, email_to, brand_name, subject, body, status, sent_
 outreach_groups: name（唯一）, description, filters（SegmentFilters 的 JSON）
 outreach_campaigns: name, brand_name, group_id, filters, total（创建时的快照人数）, status（draft/paused/done）, last_error
 outreach_campaign_members: campaign_id + customer_id（联合主键）, status（pending/generated/sent/failed）, outreach_email_id, error
+admin_login_attempts: scope（ip/global）+ ident（联合主键）, failures, window_start, locked_until（登录失败计数，15 分钟后自动清理）
 api_key_health: provider, key_index, exhausted_until, last_error
 gmail_send_log: outreach_email_id, recipient, status, detail, sent_at
 ```

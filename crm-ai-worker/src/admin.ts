@@ -240,6 +240,19 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+/* An unexpected throw can carry a D1 constraint name, a column list or an
+ * upstream provider URL, and this panel's errors are readable by anyone who
+ * reaches the route. The real message goes to the Worker log — which is where
+ * a developer looks anyway — and the caller gets a request id to quote. */
+function internalErrorResponse(context: string, error: unknown): Response {
+  const requestId = crypto.randomUUID();
+  console.error(`[admin:${context}] ${requestId}`, error);
+  return jsonResponse(
+    { detail: "服务器内部错误，请查看 Worker 日志", request_id: requestId },
+    500,
+  );
+}
+
 function readCookie(request: Request, name: string): string | null {
   const cookies = request.headers.get("Cookie")?.split(";") ?? [];
   for (const cookie of cookies) {
@@ -261,6 +274,119 @@ async function constantTimeSecretMatch(left: string, right: string): Promise<boo
     difference |= leftBytes[index] ^ (rightBytes[index] ?? 0);
   }
   return difference === 0;
+}
+
+/* ── Login throttling ───────────────────────────────────────────────────
+ *
+ * The repository is public, so /admin/login's existence and shape are not a
+ * secret, and a successful guess hands over every API key stored in D1. The
+ * token is the only barrier, so failures are counted in D1 (the per-isolate
+ * Map in rate-limit.ts dies with the isolate and would not survive a restart
+ * or a second instance) and a run of wrong guesses locks the caller out. */
+
+const LOGIN_MAX_FAILURES = 5;
+const LOGIN_LOCK_SECONDS = 15 * 60;
+/** Floor for a spray that rotates source addresses; high enough not to
+ *  interfere with a handful of real operators, low enough to stop a run. */
+const LOGIN_GLOBAL_MAX_FAILURES = 30;
+/** Rolling window after which old failures stop counting. */
+const LOGIN_WINDOW_SECONDS = 15 * 60;
+
+/* Cloudflare sets CF-Connecting-IP at the edge and clients cannot forge it.
+ * Anything that is not an IP literal falls back to a single shared bucket,
+ * which is the safe direction: a garbage header throttles itself instead of
+ * minting a fresh row per attempt. */
+function loginIdent(request: Request): string {
+  const raw = request.headers.get("CF-Connecting-IP")?.trim() ?? "";
+  return /^[0-9a-fA-F:.]{3,45}$/.test(raw) ? raw.toLowerCase() : "unknown";
+}
+
+interface LoginThrottle {
+  locked: boolean;
+  failures: number;
+  retryAfterSeconds: number;
+}
+
+async function readThrottle(env: AdminEnv, scope: string, ident: string): Promise<LoginThrottle> {
+  // Prune on the way in: a login attempt is rare, so this is cheaper than a
+  // scheduled prune job and keeps the table bounded on its own.
+  await env.DB.prepare(
+    `DELETE FROM admin_login_attempts
+     WHERE updated_at <= datetime('now', ?)`,
+  ).bind(`-${LOGIN_WINDOW_SECONDS} seconds`).run();
+
+  const row = await env.DB.prepare(
+    `SELECT failures, locked_until FROM admin_login_attempts
+     WHERE scope = ? AND ident = ?`,
+  ).bind(scope, ident).first<{ failures: number; locked_until: string | null }>();
+  if (!row) return { locked: false, failures: 0, retryAfterSeconds: 0 };
+  if (!row.locked_until) return { locked: false, failures: row.failures, retryAfterSeconds: 0 };
+
+  const until = new Date(`${row.locked_until.replace(" ", "T")}Z`).getTime();
+  if (!Number.isFinite(until) || until <= Date.now()) {
+    return { locked: false, failures: row.failures, retryAfterSeconds: 0 };
+  }
+  return {
+    locked: true,
+    failures: row.failures,
+    retryAfterSeconds: Math.max(1, Math.ceil((until - Date.now()) / 1000)),
+  };
+}
+
+async function recordLoginFailure(env: AdminEnv, scope: string, ident: string): Promise<void> {
+  const limit = scope === "global" ? LOGIN_GLOBAL_MAX_FAILURES : LOGIN_MAX_FAILURES;
+  const current = await readThrottle(env, scope, ident);
+  // Accumulate within the window; the first failure of a new run starts at 1.
+  const failures = Math.min(current.locked ? current.failures : current.failures + 1, limit);
+  const lockedUntil = failures >= limit
+    ? new Date(Date.now() + LOGIN_LOCK_SECONDS * 1000).toISOString().replace("T", " ").slice(0, 19)
+    : null;
+  await env.DB.prepare(
+    `INSERT INTO admin_login_attempts (scope, ident, failures, window_start, locked_until, updated_at)
+     VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(scope, ident) DO UPDATE SET
+       failures = excluded.failures,
+       locked_until = excluded.locked_until,
+       updated_at = CURRENT_TIMESTAMP`,
+  ).bind(scope, ident, failures, lockedUntil).run();
+}
+
+async function clearLoginFailures(env: AdminEnv, ident: string): Promise<void> {
+  await env.DB.prepare(
+    "DELETE FROM admin_login_attempts WHERE scope = 'ip' AND ident = ?",
+  ).bind(ident).run();
+}
+
+/* Both buckets must be clear. The global bucket is always keyed "all" — it has
+ * to be one shared row, otherwise a spray that rotates addresses would mint a
+ * fresh counter per attempt and never accumulate. Likewise, callers with no
+ * usable IP header collapse onto "all" so forged headers throttle themselves
+ * instead of rotating free. */
+const LOGIN_GLOBAL_KEY = "all";
+
+function throttleKey(scope: string, ident: string): string {
+  if (scope === "global") return LOGIN_GLOBAL_KEY;
+  return ident === "unknown" ? LOGIN_GLOBAL_KEY : ident;
+}
+
+async function loginBlocked(env: AdminEnv, ident: string): Promise<LoginThrottle | null> {
+  for (const scope of ["ip", "global"]) {
+    const state = await readThrottle(env, scope, throttleKey(scope, ident));
+    if (state.locked) return state;
+  }
+  return null;
+}
+
+/* Deliberately says nothing about the token: a locked caller must not be able
+ * to learn whether the value they are holding is close to the right one. */
+function loginThrottledResponse(state: LoginThrottle): Response {
+  const minutes = Math.max(1, Math.ceil(state.retryAfterSeconds / 60));
+  const page = htmlResponse(
+    `${ADMIN_LOGIN_HTML}<p class="error">尝试过于频繁，请 ${minutes} 分钟后再试。</p>`,
+    429,
+  );
+  page.headers.set("Retry-After", String(state.retryAfterSeconds));
+  return page;
 }
 
 async function isAuthenticated(request: Request, env: AdminEnv): Promise<boolean> {
@@ -1231,7 +1357,7 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (msg.includes("UNIQUE")) return jsonResponse({ detail: "该服务账号已存在" }, 409);
-        return jsonResponse({ detail: `保存失败：${msg}` }, 500);
+        return internalErrorResponse("gmail-account-save", e);
       }
       return jsonResponse({ ok: true });
     }
@@ -1442,8 +1568,7 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
 
     return jsonResponse({ detail: "Not Found" }, 404);
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    return jsonResponse({ detail: `Outreach API Error: ${msg}` }, 500);
+    return internalErrorResponse("outreach-api", error);
   }
 }
 
@@ -1592,9 +1717,11 @@ async function handleCampaignApi(request: Request, env: AdminEnv): Promise<Respo
     const msg = error instanceof Error ? error.message : String(error);
     // Input problems (bad filter JSON, unknown brand, empty match) are the
     // operator's to fix — 400 keeps the panel message actionable instead of
-    // reporting a server fault.
+    // reporting a server fault. Anything else is an unexpected fault and must
+    // not be echoed back: this used to return `msg` for both cases.
     const isUserError = /不能为空|必须是|最多|不存在|未启用|尚未配置|没有匹配|已存在|超出|Invalid/.test(msg);
-    return jsonResponse({ detail: msg }, isUserError ? 400 : 500);
+    if (!isUserError) return internalErrorResponse("campaign-api", error);
+    return jsonResponse({ detail: msg }, 400);
   }
 }
 
@@ -1644,8 +1771,7 @@ async function handleAdminApi(request: Request, env: AdminEnv): Promise<Response
     }
     return jsonResponse({ detail: "Not Found" }, 404);
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    return jsonResponse({ detail: `API Error: ${msg}` }, 500);
+    return internalErrorResponse("admin-api", error);
   }
 }
 
@@ -1668,11 +1794,21 @@ export async function handleAdminRequest(
     if (!env.ADMIN_PANEL_TOKEN) {
       return htmlResponse("<h1>Admin panel is not configured</h1><p>Set ADMIN_PANEL_TOKEN first.</p>", 503);
     }
+    const ident = loginIdent(request);
+    // Checked before reading the submitted token, and a locked caller is told
+    // nothing about whether the token they hold is the right one.
+    const blocked = await loginBlocked(env, ident);
+    if (blocked) return loginThrottledResponse(blocked);
     const form = await request.formData();
     const token = form.get("token");
     if (typeof token !== "string" || !(await constantTimeSecretMatch(token, env.ADMIN_PANEL_TOKEN))) {
+      await recordLoginFailure(env, "ip", throttleKey("ip", ident));
+      await recordLoginFailure(env, "global", LOGIN_GLOBAL_KEY);
       return htmlResponse(`${ADMIN_LOGIN_HTML}<p class="error">授权失败，请重试。</p>`, 401);
     }
+    // A correct guess clears this caller's record; leaving it would let
+    // earlier mistakes lock the operator out of their own panel.
+    await clearLoginFailures(env, throttleKey("ip", ident));
     return new Response(null, {
       status: 303,
       headers: {
@@ -1716,12 +1852,15 @@ export async function handleAdminRequest(
 
   if (url.pathname.startsWith("/admin/api/keys")) {
     if (!(await isAuthenticated(request, env))) return authFailure(request);
-    return handleProviderKeysApi(request, env);
+    // `await` matters: a bare `return promise` leaves the try block before the
+    // promise settles, so an async throw would skip the redaction catch below
+    // and escape the router entirely.
+    return await handleProviderKeysApi(request, env);
   }
 
   if (url.pathname.startsWith("/admin/api/secrets")) {
     if (!(await isAuthenticated(request, env))) return authFailure(request);
-    return handleSecretsApi(request, env);
+    return await handleSecretsApi(request, env);
   }
 
   // Outreach + Gmail sender pool: both live in handleOutreachApi. The pool was
@@ -1732,23 +1871,22 @@ export async function handleAdminRequest(
     || url.pathname.startsWith("/admin/api/outreach/groups")
     || url.pathname.startsWith("/admin/api/outreach/campaigns")) {
     if (!(await isAuthenticated(request, env))) return authFailure(request);
-    return handleCampaignApi(request, env);
+    return await handleCampaignApi(request, env);
   }
 
   if (url.pathname.startsWith("/admin/api/outreach") || url.pathname.startsWith("/admin/api/gmail")) {
     if (!(await isAuthenticated(request, env))) return authFailure(request);
-    return handleOutreachApi(request, env);
+    return await handleOutreachApi(request, env);
   }
 
   if (url.pathname.startsWith("/admin/api/")) {
     if (!(await isAuthenticated(request, env))) return authFailure(request);
-    return handleAdminApi(request, env);
+    return await handleAdminApi(request, env);
   }
 
   return new Response("Not Found", { status: 404 });
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    return jsonResponse({ detail: `Internal Error: ${msg}` }, 500);
+    return internalErrorResponse("admin-router", error);
   }
 }
 
