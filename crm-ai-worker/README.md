@@ -245,8 +245,31 @@ npx wrangler d1 execute crm-ai-db --local --file=./schema.sql
 - 🧊 冷却监控：被 429/401/403 暂停的 Key 实时显示剩余冷却时间，可一键清除；过期冷却保留在 📜 历史列表（最近 20 条）；页面每 30 秒自动刷新（输入时暂停）；
 - 📊 本月用量卡片：每个平台的成功调用次数（本月/累计）、活动 Key 数、冷却数、以及搜索平台的免费容量估算进度条（Tavily 500 次深度搜索/Key、Exa ~2000 次/Key）；
 - 📦 批量导入（适合 Tavily/Exa 等大量 Key）：模板格式**每行一条 `API Key,备注/账号`**，也支持 Tab 或 | 分隔（可直接从 Excel/Google Sheets 复制两列粘贴），纯 Key（逗号/分号/空格分隔）也可；面板内置 Tavily/Exa/通用 一键填充模板；自动去重、跳过已存在的 Key（部分重贴安全）；
+- 🔐 凭据加密：`api_configs.api_key` 以 AES-GCM 密文存储，面板只显示 `tvly-d…0001` 形式的提示位。**未配置密钥时新增/导入会被拒绝**（fail closed，不会退回明文）。详见下方「凭据加密」；
 - 数据存于 D1 `api_configs` / `provider_settings` 表，下一个请求即生效（同节点即时，全网 30 秒内刷新），**不需要重新部署，也不需要 GitHub 或命令行**；
 - Worker 按「D1 优先、env Secrets 兑底」解析 Key，面板清空后自动回退到 Secret 池。
+
+#### 凭据加密（D1 中的 Key 明文存储）
+
+**先说清边界。** 加密密钥存 Worker Secret `CREDENTIAL_ENC_KEY`，它的保护等级和 `ADMIN_PANEL_TOKEN` 完全相同——拿到它的人本就能控制这个 Worker。所以它**挡不住面板被攻破**，只挡「D1 单独泄露」这一类更现实的情况：Cloudflare 凭据泄露、D1 导出、日志外泄。
+
+启用步骤（`/admin/keys` 页面「🔐 凭据加密」卡片）：
+
+1. 点「生成密钥」拿到 32 字节 base64 值；
+2. **先备份 D1**：`npx wrangler d1 export crm-ai-db --remote --output backup.sql`；
+3. 把该值保存为 Worker Secret（`/admin/secrets` 页面，或 `npx wrangler secret put CREDENTIAL_ENC_KEY`）；
+4. 回到 `/admin/keys` 刷新，点「一键加密 N 条存量」。
+
+**这个密钥没有备份就无法恢复**——丢失后存量 Key 全部无法解密，只能重新申请。
+
+设计要点：
+
+- **渐进、无停机**：存量明文行在未配置密钥时照常工作（`decryptSecret` 对无 `enc:v1:` 前缀的值直接透传），部署本身不影响 AI 管道；是否加密、何时加密由你决定；
+- **`enc:v1:<iv>:<密文>` 前缀**就是迁移开关：无前缀即按明文读取，所以加密是就地、可回滚的；
+- **未配置密钥时拒绝写入**：新增/批量导入返回 400 并提示去配置，而不是悄悄写回明文；
+- **指纹去重**：随机 IV 让同一把 Key 每次密文都不同，批量导入改用 `key_fingerprint`（HMAC-SHA256 前 128 位）判重；`key_fingerprint` 为空的老行会用解密后的值现算，混合状态下仍能正确去重；
+- **一处主密钥，两把子密钥**：HKDF 从主密钥派生出 AES-GCM 加密密钥和 HMAC 指纹密钥，同一份密钥材料不做跨算法复用；
+- **单行解密失败不影响整平台**：某个行用别的密钥加密过（换过密钥）会被跳过，其余 Key 照常工作。
 
 **方式 B：面板直写 Cloudflare Secrets（方案A）**
 
@@ -522,9 +545,12 @@ https://crm-ai-worker.qdu.workers.dev/admin
 
 ```text
 ADMIN_PANEL_TOKEN
+CREDENTIAL_ENC_KEY
 ```
 
-请使用随机长字符串作为值，不要将其写入代码或发送到聊天。部署 workflow 会自动同步该 Secret；未设置时 `/admin` 会保持禁用。
+`ADMIN_PANEL_TOKEN` 用随机长字符串，不要将其写入代码或发送到聊天。部署 workflow 会自动同步该 Secret；未设置时 `/admin` 会保持禁用。
+
+`CREDENTIAL_ENC_KEY` 是 D1 凭据加密密钥（32 字节 base64），**未设置时面板仍可读取存量明文 Key，但会拒绝一切新增/导入**。它同样不要提交到仓库；在 `/admin/keys` 的「🔐 凭据加密」卡片生成并保存即可。**丢失该密钥，存量 Key 无法解密**——加密前请先 `npx wrangler d1 export crm-ai-db --remote --output backup.sql` 备份。
 
 仓库是公开的，`/admin/login` 的存在与形式都不算秘密，而猜中 token 等于交出 D1 里的全部 API Key，因此登录失败会计数并锁定：
 
@@ -598,6 +624,7 @@ outreach_groups: name（唯一）, description, filters（SegmentFilters 的 JSO
 outreach_campaigns: name, brand_name, group_id, filters, total（创建时的快照人数）, status（draft/paused/done）, last_error
 outreach_campaign_members: campaign_id + customer_id（联合主键）, status（pending/generated/sent/failed）, outreach_email_id, error
 admin_login_attempts: scope（ip/global）+ ident（联合主键）, failures, window_start, locked_until（登录失败计数，15 分钟后自动清理）
+api_configs 增补列: key_hint（面板显示的 `AIzaSy…x7f2`）, key_fingerprint（HMAC 指纹，用于去重）；api_key 存 `enc:v1:…` 密文，无前缀即存量明文
 api_key_health: provider, key_index, exhausted_until, last_error
 gmail_send_log: outreach_email_id, recipient, status, detail, sent_at
 ```
@@ -605,3 +632,16 @@ gmail_send_log: outreach_email_id, recipient, status, detail, sent_at
 并为 `status` 和 `company_id` 建立索引。`outreach_campaign_members` 另按
 `(campaign_id, status)` 建索引（`idx_campaign_members_queue`）——
 两个步骤的「取下一批」都走这条。
+
+已存在的线上数据库用 `migrations/` 下的文件升级（全新数据库直接跑 `schema.sql` 即可）：
+
+| 文件 | 内容 |
+| --- | --- |
+| `0001`–`0003` | 发送主体名义、签名/附件语言、Gmail 账号池 |
+| `0004_outreach_campaigns.sql` | 定向群发三张表 |
+| `0005_admin_login_attempts.sql` | 登录失败计数表 |
+| `0006_api_configs_credential_columns.sql` | `api_configs` 的 `key_hint` / `key_fingerprint` 两列 |
+
+`0006` 的两条 `ALTER TABLE ADD COLUMN` 必须**逐条**执行——D1 遇到重复列会整批失败。
+CI 每次部署都会自动跑这些升级（幂等，重复执行是 no-op），所以正常 push 即可，
+不需要手动执行。

@@ -330,6 +330,19 @@ jobs:
           info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('customers') WHERE name IN ('company_profile','outreach_context','lead_score','buying_signals','source_import_id')")"
           echo "$info" | grep -q '"n": 5' || { echo 'Migration failed: enrichment columns missing'; exit 1; }
 
+      - name: Migrate api_configs credential columns
+        # key_hint / key_fingerprint support encrypted key storage. They live
+        # in schema.sql's CREATE TABLE too, but an existing database needs the
+        # ALTER, and D1 fails a whole schema file on a duplicate ALTER — hence
+        # per-statement with duplicate-column tolerance, same as above.
+        run: |
+          for col in key_hint TEXT key_fingerprint TEXT; do
+            set -- $col
+            npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE api_configs ADD COLUMN $1 $2" 2>&1 | grep -q 'duplicate column name' && echo "$1 already exists" || true
+          done
+          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('api_configs') WHERE name IN ('key_hint','key_fingerprint')")"
+          echo "$info" | grep -q '"n": 2' || { echo 'Migration failed: api_configs credential columns missing'; exit 1; }
+
       - name: Typecheck
         run: npm run typecheck
 

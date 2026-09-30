@@ -1,0 +1,16 @@
+-- 凭据加密：api_configs 增加 key_hint / key_fingerprint 两列
+-- 适用：已存在的线上 D1 数据库（全新数据库直接执行 schema.sql 即可，无需本文件）
+-- 执行：npx wrangler d1 execute crm-ai-db --remote --command \
+--         "ALTER TABLE api_configs ADD COLUMN key_hint TEXT"
+--       npx wrangler d1 execute crm-ai-db --remote --command \
+--         "ALTER TABLE api_configs ADD COLUMN key_fingerprint TEXT"
+-- 说明：D1 遇到重复列会整批失败，所以这两条必须逐条执行。
+--       CI 每次部署都会跑 "Migrate api_configs credential columns" 步骤，
+--       重复执行时报 duplicate column name 会被忽略，因此线上会自动获得这两列。
+--
+-- 这两列是加密的必要代价（见 src/credential-crypto.ts）：
+--   key_hint        密文没有稳定前缀可切，面板显示值必须在加密前先算好；
+--   key_fingerprint HMAC 指纹，批量导入用它去重 —— 随机 IV 让密文逐行不同，
+--                   再也无法直接比较 api_key 是否重复。
+-- 两列都可为空：迁移前的老行没有值，点面板的「一键加密存量」时回填。
+-- 本文件不改动 api_key 本身 —— 加密由面板在运行时就地完成，可回滚。

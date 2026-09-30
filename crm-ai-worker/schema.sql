@@ -155,7 +155,9 @@ CREATE TABLE IF NOT EXISTS api_configs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   provider TEXT NOT NULL,             -- gemini | groq | cerebras | zhipu | nvidia | mistral | deepseek | openrouter | tavily | exa | brave | searlo
   label TEXT,
-  api_key TEXT NOT NULL,
+  api_key TEXT NOT NULL,                 -- cleartext, or `enc:v1:<iv>:<ciphertext>` once encrypted
+  key_hint TEXT,                         -- `AIzaSy…x7f2` for the panel; added by the CI migration
+  key_fingerprint TEXT,                  -- HMAC(key) for dedupe; added by the CI migration
   rpm_limit INTEGER,                  -- NULL = use default per-key RPM
   is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
   model TEXT,                         -- optional per-key model override
@@ -166,6 +168,19 @@ CREATE TABLE IF NOT EXISTS api_configs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_configs_provider ON api_configs(provider, is_active);
+
+-- Credential encryption (see src/credential-crypto.ts). `api_key` keeps its
+-- NOT NULL constraint and holds either legacy cleartext or `enc:v1:…`; the
+-- prefix is what makes migration safe, because a row without it is still
+-- readable exactly as before. The two columns above are what encryption
+-- otherwise costs us — ciphertext has no stable prefix to slice for display
+-- (`key_hint`) and differs per row due to the random IV, so duplicate
+-- detection has to compare `key_fingerprint` instead of the value.
+-- Both are nullable: a row predating the migration simply has NULL until the
+-- operator runs the panel's encrypt-all action, which backfills them.
+-- Existing databases get them from the CI "Migrate api_configs credential
+-- columns" step, not from here — D1 fails a whole schema file on a duplicate
+-- ALTER, so the ALTERs have to be per-statement and run outside this file.
 
 -- Provider-level settings (default model, total RPM override, enabled flag)
 CREATE TABLE IF NOT EXISTS provider_settings (

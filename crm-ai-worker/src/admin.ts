@@ -18,6 +18,15 @@ import {
   GmailConfigError,
 } from "./gmail";
 import { invalidateProviderCache } from "./provider-keys";
+import {
+  encryptSecret,
+  decryptSecret,
+  isEncrypted,
+  fingerprint,
+  isEncryptionConfigured,
+  suggestEncKey,
+  hintFor,
+} from "./credential-crypto";
 import { parseBulkKeyEntries } from "./bulk-keys";
 import {
   parseSegmentFilters,
@@ -766,7 +775,7 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
   if (request.method === "GET" && path === "/admin/api/keys") {
     const [keys, settings, cooldowns, history] = await Promise.all([
       env.DB.prepare(
-        `SELECT id, provider, label, api_key, rpm_limit, is_active, model, last_error, last_used_at, created_at
+        `SELECT id, provider, label, api_key, key_hint, rpm_limit, is_active, model, last_error, last_used_at, created_at
          FROM api_configs ORDER BY provider, id`,
       ).all<Record<string, unknown>>(),
       env.DB.prepare(`SELECT provider, default_model, rpm_total, enabled FROM provider_settings ORDER BY provider`)
@@ -787,14 +796,29 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
          ORDER BY updated_at DESC LIMIT 20`,
       ).all<Record<string, unknown>>(),
     ]);
-    // Mask keys: show only a short prefix for identification
-    const rows = (keys.results ?? []).map((row) => ({
-      ...row,
-      api_key: typeof row.api_key === "string" && row.api_key.length > 10
-        ? `${row.api_key.slice(0, 6)}…${row.api_key.slice(-4)}`
-        : "…",
-    }));
-    return jsonResponse({ keys: rows, settings: settings.results ?? [], cooldowns: cooldowns.results ?? [], history: history.results ?? [] });
+    // Mask keys. key_hint is computed at encryption time because ciphertext has
+    // no stable prefix to slice; legacy cleartext rows still have no hint yet,
+    // so those fall back to slicing the value itself.
+    const rows = (keys.results ?? []).map((row) => {
+      const stored = typeof row.api_key === "string" ? row.api_key : "";
+      const hint = typeof row.key_hint === "string" && row.key_hint
+        ? row.key_hint
+        : isEncrypted(stored) ? "…" : hintFor(stored);
+      const { api_key: _raw, key_hint: _hint, ...rest } = row;
+      return { ...rest, api_key: hint, encrypted: isEncrypted(stored) };
+    });
+    return jsonResponse({
+      keys: rows,
+      settings: settings.results ?? [],
+      cooldowns: cooldowns.results ?? [],
+      history: history.results ?? [],
+      // Drives the panel's warning banner and enables/disables the write
+      // affordances. Read paths work with or without it.
+      encryption: {
+        configured: await isEncryptionConfigured(env),
+        plaintext_rows: rows.filter((r) => !r.encrypted).length,
+      },
+    });
   }
 
   // POST /admin/api/keys — add a new key
@@ -810,11 +834,73 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
     const model = typeof body.model === "string" ? body.model.trim() || null : null;
     const rpmRaw = Number(body.rpm_limit);
     const rpmLimit = Number.isFinite(rpmRaw) && rpmRaw > 0 ? Math.floor(rpmRaw) : null;
+    // Fail closed: writing without a configured key would put the new value
+    // back into D1 in cleartext, which is the exact state this feature exists
+    // to end. Checked up front and reported as 400 rather than letting
+    // encryptSecret throw — an unconfigured key is something the operator can
+    // fix, and a redacted 500 with a request_id would tell them nothing.
+    if (!(await isEncryptionConfigured(env))) {
+      return jsonResponse({
+        detail: "尚未配置 CREDENTIAL_ENC_KEY，为避免明文写入已拒绝保存。请先在「🔐 凭据加密」中生成并保存密钥。",
+      }, 400);
+    }
+    const encrypted = await encryptSecret(apiKey, env);
     const result = await env.DB.prepare(
-      `INSERT INTO api_configs (provider, label, api_key, rpm_limit, model, is_active) VALUES (?, ?, ?, ?, ?, 1)`,
-    ).bind(provider, label, apiKey, rpmLimit, model).run();
+      `INSERT INTO api_configs (provider, label, api_key, key_hint, key_fingerprint, rpm_limit, model, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+    ).bind(provider, label, encrypted.cipher, encrypted.hint, encrypted.fingerprint, rpmLimit, model).run();
     invalidateProviderCache(provider);
-    return jsonResponse({ ok: true, id: result.meta?.last_row_id ?? null });
+    return jsonResponse({ ok: true, id: result.meta?.last_row_id ?? null, encrypted: true });
+  }
+
+  // POST /admin/api/keys/encrypt-all — convert remaining cleartext rows in
+  // place. Explicit rather than automatic: it is irreversible, it rewrites live
+  // credentials, and the operator should see a count before it happens.
+  if (request.method === "POST" && path === "/admin/api/keys/encrypt-all") {
+    // Check up front so an unconfigured or malformed key fails before any
+    // write, rather than halfway through rewriting live credentials.
+    if (!(await isEncryptionConfigured(env))) {
+      return jsonResponse({
+        detail: "尚未配置 CREDENTIAL_ENC_KEY：请先在「🔐 凭据加密」中生成并保存，再执行加密。",
+      }, 400);
+    }
+    const rows = await env.DB.prepare(
+      `SELECT id, provider, api_key FROM api_configs WHERE api_key NOT LIKE 'enc:v1:%'`,
+    ).all<{ id: number; provider: string; api_key: string }>();
+
+    const converted: string[] = [];
+    const failed: Array<{ id: number; reason: string }> = [];
+    for (const row of rows.results ?? []) {
+      try {
+        const encrypted = await encryptSecret(row.api_key, env);
+        await env.DB.prepare(
+          `UPDATE api_configs SET api_key = ?, key_hint = ?, key_fingerprint = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+        ).bind(encrypted.cipher, encrypted.hint, encrypted.fingerprint, row.id).run();
+        converted.push(row.provider);
+      } catch (error) {
+        failed.push({ id: row.id, reason: error instanceof Error ? error.message : "unknown" });
+      }
+    }
+    // Rows rewritten under the same key, so cached provider state is stale.
+    for (const provider of new Set(converted)) invalidateProviderCache(provider);
+    return jsonResponse({
+      ok: failed.length === 0,
+      converted: converted.length,
+      remaining: (await env.DB.prepare(
+        `SELECT COUNT(*) AS n FROM api_configs WHERE api_key NOT LIKE 'enc:v1:%'`,
+      ).first<{ n: number }>())?.n ?? null,
+      failed,
+    });
+  }
+
+  // POST /admin/api/keys/encryption-key — mint a candidate CREDENTIAL_ENC_KEY.
+  // Returns the value instead of saving it: setting a Worker secret needs the
+  // Cloudflare API token, and a generated value the operator cannot retrieve
+  // later is useless. Losing it means the D1 rows become undecryptable, which
+  // is why the panel treats saving it as a deliberate step.
+  if (request.method === "POST" && path === "/admin/api/keys/encryption-key") {
+    return jsonResponse({ value: await suggestEncKey() });
   }
 
   // GET /admin/api/keys/usage — per-provider monthly usage summary for the
@@ -899,21 +985,48 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
     const rpmRaw = Number(body.rpm_limit);
     const rpmLimit = Number.isFinite(rpmRaw) && rpmRaw > 0 ? Math.floor(rpmRaw) : null;
 
-    const existingRows = await env.DB.prepare(`SELECT api_key FROM api_configs WHERE provider = ?`)
-      .bind(provider).all<{ api_key: string }>();
-    const existing = new Set((existingRows.results ?? []).map((r) => r.api_key));
+    // Same fail-closed rule as the single-key path, checked before any query so
+    // a rejected import cannot half-apply.
+    if (!(await isEncryptionConfigured(env))) {
+      return jsonResponse({
+        detail: "尚未配置 CREDENTIAL_ENC_KEY，为避免明文写入已拒绝导入。请先在「🔐 凭据加密」中生成并保存密钥。",
+      }, 400);
+    }
+
+    // Dedupe can no longer compare api_key values: two rows holding the same
+    // key produce different ciphertext (random IV), so equality is meaningless.
+    // Every candidate is reduced to its HMAC fingerprint instead. Rows that
+    // predate the fingerprint column are fingerprinted on the fly from their
+    // decrypted value, so a mixed table still detects duplicates correctly.
+    const existingRows = await env.DB.prepare(
+      `SELECT api_key, key_fingerprint FROM api_configs WHERE provider = ?`,
+    ).bind(provider).all<{ api_key: string; key_fingerprint: string | null }>();
+    const existing = new Set<string>();
+    for (const row of existingRows.results ?? []) {
+      try {
+        existing.add(
+          row.key_fingerprint ?? (await fingerprint(await decryptSecret(row.api_key, env), env)),
+        );
+      } catch { /* unreadable row: cannot be a duplicate we could have caught */ }
+    }
+
     let added = 0;
     let skipped = 0;
     for (const entry of entries) {
-      if (existing.has(entry.key)) {
+      const encrypted = await encryptSecret(entry.key, env);
+      // Also recorded as we go, so a key repeated within the same paste is
+      // caught even though no row exists for it yet.
+      if (existing.has(encrypted.fingerprint)) {
         skipped++;
         continue;
       }
+      existing.add(encrypted.fingerprint);
       // Line-provided label wins; otherwise prefix + sequence (账号1, 账号2, …)
       const label = entry.label ?? (labelPrefix ? `${labelPrefix}${added + 1}` : null);
       await env.DB.prepare(
-        `INSERT INTO api_configs (provider, label, api_key, rpm_limit, model, is_active) VALUES (?, ?, ?, ?, ?, 1)`,
-      ).bind(provider, label, entry.key, rpmLimit, model).run();
+        `INSERT INTO api_configs (provider, label, api_key, key_hint, key_fingerprint, rpm_limit, model, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+      ).bind(provider, label, encrypted.cipher, encrypted.hint, encrypted.fingerprint, rpmLimit, model).run();
       added++;
     }
     invalidateProviderCache(provider);
@@ -1031,6 +1144,7 @@ const SECRET_DEFINITIONS: SecretDefinition[] = [
   { name: "CLOUDFLARE_ACCOUNT_ID", label: "Cloudflare Account ID", group: "Panel Config" },
   { name: "WORKER_SCRIPT_NAME", label: "Worker 脚本名 (默认 crm-ai-worker)", group: "Panel Config" },
   { name: "ADMIN_PANEL_TOKEN", label: "面板登录 Token (改后需重新登录)", group: "Panel Config" },
+  { name: "CREDENTIAL_ENC_KEY", label: "D1 凭据加密密钥 (32 字节 base64，未设置时禁止写入 Key)", group: "Panel Config" },
   { name: "GEMINI_API_KEY", label: "Gemini", group: "AI Provider Keys", indexed: true },
   { name: "GROQ_API_KEY", label: "Groq", group: "AI Provider Keys", indexed: true },
   { name: "CEREBRAS_API_KEY", label: "Cerebras", group: "AI Provider Keys", indexed: true },
@@ -2664,6 +2778,7 @@ tvly-zzzzzzzz,账号3"></textarea>
   </div>
   <p><button class="btn on" id="bulkImport" style="padding:9px 22px">批量导入</button></p>
 </div>
+<div class="card" id="encCard"><h2>🔐 凭据加密</h2><div id="encBox"><p style="color:#6b7280;margin:4px 0">加载中…</p></div></div>
 <div class="card"><h2>🗝 已配置 Keys</h2><div style="overflow-x:auto"><table id="keysTable"><thead><tr><th>平台</th><th>备注</th><th>Key</th><th>RPM</th><th>模型</th><th>状态</th><th>最近错误</th><th>操作</th></tr></thead><tbody></tbody></table></div></div>
 <div class="card"><h2>📊 本月用量（成功调用数，按自然月）<span style="font-size:11px;color:#94a3b8;font-weight:400"> v2026-09-09b</span></h2><div id="usageBox"><p style="color:#6b7280;margin:4px 0">加载中…</p></div></div>
 <div class="card"><h2>🧊 冷却中的 Key（429/限流自动暂停）</h2><div id="cooldownBox"></div></div>
@@ -2677,6 +2792,50 @@ var toastEl=document.getElementById('toast');
 function toast(msg,err){toastEl.textContent=msg;toastEl.className=err?'err':'';toastEl.style.display='block';setTimeout(function(){toastEl.style.display='none'},4000)}
 function api(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin';throw new Error('登录过期')}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败');return d})})}
 var PROVIDER_NAMES={gemini:'Gemini',groq:'Groq',cerebras:'Cerebras',zhipu:'Zhipu',nvidia:'NVIDIA',amd:'AMD',mistral:'Mistral',deepseek:'DeepSeek',openrouter:'OpenRouter',tavily:'Tavily',exa:'Exa',brave:'Brave',searlo:'Searlo'};
+// 🔐 凭据加密卡片。
+//
+// States the operator has to act on, in order of urgency:
+//   1. no key configured  → writes are refused, so they must set one first
+//   2. key + cleartext    → the "一键加密" button, with a row count
+//   3. key + none left    → done, state the residual risk plainly
+function renderEncryption(enc){
+  var box=document.getElementById('encBox');if(!box)return;
+  var left=enc.plaintext_rows||0;
+  var genBtn='<button class="btn" id="genEncKey" type="button">生成密钥</button>';
+  if(!enc.configured){
+    box.innerHTML='<p style="color:#b23b3b;margin:4px 0"><b>⚠️ 未配置加密密钥 —— 新增/导入 Key 已被拒绝。</b></p>'+
+      '<p class="hint">点「生成密钥」拿到 32 字节 base64 值，再把它作为 Worker Secret <code>CREDENTIAL_ENC_KEY</code> 保存（面板「🔑 凭据与密钥」页，或 <code>npx wrangler secret put CREDENTIAL_ENC_KEY</code>）。'+
+      '保存后回到本页刷新即可。'+
+      '<br><br><b>为什么必须先设：</b>密钥只存在于 Worker Secret，与面板 Token 同级保护 —— 拿到它的人本就能控制这个 Worker。'+
+      '所以它挡不住面板被攻破，只挡「D1 单独泄露」（Cloudflare 凭据泄露、D1 导出、日志外泄）。'+
+      '<br><b>务必先备份 D1</b>再加密：丢失这个密钥，存量 Key 将无法解密，只能重新申请。</p>'+
+      '<p>'+genBtn+'</p>';
+    document.getElementById('genEncKey').onclick=function(){
+      api('/admin/api/keys/encryption-key',{method:'POST'}).then(function(d){
+        var v=d.value||'';
+        if(prompt('复制下面的值，并作为 CREDENTIAL_ENC_KEY 保存到 Worker Secret。\\n关闭后无法再次查看，请立即妥善保存：',v)===null)return;
+        toast('已复制到剪贴板提示框。请确认已保存到 Worker Secret。');
+      }).catch(function(e){toast(e.message,true)});
+    };
+    return;
+  }
+  var tail=left
+    ?'<button class="btn on" id="doEncrypt" type="button">一键加密 '+left+' 条存量</button>'+
+     '<span class="hint" style="margin-left:8px">就地改写，不可撤销。建议先 <code>npx wrangler d1 export</code> 备份。</span>'
+    :'<span class="hint">全部 Key 已加密。</span>';
+  box.innerHTML='<p style="color:#16a34a;margin:4px 0">✔️ 加密密钥已配置'+(left?'，仍有 '+left+' 条为明文':'，无明文存量')+'。</p>'+
+    '<p class="hint">表内 <code>api_key</code> 存 AES-GCM 密文；面板只显示加密前算好的 <code>key_hint</code>，D1 泄露拿不到可用凭据。'+
+    '该密钥只存在于 Worker Secret，<b>没有备份就无法恢复</b>。</p><p>'+tail+'</p>';
+  var encBtn=document.getElementById('doEncrypt');
+  if(encBtn)encBtn.onclick=function(){
+    if(!confirm('将就地加密 '+left+' 条明文 Key，不可撤销。\\n\\n确认已备份 D1 且已妥善保存 CREDENTIAL_ENC_KEY？'))return;
+    encBtn.disabled=true;
+    api('/admin/api/keys/encrypt-all',{method:'POST'}).then(function(r){
+      toast('已加密 '+r.converted+' 条，剩余 '+(r.remaining===null?'?':r.remaining)+' 条'+(r.failed&&r.failed.length?('，失败 '+r.failed.length+' 条'):''));
+      loadKeys();
+    }).catch(function(e){toast(e.message,true);encBtn.disabled=false});
+  };
+}
 function loadKeys(){
   api('/admin/api/keys').then(function(d){
     var tb=document.querySelector('#keysTable tbody');tb.innerHTML='';
@@ -2685,12 +2844,14 @@ function loadKeys(){
       var m=/^([a-z]+):(\d+)$/.exec(c.key_index||'');
       if(m&&m[1]===c.provider)cdMap[Number(m[2])]=c;
     });
+    renderEncryption(d.encryption||{});
     d.keys.forEach(function(k){
       var tr=document.createElement('tr');if(!k.is_active)tr.className='inactive';
       var cd=cdMap[k.id];
       var status=k.is_active?'启用':'停用';
       if(cd){var mins=Math.max(1,Math.round((new Date(cd.exhausted_until.replace(' ','T')+'Z')-Date.now())/60000));status+='<span class="cdtag">冷却中 ~'+mins+'分钟</span>';}
-      tr.innerHTML='<td>'+PROVIDER_NAMES[k.provider]+'</td><td>'+(k.label||'-')+'</td><td><code>'+k.api_key+'</code></td><td>'+(k.rpm_limit||'默认')+'</td><td>'+(k.model||'-')+'</td><td>'+status+'</td><td>'+(k.last_error||'-')+'</td>';
+      var keyCell=k.api_key+(k.encrypted?'':'<span class="cdtag" style="background:#fee2e2;color:#991b1b">明文</span>');
+      tr.innerHTML='<td>'+PROVIDER_NAMES[k.provider]+'</td><td>'+(k.label||'-')+'</td><td><code>'+keyCell+'</code></td><td>'+(k.rpm_limit||'默认')+'</td><td>'+(k.model||'-')+'</td><td>'+status+'</td><td>'+(k.last_error||'-')+'</td>';
       var td=document.createElement('td');
       var tog=document.createElement('button');tog.className='btn '+(k.is_active?'off':'on');tog.textContent=k.is_active?'停用':'启用';
       tog.onclick=function(){api('/admin/api/keys/'+k.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({is_active:!k.is_active})}).then(loadKeys).catch(function(e){toast(e.message,true)})};

@@ -11,6 +11,8 @@
 // A short in-isolate cache (30s) keeps the per-request D1 overhead at zero for
 // bursty batches; cooldown/exhaustion state still lives in api_key_health.
 
+import { decryptSecret } from "./credential-crypto";
+
 export interface ProviderKeyEntry {
   key: string;
   model: string | null; // per-key model override
@@ -62,7 +64,8 @@ export const D1_PROVIDERS = [
 ] as const;
 
 interface ApiConfigRow {
-  id?: number;
+  /** Row id, used as the stable cooldown key. Always selected. */
+  id: number;
   api_key: string;
   model: string | null;
   rpm_limit: number | null;
@@ -100,18 +103,35 @@ export async function getProviderState(env: unknown, provider: string): Promise<
   if (db) {
     try {
       const [configs, settings] = await Promise.all([
-        db.prepare(`SELECT api_key, model, rpm_limit FROM api_configs WHERE provider = ? AND is_active = 1 ORDER BY id`)
+        // `id` is load-bearing, not decorative: api_key_health is keyed by
+        // "<provider>:<id>", so omitting it gave every key in a provider the
+        // same slot and one rate-limited key cooled down all of them.
+        db.prepare(`SELECT id, api_key, model, rpm_limit FROM api_configs WHERE provider = ? AND is_active = 1 ORDER BY id`)
           .bind(provider).all<ApiConfigRow>(),
         db.prepare(`SELECT default_model, rpm_total, enabled FROM provider_settings WHERE provider = ?`)
           .bind(provider).first<ProviderSettingsRow>(),
       ]);
-      const d1Keys: ProviderKeyEntry[] = (configs.results ?? []).map((row) => ({
-        key: row.api_key,
-        model: row.model,
-        rpmLimit: row.rpm_limit,
-        source: "d1" as const,
-        keyId: row.id ?? 0,
-      }));
+      // Rows may be legacy cleartext (no enc: prefix) or ciphertext, so each
+      // one is decrypted individually — a row encrypted under a key we no
+      // longer hold is dropped rather than taking the whole provider down with
+      // it. Mapped in parallel to keep this as cheap as the map it replaces.
+      const d1Keys: ProviderKeyEntry[] = (await Promise.all(
+        (configs.results ?? []).map(async (row) => {
+          let key: string;
+          try {
+            key = await decryptSecret(row.api_key, env);
+          } catch {
+            return null;
+          }
+          return {
+            key,
+            model: row.model,
+            rpmLimit: row.rpm_limit,
+            source: "d1" as const,
+            keyId: row.id,
+          } satisfies ProviderKeyEntry;
+        }),
+      )).filter((entry) => entry !== null);
       // Env secrets are the bootstrap fallback when the panel has no keys yet.
       const envKeys: ProviderKeyEntry[] = d1Keys.length === 0
         ? collectEnvKeys(e, provider).map((key, i) => ({ key, model: null, rpmLimit: null, source: "env" as const, keyId: i + 1 }))
