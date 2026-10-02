@@ -50,6 +50,7 @@ import { buildFilterOptions } from "./facets";
 import { roleHasPermission, requiredPermission } from "./auth/rbac";
 import { applySecurityHeaders, htmlCsp } from "./security-headers";
 import { originGuardRejection } from "./security/origin-guard";
+import { readCsvImportBody, parseCsvBounded, CsvLimitError } from "./security/csv-limits";
 
 export interface AdminEnv extends GmailEnv {
   DB: D1Database;
@@ -711,44 +712,26 @@ async function listCustomers(request: Request, env: AdminEnv): Promise<Response>
 // rows that match an existing company (domain or normalized name) are marked
 // 'matched' and skipped; new ones become pending customers (Layer 2).
 async function importCustomersCsv(request: Request, env: AdminEnv): Promise<Response> {
-  let body: { csv?: string; file_name?: string };
+  // Stage 8: the body is read with a hard byte cap (no unbounded
+  // request.json()) and the CSV with hard row/column/field caps. Every
+  // refusal names the exact limit it tripped.
+  let body: { csv: string; file_name: string | null };
   try {
-    body = await request.json();
-  } catch {
+    body = await readCsvImportBody(request);
+  } catch (e) {
+    if (e instanceof CsvLimitError) return jsonResponse({ detail: e.message }, e.status);
     return jsonResponse({ detail: "Invalid JSON body" }, 400);
   }
-  const csvText = (body.csv ?? "").trim();
+  const csvText = body.csv.trim();
   if (!csvText) return jsonResponse({ detail: "csv is required" }, 400);
 
-  // Minimal RFC4180-ish parser: handles quoted fields with embedded commas/newlines.
-  const parseCsv = (text: string): string[][] => {
-    const rows: string[][] = [];
-    let row: string[] = [];
-    let field = "";
-    let inQuotes = false;
-    for (let i = 0; i < text.length; i++) {
-      const ch = text[i];
-      if (inQuotes) {
-        if (ch === '"') {
-          if (text[i + 1] === '"') { field += '"'; i++; }
-          else inQuotes = false;
-        } else field += ch;
-      } else if (ch === '"') {
-        inQuotes = true;
-      } else if (ch === ',') {
-        row.push(field); field = "";
-      } else if (ch === '\n' || ch === '\r') {
-        if (ch === '\r' && text[i + 1] === '\n') i++;
-        row.push(field); field = "";
-        if (row.some((c) => c.trim())) rows.push(row);
-        row = [];
-      } else field += ch;
-    }
-    if (field || row.length) { row.push(field); if (row.some((c) => c.trim())) rows.push(row); }
-    return rows;
-  };
-
-  const table = parseCsv(csvText);
+  let table: string[][];
+  try {
+    table = parseCsvBounded(csvText);
+  } catch (e) {
+    if (e instanceof CsvLimitError) return jsonResponse({ detail: e.message }, e.status);
+    throw e;
+  }
   if (table.length < 2) return jsonResponse({ detail: "CSV needs a header row plus at least one data row" }, 400);
   const header = table[0].map((h) => h.trim().toLowerCase());
   const col = (...names: string[]) => header.findIndex((h) => names.includes(h));

@@ -91,7 +91,7 @@ Migrations (`migrations/`, forward-only, applied by CI deploy workflow):
 | 9 | No CSP/HSTS/X-Frame-Options/nosniff/Referrer-Policy headers | P1 | 5 |
 | 10 | No Origin/CSRF validation on state-changing routes (SameSite=Strict mitigates but is unverified) — **fixed in Stage 6**: foreign-origin POST/PUT/PATCH/DELETE rejected 403 before any handler; missing-Origin deliberately allowed (policy in `src/security/origin-guard.ts`) | P1 | 6 |
 | 11 | SSRF: outbound fetch of admin-supplied domains/search URLs with no private-IP/protocol guard — **fixed in Stage 6+7**: `src/security/outbound-url.ts` + guard in `fetchWithTimeout`; runtime-inherent limits documented in `docs/security-limitations.md` | P1 | 7 |
-| 12 | CSV import unbounded (bytes/rows/fields); parser runs on full body | P1 | 8 |
+| 12 | CSV import unbounded (bytes/rows/fields); parser runs on full body — **fixed in Stage 8**: `src/security/csv-limits.ts` enforces 5MB/2000 data rows/10KB fields/200 columns; body read is stream-capped (chunked uploads without Content-Length cannot bypass); formula neutralization provided for any future export | P1 | 8 |
 | 13 | No audit log | P1 | 9 |
 | 14 | Scraped/search content enters AI prompts without untrusted-data framing (prompt injection) | P2 | 13 |
 | 15 | Evidence overwritten in place (no research_run versioning) | P2 | 14 |
