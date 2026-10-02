@@ -1719,6 +1719,32 @@ async function handleCampaignApi(request: Request, env: AdminEnv): Promise<Respo
       return jsonResponse(await previewSegment(env, filters, brand));
     }
 
+    // GET /admin/api/outreach/filter-options — dropdown choices for the campaign
+    // filter form: countries/segments from real customer data, products from the
+    // AI extraction taxonomy (matches the LIKE %term% filters in campaigns.ts).
+    if (path === "/admin/api/outreach/filter-options" && request.method === "GET") {
+      const [countryRows, segmentRows] = await Promise.all([
+        env.DB.prepare(
+          `SELECT DISTINCT country FROM customers
+           WHERE status = 'completed' AND country IS NOT NULL AND TRIM(country) != ''
+             AND email IS NOT NULL AND email != ''
+           ORDER BY country LIMIT 200`,
+        ).all<{ country: string }>(),
+        env.DB.prepare(
+          `SELECT DISTINCT customer_segment FROM customers
+           WHERE status = 'completed' AND customer_segment IS NOT NULL AND TRIM(customer_segment) != ''
+           ORDER BY customer_segment LIMIT 60`,
+        ).all<{ customer_segment: string }>(),
+      ]);
+      return jsonResponse({
+        countries: (countryRows.results ?? []).map((r) => r.country.trim()).filter(Boolean),
+        segments: (segmentRows.results ?? []).map((r) => r.customer_segment.trim()).filter(Boolean),
+        products: [
+          "Inflatable Boats", "Paddle Boards", "Kayaks", "Yachts", "Kitesurfing", "Windsurfing", "Accessories", "Apparel",
+        ],
+      });
+    }
+
     // ── Saved groups (可复用客群) ──
     if (path === "/admin/api/outreach/groups" && request.method === "GET") {
       return jsonResponse({ groups: await listGroups(env) });
@@ -1982,6 +2008,7 @@ export async function handleAdminRequest(
   // 定向群发 (segment-preview / groups / campaigns) is checked first because
   // handleCampaignApi owns those paths; everything else falls through.
   if (url.pathname.startsWith("/admin/api/outreach/segment-preview")
+    || url.pathname.startsWith("/admin/api/outreach/filter-options")
     || url.pathname.startsWith("/admin/api/outreach/groups")
     || url.pathname.startsWith("/admin/api/outreach/campaigns")) {
     if (!(await isAuthenticated(request, env))) return authFailure(request);
@@ -2176,6 +2203,15 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 .cp-table{width:100%;border-collapse:collapse;margin-top:8px;font-size:13px}.cp-table th,.cp-table td{text-align:left;padding:6px 8px;border-bottom:1px solid #f1f5f9}.cp-table th{background:#f8fafc;font-weight:600;white-space:nowrap}
 .cp-chip{display:inline-block;background:#f1f5f9;border-radius:20px;padding:2px 8px;font-size:11px;margin:2px}
 .cp-hint{font-size:12px;color:#6b7280;line-height:1.7;margin:6px 0}
+.cp-dd{position:relative;display:inline-block}
+.cp-dd-btn{padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;font:inherit;font-size:13px;cursor:pointer;min-width:150px;max-width:320px;text-align:left;color:#172033;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cp-dd-btn:hover{border-color:#0f766e}
+.cp-dd-panel{display:none;position:absolute;top:calc(100% + 4px);left:0;z-index:60;background:#fff;border:1px solid #cbd5e1;border-radius:8px;box-shadow:0 10px 28px rgba(15,23,42,.14);padding:6px;max-height:260px;overflow:auto;min-width:230px}
+.cp-dd.open .cp-dd-panel{display:block}
+.cp-dd-item{display:flex;align-items:center;gap:7px;padding:5px 8px;font-size:13px;border-radius:6px;cursor:pointer;user-select:none}
+.cp-dd-item:hover{background:#f0fdfa}
+.cp-dd-sum{color:#0f766e;font-weight:600}
+.cp-dd-empty{font-size:12px;color:#9ca3af;padding:6px 8px}
 @media(max-width:700px){.top{flex-direction:column}.stats{grid-template-columns:1fr 1fr}.email-header{flex-direction:column;align-items:flex-start;gap:6px}}
 </style></head><body>
 <header class="top"><h1>📧 开发信管理</h1><div style="display:flex;gap:10px;align-items:center"><a href="/admin" style="color:#fff;text-decoration:none;font-weight:600">← 返回客户管理</a><form method="post" action="/admin/logout"><button class="btn btn-sm" style="background:rgba(255,255,255,.2);color:#fff" type="submit">退出</button></form></div></header>
@@ -2222,11 +2258,11 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 <button class="btn btn-sm btn-secondary" id="cgDeleteGroup" style="display:none">删除该客群</button>
 </div>
 <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-<input id="cgCountries" placeholder="国家（逗号分隔）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:170px">
-<input id="cgSegments" placeholder="细分（如 Distributor）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:170px">
-<input id="cgProducts" placeholder="产品（如 SUP）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:140px">
+<span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span>
+<span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span>
+<span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span>
 <input id="cgKeywords" placeholder="关键词（公司/描述）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:160px">
-<input id="cgMinScore" type="number" min="0" max="100" placeholder="最低分" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:78px">
+<select id="cgMinScore" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:110px"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select>
 <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="cgExcludeSent" checked> 排除本品牌已发送</label>
 <button class="btn btn-primary btn-sm" id="cgPreview">🔍 统计客群</button>
 </div>
@@ -2277,7 +2313,7 @@ function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){retur
 function api(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin/outreach';throw new Error('登录过期')}var ct=r.headers.get('content-type')||'';if(ct.indexOf('json')===-1){return r.text().then(function(t){throw new Error('非JSON响应: '+t.slice(0,100))})}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败');return d})})}
 
 // Tab switching
-document.querySelectorAll('.tab').forEach(function(tab){tab.onclick=function(){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tab-content').forEach(function(c){c.style.display='none'});tab.classList.add('active');document.getElementById('tab-'+tab.dataset.tab).style.display='block';if(tab.dataset.tab==='settings')loadBrands();if(tab.dataset.tab==='gmail')loadGmailAccounts();if(tab.dataset.tab==='campaign'){loadCampaignBrand();loadGroups();loadCampaigns();loadQuota()}if(tab.dataset.tab==='emails'){loadStats();loadEmails();loadQuota()}}});
+document.querySelectorAll('.tab').forEach(function(tab){tab.onclick=function(){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tab-content').forEach(function(c){c.style.display='none'});tab.classList.add('active');document.getElementById('tab-'+tab.dataset.tab).style.display='block';if(tab.dataset.tab==='settings')loadBrands();if(tab.dataset.tab==='gmail')loadGmailAccounts();if(tab.dataset.tab==='campaign'){loadCampaignBrand();loadGroups();loadCampaigns();loadQuota();loadFilterOptions()}if(tab.dataset.tab==='emails'){loadStats();loadEmails();loadQuota()}}});
 
 // ── Gmail sender account pool ──
 var GA_TYPE_HINTS={
@@ -2472,20 +2508,67 @@ document.getElementById('emailNext').onclick=function(){if(emailState.offset+ema
 var cgPickedIds=[];
 var cgBusy={};
 function cgMsg(t,g){var e=document.getElementById('cgMsg');e.textContent=t;e.style.color=g?'#059669':'#dc2626';e.style.fontSize='13px'}
+/* ── 多选下拉（国家/细分/产品）：勾选式选择项，替代手填输入框 ── */
+var cgDDOpts={countries:[],segments:[],products:[]};
+var cgDDSel={countries:[],segments:[],products:[]};
+var cgDDLoaded=false,cgPendingDD=null;
+function cgDDRender(kind){
+  var panel=document.getElementById('ddPanel'+kind.charAt(0).toUpperCase()+kind.slice(1));
+  if(!panel)return;
+  var opts=cgDDOpts[kind];
+  panel.innerHTML=opts.length?opts.map(function(v){
+    return '<label class="cp-dd-item"><input type="checkbox" '+(cgDDSel[kind].indexOf(v)>=0?'checked':'')+' data-kind="'+kind+'" data-val="'+esc(v)+'"> '+esc(v)+'</label>';
+  }).join(''):'<div class="cp-dd-empty">加载中…</div>';
+  panel.querySelectorAll('input[type=checkbox]').forEach(function(cb){
+    cb.onchange=function(){cgToggleVal(cb.dataset.kind,cb.dataset.val,cb.checked)};
+  });
+}
+function cgToggleVal(kind,v,on){
+  var arr=cgDDSel[kind],i=arr.indexOf(v);
+  if(on&&i<0)arr.push(v);
+  if(!on&&i>=0)arr.splice(i,1);
+  cgDDSum(kind);
+}
+function cgDDSum(kind){
+  var el=document.getElementById('ddSum'+kind.charAt(0).toUpperCase()+kind.slice(1));
+  if(!el)return;
+  var arr=cgDDSel[kind];
+  el.textContent=arr.length?('：'+arr.slice(0,2).join(',')+(arr.length>2?' 等'+arr.length+'项':'')):'';
+}
+document.querySelectorAll('.cp-dd-btn').forEach(function(btn){
+  btn.onclick=function(ev){ev.stopPropagation();var dd=btn.parentElement,was=dd.classList.contains('open');document.querySelectorAll('.cp-dd.open').forEach(function(o){o.classList.remove('open')});if(!was)dd.classList.add('open')};
+});
+document.addEventListener('click',function(ev){if(!(ev.target.closest&&ev.target.closest('.cp-dd')))document.querySelectorAll('.cp-dd.open').forEach(function(o){o.classList.remove('open')})});
+function cgDDApply(kind,val){
+  var arr=Array.isArray(val)?val.slice():(typeof val==='string'&&val.trim()?val.split(',').map(function(s){return s.trim()}).filter(Boolean):[]);
+  arr.forEach(function(v){if(v&&cgDDOpts[kind].indexOf(v)<0)cgDDOpts[kind].push(v)});
+  cgDDSel[kind]=arr;
+  cgDDRender(kind);cgDDSum(kind);
+}
+function loadFilterOptions(){
+  if(cgDDLoaded)return Promise.resolve();
+  return api('/admin/api/outreach/filter-options').then(function(d){
+    cgDDOpts.countries=d.countries||[];cgDDOpts.segments=d.segments||[];cgDDOpts.products=d.products||[];
+    cgDDLoaded=true;
+    ['countries','segments','products'].forEach(function(k){cgDDRender(k);cgDDSum(k)});
+    if(cgPendingDD){var p=cgPendingDD;cgPendingDD=null;Object.keys(p).forEach(function(k){cgDDApply(k,p[k])})}
+  }).catch(function(){});
+}
 function cgFilters(){
-  var min=Number(document.getElementById('cgMinScore').value);
-  return {countries:document.getElementById('cgCountries').value,segments:document.getElementById('cgSegments').value,products:document.getElementById('cgProducts').value,keywords:document.getElementById('cgKeywords').value,min_lead_score:min>0?min:0,exclude_sent:document.getElementById('cgExcludeSent').checked,customer_ids:cgPickedIds};
+  var min=Number(document.getElementById('cgMinScore').value)||0;
+  return {countries:cgDDSel.countries.join(','),segments:cgDDSel.segments.join(','),products:cgDDSel.products.join(','),keywords:document.getElementById('cgKeywords').value,min_lead_score:min,exclude_sent:document.getElementById('cgExcludeSent').checked,customer_ids:cgPickedIds};
 }
 function cgSetFilters(f){
   f=f||{};
-  document.getElementById('cgCountries').value=Array.isArray(f.countries)?f.countries.join(','):(f.countries||'');
-  document.getElementById('cgSegments').value=Array.isArray(f.segments)?f.segments.join(','):(f.segments||'');
-  document.getElementById('cgProducts').value=Array.isArray(f.products)?f.products.join(','):(f.products||'');
   document.getElementById('cgKeywords').value=Array.isArray(f.keywords)?f.keywords.join(','):(f.keywords||'');
-  document.getElementById('cgMinScore').value=f.min_lead_score||'';
+  var ms=document.getElementById('cgMinScore'),mv=String(f.min_lead_score||'');
+  if(mv&&!ms.querySelector('option[value="'+mv+'"]')){var o=document.createElement('option');o.value=mv;o.textContent='最低分 ≥'+mv;ms.appendChild(o)}
+  ms.value=mv;
   document.getElementById('cgExcludeSent').checked=f.exclude_sent!==false;
   cgPickedIds=Array.isArray(f.customer_ids)?f.customer_ids.slice():[];
   cgRenderPicked();
+  var dd={countries:f.countries,segments:f.segments,products:f.products};
+  if(!cgDDLoaded){cgPendingDD=dd}else{Object.keys(dd).forEach(function(k){cgDDApply(k,dd[k])})}
 }
 function cgRenderPicked(){
   document.getElementById('cgPicked').textContent=cgPickedIds.length?('已选 '+cgPickedIds.length+' 家：'+cgPickedIds.slice(0,20).join(', ')+(cgPickedIds.length>20?' …':'')):'未勾选';
