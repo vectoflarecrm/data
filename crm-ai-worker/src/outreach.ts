@@ -35,12 +35,12 @@ export interface OutreachEmail {
 /* ── Default brand configs (placeholders for company intros) ── */
 const DEFAULT_BRANDS: BrandConfig[] = [
   {
-    brand_name: "Afarer",
+    brand_name: "iSupfactory",
     product_category: "SUPs",
     company_intro: "SUP DIVISION OF QINGDAO VATRAD GROUP CO., LTD（青岛Vatrad集团SUP事业部）位于青岛经济开发区，是集团旗下专注充气式站立桨板（iSUP）的自有工厂事业部。工厂面积12,000平方米，拥有200余名熟练工人，年产桨板15,000片以上，客户覆盖50多个国家的品牌商、进口商与经销商。事业部集设计、工程、打样、制造与测试于一体，自有多条产线：CNC drop-stitch裁切、RF/热合焊接、数码与丝网印刷、FRP模具车间及独立质检实验室（ISO 9001认证，产品通过CE、BSCI、REACH），每片桨板出厂前100%进行保压与接缝剥离测试。标准起订量每型号5-10片，交期30-45天，支持OEM/ODM贴牌定制，可按FOB青岛/CIF/DDP条款发货。",
     sender_email: "helen@isupfactory.com",
     sender_name: "Helen | Vatrad SUP Division",
-    // SUP 开发信以 Vatrad 集团 SUP 事业部名义发送；Afarer 仅作内部品牌标识。
+    // SUP 开发信以 Vatrad 集团 SUP 事业部名义发送；品牌标签（iSupfactory）仅作内部标识。
     company_entity: "SUP DIVISION OF QINGDAO VATRAD GROUP CO., LTD",
     // Helen 的新版邮件签名（2026-09，iSupfactory 名义），原样附加在正文末尾。
     signature: [
@@ -392,7 +392,7 @@ function buildOutreachPrompt(
 - 可引用的具体事实（必须真实出现在该公司数据中）：\n${(outreach.evidence_lines ?? []).map((l) => `  * ${l}`).join("\n")}`
     : "";
   // 发送主体名义：正文署名用对外公司主体（如 Vatrad 集团 SUP 事业部），
-  // 品牌名（Afarer 等）仅作内部标识，不出现在邮件里。
+  // 品牌名（iSupfactory 等）仅作内部标识，不出现在邮件里。
   const entityName = brand.company_entity?.trim() || brand.brand_name;
 
   return `你是一名专业的B2B营销专家，擅长撰写针对水上运动行业的个性化开发信。

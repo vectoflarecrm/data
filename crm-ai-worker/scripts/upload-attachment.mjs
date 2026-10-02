@@ -4,8 +4,8 @@
  * 用法：
  *   node scripts/upload-attachment.mjs <PDF文件> <品牌名> <语言代码> [面板地址] [面板Token]
  *
- * 示例（西班牙语画册 → Afarer）：
- *   node scripts/upload-attachment.mjs "/media/hello/boot/Inflatable SUP_es.pdf" Afarer es \
+ * 示例（西班牙语画册 → iSupfactory）：
+ *   node scripts/upload-attachment.mjs "/media/hello/boot/Inflatable SUP_es.pdf" iSupfactory es \
  *     https://crm-ai-worker.qdu.workers.dev "$ADMIN_PANEL_TOKEN"
  *
  * 语言代码：es=西班牙语 en=英语 de=德语 fr=法语 pt=葡萄牙语 it=意大利语 …
@@ -30,7 +30,7 @@ if (!file || !brand || !baseUrl || !token) {
   console.error(`用法: node scripts/upload-attachment.mjs <PDF文件> <品牌名> <语言代码> <面板地址> <面板Token>
   或设置环境变量: ATTACHMENT_FILE ATTACHMENT_BRAND ATTACHMENT_LANGUAGE ADMIN_BASE_URL ADMIN_PANEL_TOKEN
 示例:
-  node scripts/upload-attachment.mjs "/media/hello/boot/Inflatable SUP_es.pdf" Afarer es \\
+  node scripts/upload-attachment.mjs "/media/hello/boot/Inflatable SUP_es.pdf" iSupfactory es \\
     https://crm-ai-worker.qdu.workers.dev "\$ADMIN_PANEL_TOKEN"`);
   process.exit(1);
 }

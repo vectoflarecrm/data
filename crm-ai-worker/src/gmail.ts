@@ -554,7 +554,7 @@ export async function sendOutreachEmail(
   email: { id: number; email_to: string; subject: string | null; body: string | null },
   options?: { /** Per-brand sender mailbox (must be a Workspace user covered by the delegation). */
     fromEmail?: string | null;
-    /** Optional display name for the From header (e.g. "Toby | Afarer Team"). */
+    /** Optional display name for the From header (e.g. "Toby | iSupfactory Team"). */
     fromName?: string | null;
     /** Brand whose stored attachments should be attached. */
     brandName?: string | null;

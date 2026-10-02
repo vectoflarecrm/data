@@ -742,7 +742,7 @@ pending → processing → completed
 
 - AI 使用 Gemini → Groq → Cerebras → Zhipu → NVIDIA → Mistral → DeepSeek → OpenRouter 的回退链，Key 被限流时进入冷却，避免重复调用受限 Key；
 - AI 只能处理网页文本并写入画像字段，不能执行任意 SQL；
-- outreach 面板支持 Afarer（SUPs）和 Neptunor（RIB Boats + Inflatable Boats）两种品牌身份，可分别设置发件人、签名和附件；
+- outreach 面板支持 iSupfactory（SUPs）和 Neptunor（RIB Boats + Inflatable Boats）两种品牌身份，可分别设置发件人、签名和附件；
 - **Gmail 发信账号池**：面板「📮 发信账号」页可添加多个发信身份，支持两种凭据——OAuth 令牌（推荐，无需服务账号密钥，用 `scripts/get-gmail-refresh-token.py` 一次性授权）和传统服务账号（全域委托）；每封邮件自动选用剩余配额最多的健康账号；被 Google 拒绝的账号自动冷却 6 小时；品牌可绑定指定账号；每日总配额 = 各账号之和；详见 `docs/gmail-account-setup.md`；
 - D1 写回使用 `WHERE id = ? AND status = 'processing'`，避免过期任务覆盖新状态。
 
