@@ -47,6 +47,7 @@ import {
   deserializeFilters,
 } from "./campaigns";
 import { buildFilterOptions } from "./facets";
+import { roleHasPermission, requiredPermission } from "./auth/rbac";
 
 export interface AdminEnv extends GmailEnv {
   DB: D1Database;
@@ -2255,9 +2256,15 @@ export async function handleAdminRequest(
 
   if (url.pathname === "/admin/secrets") {
     if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
-    return (await authenticate(request, env))
-      ? htmlResponse(SECRETS_PANEL_HTML)
-      : htmlResponse(ADMIN_LOGIN_HTML);
+    const auth = await authenticate(request, env);
+    if (!auth) return htmlResponse(ADMIN_LOGIN_HTML, 401);
+    // The secrets page exists only to mutate Cloudflare Worker secrets —
+    // server-side that is super_admin-only, so bounce everyone else early
+    // instead of rendering a panel whose every call would 403.
+    if (!roleHasPermission(auth.user.role, "secrets.write")) {
+      return Response.redirect(new URL("/admin", request.url).toString(), 303);
+    }
+    return htmlResponse(SECRETS_PANEL_HTML);
   }
 
   if (url.pathname === "/admin/keys") {
@@ -2267,8 +2274,21 @@ export async function handleAdminRequest(
       : htmlResponse(ADMIN_LOGIN_HTML);
   }
 
+  /* ── Central authorization gate (Security V2 Stage 2) ──
+   * Every /admin/api/* route except the /admin/api/auth/* lifecycle endpoints
+   * (handled above) passes through here: authenticate once, then check the
+   * role against the route's required permission. The per-route handlers
+   * never re-check auth — this gate is the single choke point. */
+  if (url.pathname.startsWith("/admin/api/")) {
+    const auth = await authenticate(request, env);
+    if (!auth) return authFailure(request);
+    const permission = requiredPermission(url, request.method);
+    if (permission !== null && !roleHasPermission(auth.user.role, permission)) {
+      return jsonResponse({ detail: `无权执行此操作（需要权限 ${permission}）` }, 403);
+    }
+  }
+
   if (url.pathname.startsWith("/admin/api/keys")) {
-    if (!(await authenticate(request, env))) return authFailure(request);
     // `await` matters: a bare `return promise` leaves the try block before the
     // promise settles, so an async throw would skip the redaction catch below
     // and escape the router entirely.
@@ -2276,7 +2296,6 @@ export async function handleAdminRequest(
   }
 
   if (url.pathname.startsWith("/admin/api/secrets")) {
-    if (!(await authenticate(request, env))) return authFailure(request);
     return await handleSecretsApi(request, env);
   }
 
@@ -2287,17 +2306,14 @@ export async function handleAdminRequest(
   if (url.pathname.startsWith("/admin/api/outreach/segment-preview")
     || url.pathname.startsWith("/admin/api/outreach/groups")
     || url.pathname.startsWith("/admin/api/outreach/campaigns")) {
-    if (!(await authenticate(request, env))) return authFailure(request);
     return await handleCampaignApi(request, env);
   }
 
   if (url.pathname.startsWith("/admin/api/outreach") || url.pathname.startsWith("/admin/api/gmail")) {
-    if (!(await authenticate(request, env))) return authFailure(request);
     return await handleOutreachApi(request, env);
   }
 
   if (url.pathname.startsWith("/admin/api/")) {
-    if (!(await authenticate(request, env))) return authFailure(request);
     return await handleAdminApi(request, env);
   }
 
