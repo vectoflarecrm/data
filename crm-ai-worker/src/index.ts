@@ -2,6 +2,7 @@ import { handleAdminRequest } from "./admin";
 import { rpmLimitFor, tryAcquireRpmSlot, rpmEnvOverride } from "./rate-limit";
 import { collectKeyPool, buildKeyOrder } from "./key-pool";
 import { getProviderState, isProviderUsable, noteProviderKeyError, noteProviderKeySuccess, noteKeyUsage, keyHealthName } from "./provider-keys";
+import { assertPublicHttpUrl } from "./security/outbound-url";
 
 interface CustomerRow {
   id: number;
@@ -243,7 +244,16 @@ function normalizeDomain(value: string): string {
   return url.toString();
 }
 
-async function fetchWithTimeout(url: string, timeoutMs: number, options?: RequestInit): Promise<Response> {
+// Exported for tests: the Stage 7 guard lives here, and the SSRF suite
+// asserts that refused URLs never reach the network.
+export async function fetchWithTimeout(url: string, timeoutMs: number, options?: RequestInit): Promise<Response> {
+  // Stage 7 SSRF guard: every dynamic outbound URL (customer domains,
+  // search-result links, research/social URLs) funnels through here, so the
+  // scheme/host check runs once, before any connection is made. Vendor
+  // endpoints with compile-time-constant URLs also pass through harmlessly.
+  // A refused URL throws OutboundUrlError; every caller already treats a
+  // fetch failure as "source unavailable".
+  assertPublicHttpUrl(url);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {

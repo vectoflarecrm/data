@@ -90,7 +90,7 @@ Migrations (`migrations/`, forward-only, applied by CI deploy workflow):
 | 8 | Real D1 database_id committed in `wrangler.toml` | P1 | 5 |
 | 9 | No CSP/HSTS/X-Frame-Options/nosniff/Referrer-Policy headers | P1 | 5 |
 | 10 | No Origin/CSRF validation on state-changing routes (SameSite=Strict mitigates but is unverified) — **fixed in Stage 6**: foreign-origin POST/PUT/PATCH/DELETE rejected 403 before any handler; missing-Origin deliberately allowed (policy in `src/security/origin-guard.ts`) | P1 | 6 |
-| 11 | SSRF: outbound fetch of admin-supplied domains/search URLs with no private-IP/protocol guard | P1 | 7 |
+| 11 | SSRF: outbound fetch of admin-supplied domains/search URLs with no private-IP/protocol guard — **fixed in Stage 6+7**: `src/security/outbound-url.ts` + guard in `fetchWithTimeout`; runtime-inherent limits documented in `docs/security-limitations.md` | P1 | 7 |
 | 12 | CSV import unbounded (bytes/rows/fields); parser runs on full body | P1 | 8 |
 | 13 | No audit log | P1 | 9 |
 | 14 | Scraped/search content enters AI prompts without untrusted-data framing (prompt injection) | P2 | 13 |
