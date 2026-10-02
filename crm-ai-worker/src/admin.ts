@@ -225,8 +225,36 @@ const CUSTOMER_COLUMNS = `
   company_profile, outreach_context, buying_signals, lead_score, source_import_id
 `;
 const CUSTOMER_STATUSES = new Set(["pending", "processing", "completed", "failed"]);
-const COOKIE_NAME = "crm_admin_token";
-const SESSION_MAX_AGE = 60 * 60;
+
+/* ── Admin sessions (Security V2 Stage 1) ────────────────────────────────
+ * ADMIN_PANEL_TOKEN authenticates the login POST only (bootstrap credential,
+ * per docs/security-v2-baseline.md). A successful login mints a random
+ * 256-bit session token; its SHA-256 hash is the only thing stored in D1.
+ * The browser holds an opaque `crm_session` cookie — the master token never
+ * rides in a cookie again. */
+const SESSION_COOKIE_NAME = "crm_session";
+const SESSION_TTL_SECONDS = 60 * 60;
+const BOOTSTRAP_USER_ID = "u_admin";
+const BOOTSTRAP_USERNAME = "admin";
+
+interface AdminUserRow {
+  id: string;
+  username: string;
+  role: string;
+  enabled: number;
+}
+
+export interface AdminAuthContext {
+  user: AdminUserRow;
+  /** Empty for the Bearer bootstrap path (no session row involved). */
+  sessionId: string;
+  /** SHA-256 hex of the presented session token; null for Bearer. */
+  tokenHash: string | null;
+  /** "session" = cookie session; "bootstrap" = explicit Bearer master token. */
+  via: "session" | "bootstrap";
+  /** Session expiry (SQL UTC), null for Bearer. */
+  expiresAt: string | null;
+}
 
 function htmlResponse(body: string, status = 200): Response {
   return new Response(body, {
@@ -284,6 +312,151 @@ async function constantTimeSecretMatch(left: string, right: string): Promise<boo
     difference |= leftBytes[index] ^ (rightBytes[index] ?? 0);
   }
   return difference === 0;
+}
+
+/* ── Session primitives (Security V2 Stage 1) ──────────────────────────── */
+
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Fresh 256-bit session token; the client sees the hex, D1 sees only its hash. */
+function generateSessionToken(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** UTC timestamp in the "YYYY-MM-DD HH:MM:SS" shape D1/SQLite comparisons use. */
+function sqlUtc(ms: number = Date.now()): string {
+  return new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+}
+
+/** Parse the SQL UTC shape back to epoch ms; NaN when unparseable. */
+function sqlUtcToMs(value: string): number {
+  return new Date(`${value.trim().replace(" ", "T")}Z`).getTime();
+}
+
+function sessionCookieHeader(request: Request, value: string, maxAgeSeconds: number): string {
+  const secure = new URL(request.url).protocol === "https:" ? " Secure;" : "";
+  return `${SESSION_COOKIE_NAME}=${value}; Max-Age=${maxAgeSeconds}; Path=/; HttpOnly;${secure} SameSite=Strict`;
+}
+
+/** Idempotently ensure the bootstrap operator row exists and return it. */
+async function ensureBootstrapUser(env: AdminEnv): Promise<AdminUserRow> {
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO admin_users (id, username, role) VALUES (?, ?, 'super_admin')`,
+  ).bind(BOOTSTRAP_USER_ID, BOOTSTRAP_USERNAME).run();
+  const row = await env.DB.prepare(
+    `SELECT id, username, role, enabled FROM admin_users WHERE id = ?`,
+  ).bind(BOOTSTRAP_USER_ID).first<AdminUserRow>();
+  if (!row) throw new Error("bootstrap admin user missing after ensure");
+  return row;
+}
+
+async function createAdminSession(
+  env: AdminEnv,
+  request: Request,
+  user: AdminUserRow,
+): Promise<{ token: string; expiresAt: string }> {
+  const token = generateSessionToken();
+  const tokenHash = await sha256Hex(token);
+  const now = Date.now();
+  const expiresAt = sqlUtc(now + SESSION_TTL_SECONDS * 1000);
+  // IP is pre-validated by loginIdent(); UA is hashed because raw agent
+  // strings are fingerprinting material, not an audit requirement.
+  const ip = loginIdent(request);
+  const ua = request.headers.get("User-Agent") ?? "";
+  await env.DB.prepare(
+    `INSERT INTO admin_sessions (id, user_id, token_hash, role, created_at, expires_at, ip_hash, user_agent_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    crypto.randomUUID(), user.id, tokenHash, user.role, sqlUtc(now), expiresAt,
+    await sha256Hex(ip), await sha256Hex(ua),
+  ).run();
+  return { token, expiresAt };
+}
+
+interface SessionJoinRow extends AdminUserRow {
+  session_id: string;
+  token_hash: string;
+  expires_at: string;
+  revoked_at: string | null;
+}
+
+/** Cookie → session row → enabled user. Revoked/expired/missing ⇒ null. */
+async function resolveAdminSession(request: Request, env: AdminEnv): Promise<AdminAuthContext | null> {
+  const token = readCookie(request, SESSION_COOKIE_NAME);
+  if (!token) return null;
+  const tokenHash = await sha256Hex(token);
+  let row: SessionJoinRow | null;
+  try {
+    row = await env.DB.prepare(
+      `SELECT s.id AS session_id, s.token_hash, s.expires_at, s.revoked_at,
+              u.id, u.username, u.role, u.enabled
+       FROM admin_sessions s JOIN admin_users u ON u.id = s.user_id
+       WHERE s.token_hash = ?`,
+    ).bind(tokenHash).first<SessionJoinRow>();
+  } catch (e) {
+    // Fail closed: if the sessions table is missing (migration pending) no
+    // session can be verified, so nothing is served on a session cookie.
+    console.error("[admin:sessions] lookup failed", e);
+    return null;
+  }
+  if (!row || row.revoked_at) return null;
+  if (!Number.isFinite(sqlUtcToMs(row.expires_at)) || sqlUtcToMs(row.expires_at) <= Date.now()) return null;
+  if (!row.enabled) return null;
+  return {
+    user: { id: row.id, username: row.username, role: row.role, enabled: row.enabled },
+    sessionId: row.session_id,
+    tokenHash,
+    via: "session",
+    expiresAt: row.expires_at,
+  };
+}
+
+/** Revoke one session by token hash. Idempotent; safe on missing rows. */
+async function revokeSessionByHash(env: AdminEnv, tokenHash: string): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE admin_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL`,
+  ).bind(sqlUtc(), tokenHash).run();
+}
+
+async function countActiveSessions(env: AdminEnv, userId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM admin_sessions
+     WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ?`,
+  ).bind(userId, sqlUtc()).first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/**
+ * Single authentication entry point for every admin route.
+ *
+ * Precedence mirrors the pre-V2 behavior: an explicit Authorization header
+ * (if present) wins over any cookie. The Bearer form accepts the
+ * ADMIN_PANEL_TOKEN as the bootstrap/migration credential — it maps to the
+ * super_admin operator without a session row, because a browser never
+ * attaches Authorization headers automatically, so it cannot act as a
+ * persistent browser session.
+ */
+async function authenticate(request: Request, env: AdminEnv): Promise<AdminAuthContext | null> {
+  if (!env.ADMIN_PANEL_TOKEN) return null;
+  const authorization = request.headers.get("Authorization");
+  if (authorization !== null) {
+    if (!authorization.startsWith("Bearer ")) return null;
+    const candidate = authorization.slice("Bearer ".length);
+    if (!candidate || !(await constantTimeSecretMatch(candidate, env.ADMIN_PANEL_TOKEN))) return null;
+    return {
+      user: { id: BOOTSTRAP_USER_ID, username: BOOTSTRAP_USERNAME, role: "super_admin", enabled: 1 },
+      sessionId: "",
+      tokenHash: null,
+      via: "bootstrap",
+      expiresAt: null,
+    };
+  }
+  return resolveAdminSession(request, env);
 }
 
 /* ── Login throttling ───────────────────────────────────────────────────
@@ -397,16 +570,6 @@ function loginThrottledResponse(state: LoginThrottle): Response {
   );
   page.headers.set("Retry-After", String(state.retryAfterSeconds));
   return page;
-}
-
-async function isAuthenticated(request: Request, env: AdminEnv): Promise<boolean> {
-  if (!env.ADMIN_PANEL_TOKEN) return false;
-  const authorization = request.headers.get("Authorization");
-  const bearer = authorization?.startsWith("Bearer ")
-    ? authorization.slice("Bearer ".length)
-    : null;
-  const candidate = bearer || readCookie(request, COOKIE_NAME);
-  return candidate ? constantTimeSecretMatch(candidate, env.ADMIN_PANEL_TOKEN) : false;
 }
 
 function authFailure(request: Request): Response {
@@ -1940,7 +2103,7 @@ export async function handleAdminRequest(
 
   if (url.pathname === "/admin" || url.pathname === "/admin/") {
     if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
-    return (await isAuthenticated(request, env))
+    return (await authenticate(request, env))
       ? htmlResponse(ADMIN_PANEL_HTML)
       : htmlResponse(ADMIN_LOGIN_HTML);
   }
@@ -1964,49 +2127,148 @@ export async function handleAdminRequest(
     // A correct guess clears this caller's record; leaving it would let
     // earlier mistakes lock the operator out of their own panel.
     await clearLoginFailures(env, throttleKey("ip", ident));
+    // Mint a server-side session; the master token never becomes the cookie.
+    const user = await ensureBootstrapUser(env);
+    // Session rotation: a valid session presented at login is revoked so a
+    // re-login always leaves exactly one live token for this browser.
+    const oldToken = readCookie(request, SESSION_COOKIE_NAME);
+    if (oldToken) await revokeSessionByHash(env, await sha256Hex(oldToken));
+    const session = await createAdminSession(env, request, user);
     return new Response(null, {
       status: 303,
       headers: {
         Location: new URL("/admin", request.url).toString(),
-        "Set-Cookie": `${COOKIE_NAME}=${encodeURIComponent(token)}; Max-Age=${SESSION_MAX_AGE}; Path=/admin; HttpOnly;${new URL(request.url).protocol === "https:" ? " Secure;" : ""} SameSite=Strict`,
+        "Set-Cookie": sessionCookieHeader(request, session.token, SESSION_TTL_SECONDS),
         "Cache-Control": "no-store",
       },
     });
   }
 
   if (url.pathname === "/admin/logout" && request.method === "POST") {
+    // Revoke server-side too: clearing the cookie alone would leave the row
+    // live, and a stolen copy of the old cookie would keep working.
+    const oldToken = readCookie(request, SESSION_COOKIE_NAME);
+    if (oldToken) await revokeSessionByHash(env, await sha256Hex(oldToken)).catch(() => {});
     return new Response(null, {
       status: 303,
       headers: {
         Location: new URL("/admin", request.url).toString(),
-        "Set-Cookie": `${COOKIE_NAME}=; Max-Age=0; Path=/admin; HttpOnly;${new URL(request.url).protocol === "https:" ? " Secure;" : ""} SameSite=Strict`,
+        "Set-Cookie": sessionCookieHeader(request, "", 0),
       },
     });
   }
 
+  /* ── Session API (Security V2 Stage 1) ──
+   * POST /admin/api/auth/login  {password|token} → session cookie (JSON)
+   * POST /admin/api/auth/logout → revoke current session
+   * GET  /admin/api/auth/me     → current user/role/expiry
+   * POST /admin/api/auth/revoke → revoke ALL sessions of the current user
+   *                              (logout everywhere; optional {session_id}
+   *                              narrows it to one row) */
+  if (url.pathname === "/admin/api/auth/login" && request.method === "POST") {
+    if (!env.ADMIN_PANEL_TOKEN) return jsonResponse({ detail: "Admin panel is not configured" }, 503);
+    const ident = loginIdent(request);
+    const blocked = await loginBlocked(env, ident);
+    if (blocked) {
+      const res = jsonResponse({ detail: "尝试过于频繁，请稍后再试" }, 429);
+      res.headers.set("Retry-After", String(blocked.retryAfterSeconds));
+      return res;
+    }
+    let credential: unknown;
+    try {
+      const body = await request.json() as { password?: unknown; token?: unknown };
+      credential = body.password ?? body.token;
+    } catch {
+      return jsonResponse({ detail: "Invalid JSON body" }, 400);
+    }
+    if (typeof credential !== "string" || !(await constantTimeSecretMatch(credential, env.ADMIN_PANEL_TOKEN))) {
+      await recordLoginFailure(env, "ip", throttleKey("ip", ident));
+      await recordLoginFailure(env, "global", LOGIN_GLOBAL_KEY);
+      return jsonResponse({ detail: "授权失败" }, 401);
+    }
+    await clearLoginFailures(env, throttleKey("ip", ident));
+    const user = await ensureBootstrapUser(env);
+    const oldToken = readCookie(request, SESSION_COOKIE_NAME);
+    if (oldToken) await revokeSessionByHash(env, await sha256Hex(oldToken));
+    const session = await createAdminSession(env, request, user);
+    const res = jsonResponse({
+      user_id: user.id,
+      username: user.username,
+      role: user.role,
+      expires_at: session.expiresAt,
+    });
+    res.headers.set("Set-Cookie", sessionCookieHeader(request, session.token, SESSION_TTL_SECONDS));
+    return res;
+  }
+
+  if (url.pathname === "/admin/api/auth/logout" && request.method === "POST") {
+    const auth = await authenticate(request, env);
+    if (!auth) return authFailure(request);
+    if (auth.tokenHash) await revokeSessionByHash(env, auth.tokenHash);
+    const res = jsonResponse({ ok: true, revoked: auth.tokenHash ? 1 : 0 });
+    res.headers.set("Set-Cookie", sessionCookieHeader(request, "", 0));
+    return res;
+  }
+
+  if (url.pathname === "/admin/api/auth/me" && request.method === "GET") {
+    const auth = await authenticate(request, env);
+    if (!auth) return authFailure(request);
+    return jsonResponse({
+      user_id: auth.user.id,
+      username: auth.user.username,
+      role: auth.user.role,
+      via: auth.via,
+      expires_at: auth.expiresAt,
+    });
+  }
+
+  if (url.pathname === "/admin/api/auth/revoke" && request.method === "POST") {
+    const auth = await authenticate(request, env);
+    if (!auth) return authFailure(request);
+    let sessionId: string | null = null;
+    try {
+      const body = await request.json() as { session_id?: unknown };
+      if (typeof body.session_id === "string" && body.session_id) sessionId = body.session_id;
+    } catch { /* empty body allowed */ }
+    let revoked: number;
+    if (sessionId) {
+      const info = await env.DB.prepare(
+        `UPDATE admin_sessions SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL`,
+      ).bind(sqlUtc(), sessionId, auth.user.id).run();
+      revoked = Number(info.meta.changes ?? 0);
+    } else {
+      const info = await env.DB.prepare(
+        `UPDATE admin_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`,
+      ).bind(sqlUtc(), auth.user.id).run();
+      revoked = Number(info.meta.changes ?? 0);
+    }
+    const remaining = await countActiveSessions(env, auth.user.id);
+    return jsonResponse({ ok: true, revoked, remaining });
+  }
+
   if (url.pathname === "/admin/outreach") {
     if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
-    return (await isAuthenticated(request, env))
+    return (await authenticate(request, env))
       ? htmlResponse(OUTREACH_PANEL_HTML)
       : htmlResponse(ADMIN_LOGIN_HTML);
   }
 
   if (url.pathname === "/admin/secrets") {
     if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
-    return (await isAuthenticated(request, env))
+    return (await authenticate(request, env))
       ? htmlResponse(SECRETS_PANEL_HTML)
       : htmlResponse(ADMIN_LOGIN_HTML);
   }
 
   if (url.pathname === "/admin/keys") {
     if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
-    return (await isAuthenticated(request, env))
+    return (await authenticate(request, env))
       ? htmlResponse(KEYS_PANEL_HTML)
       : htmlResponse(ADMIN_LOGIN_HTML);
   }
 
   if (url.pathname.startsWith("/admin/api/keys")) {
-    if (!(await isAuthenticated(request, env))) return authFailure(request);
+    if (!(await authenticate(request, env))) return authFailure(request);
     // `await` matters: a bare `return promise` leaves the try block before the
     // promise settles, so an async throw would skip the redaction catch below
     // and escape the router entirely.
@@ -2014,7 +2276,7 @@ export async function handleAdminRequest(
   }
 
   if (url.pathname.startsWith("/admin/api/secrets")) {
-    if (!(await isAuthenticated(request, env))) return authFailure(request);
+    if (!(await authenticate(request, env))) return authFailure(request);
     return await handleSecretsApi(request, env);
   }
 
@@ -2025,17 +2287,17 @@ export async function handleAdminRequest(
   if (url.pathname.startsWith("/admin/api/outreach/segment-preview")
     || url.pathname.startsWith("/admin/api/outreach/groups")
     || url.pathname.startsWith("/admin/api/outreach/campaigns")) {
-    if (!(await isAuthenticated(request, env))) return authFailure(request);
+    if (!(await authenticate(request, env))) return authFailure(request);
     return await handleCampaignApi(request, env);
   }
 
   if (url.pathname.startsWith("/admin/api/outreach") || url.pathname.startsWith("/admin/api/gmail")) {
-    if (!(await isAuthenticated(request, env))) return authFailure(request);
+    if (!(await authenticate(request, env))) return authFailure(request);
     return await handleOutreachApi(request, env);
   }
 
   if (url.pathname.startsWith("/admin/api/")) {
-    if (!(await isAuthenticated(request, env))) return authFailure(request);
+    if (!(await authenticate(request, env))) return authFailure(request);
     return await handleAdminApi(request, env);
   }
 

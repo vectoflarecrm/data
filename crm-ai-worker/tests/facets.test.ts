@@ -90,7 +90,7 @@ async function makeEnv() {
 
 function facetReq(query = "", authed = true): Request {
   return new Request(`https://worker.example/admin/api/customers/filter-options${query}`, {
-    headers: authed ? { Cookie: `crm_admin_token=${TOKEN}` } : {},
+    headers: authed ? { Authorization: `Bearer ${TOKEN}` } : {},
   });
 }
 

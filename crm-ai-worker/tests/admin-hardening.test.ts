@@ -47,6 +47,17 @@ async function makeEnv(overrides: Record<string, unknown> = {}) {
       window_start TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, locked_until TEXT,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (scope, ident)
     );
+    -- Stage 1: a successful login now mints a server-side session row.
+    CREATE TABLE admin_users (
+      id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE,
+      role TEXT NOT NULL DEFAULT 'super_admin', enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE admin_sessions (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
+      role TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+      last_seen_at TEXT, revoked_at TEXT, ip_hash TEXT, user_agent_hash TEXT
+    );
     -- Enough for the segment preview to run and reach a business-rule error.
     CREATE TABLE customers (
       id INTEGER PRIMARY KEY, status TEXT, country TEXT, email TEXT,
@@ -185,7 +196,7 @@ describe("500 responses do not leak internals", () => {
 
     const res = await handleAdminRequest(
       new Request("https://worker.example/admin/api/keys", {
-        headers: { "Cookie": `crm_admin_token=${TOKEN}` },
+        headers: { "Authorization": `Bearer ${TOKEN}` },
       }),
       broken,
     );
@@ -204,7 +215,7 @@ describe("500 responses do not leak internals", () => {
     const res = await handleAdminRequest(
       new Request("https://worker.example/admin/api/outreach/groups", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Cookie": `crm_admin_token=${TOKEN}` },
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${TOKEN}` },
         body: JSON.stringify({ name: "   ", filters: {} }),
       }),
       env,

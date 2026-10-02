@@ -89,7 +89,7 @@ function call(env: AdminEnv, path: string, init: RequestInit = {}) {
       ...init,
       headers: {
         "Content-Type": "application/json",
-        Cookie: `crm_admin_token=${TOKEN}`,
+        Authorization: `Bearer ${TOKEN}`,
         ...(init.headers ?? {}),
       },
     }),

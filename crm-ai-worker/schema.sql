@@ -340,3 +340,44 @@ CREATE TABLE IF NOT EXISTS admin_login_attempts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_login_attempts_updated ON admin_login_attempts(updated_at);
+
+-- Server-side admin sessions (Security V2 Stage 1).
+--
+-- The ADMIN_PANEL_TOKEN secret authenticates the login POST only (bootstrap
+-- credential); a successful login mints a random 256-bit session token whose
+-- SHA-256 hash is the ONLY thing stored server-side. Browsers hold the opaque
+-- `crm_session` cookie; the master token never rides in a cookie again.
+--
+-- ip/user-agent are stored as SHA-256 hashes (never raw) so the audit trail
+-- cannot double as a surveillance log.
+CREATE TABLE IF NOT EXISTS admin_users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL DEFAULT 'super_admin' CHECK (role IN ('super_admin', 'operator', 'researcher', 'sender', 'readonly')),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  last_seen_at TEXT,
+  revoked_at TEXT,
+  ip_hash TEXT,
+  user_agent_hash TEXT,
+  FOREIGN KEY (user_id) REFERENCES admin_users (id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_sessions_token ON admin_sessions(token_hash);
+
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry ON admin_sessions(expires_at);
+
+-- Bootstrap the single operator as super_admin. Login still authenticates
+-- with the ADMIN_PANEL_TOKEN secret; the session it mints binds to this row
+-- so disabled users and future RBAC roles have a stable subject.
+INSERT OR IGNORE INTO admin_users (id, username, role) VALUES ('u_admin', 'admin', 'super_admin');
