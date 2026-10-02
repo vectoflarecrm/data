@@ -51,6 +51,7 @@ import { roleHasPermission, requiredPermission } from "./auth/rbac";
 import { applySecurityHeaders, htmlCsp } from "./security-headers";
 import { originGuardRejection } from "./security/origin-guard";
 import { readCsvImportBody, parseCsvBounded, CsvLimitError } from "./security/csv-limits";
+import { writeAuditLog, AuditMetadata } from "./audit/audit-log";
 
 export interface AdminEnv extends GmailEnv {
   DB: D1Database;
@@ -589,6 +590,32 @@ function authFailure(request: Request): Response {
   return htmlResponse(ADMIN_LOGIN_HTML, 401);
 }
 
+/* ── Audit trail (Security V2 Stage 9, spec §10) ─────────────────────────
+ *
+ * Thin wrapper over writeAuditLog so call sites read as one line. The
+ * metadata passes through redactAuditMetadata() in the audit module, so a
+ * caller mistake (a secret under a denylisted key) is neutralized at the
+ * write boundary (§10.2). Fail-open: audit problems never break the action.
+ */
+async function auditAdminAction(
+  env: AdminEnv,
+  request: Request,
+  auth: { user: AdminUserRow } | null,
+  action: string,
+  resourceType: string,
+  resourceId: string | null = null,
+  metadata: AuditMetadata | null = null,
+): Promise<void> {
+  await writeAuditLog(env, request, {
+    actorUserId: auth?.user.id ?? null,
+    actorRole: auth?.user.role ?? null,
+    action,
+    resourceType,
+    resourceId,
+    metadata,
+  });
+}
+
 function validateText(value: unknown, field: string, maxLength: number): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value !== "string") throw new Error(`${field} must be a string`);
@@ -711,7 +738,7 @@ async function listCustomers(request: Request, env: AdminEnv): Promise<Response>
 // Every raw row is stored verbatim in customer_imports (Layer 1, immutable);
 // rows that match an existing company (domain or normalized name) are marked
 // 'matched' and skipped; new ones become pending customers (Layer 2).
-async function importCustomersCsv(request: Request, env: AdminEnv): Promise<Response> {
+async function importCustomersCsv(request: Request, env: AdminEnv, auth: AdminAuthContext): Promise<Response> {
   // Stage 8: the body is read with a hard byte cap (no unbounded
   // request.json()) and the CSV with hard row/column/field caps. Every
   // refusal names the exact limit it tripped.
@@ -820,6 +847,15 @@ async function importCustomersCsv(request: Request, env: AdminEnv): Promise<Resp
   for (let i = 0; i < insertStmts.length; i += 50) {
     await env.DB.batch(insertStmts.slice(i, i + 50));
   }
+  // Stage 9: one row per import batch with the outcome counts. The CSV body
+  // itself never enters the audit trail — only its size envelope.
+  await auditAdminAction(env, request, auth, "IMPORT_CSV", "customer_import", importId, {
+    file_name: body.file_name,
+    inserted,
+    matched,
+    skipped,
+    total_rows: table.length - 1,
+  });
   return jsonResponse({ import_id: importId, inserted, matched, skipped, total_rows: table.length - 1 });
 }
 
@@ -829,7 +865,7 @@ async function importCustomersCsv(request: Request, env: AdminEnv): Promise<Resp
 // rows to pending (action=queue) so the cron pipeline re-processes them.
 // Shares its WHERE-clause builder with the 定向群发 campaign preview so both
 // screens agree on what "this customer group" means.
-async function preFilterCustomers(request: Request, env: AdminEnv): Promise<Response> {
+async function preFilterCustomers(request: Request, env: AdminEnv, auth: AdminAuthContext): Promise<Response> {
   const url = new URL(request.url);
   const hasEmail = url.searchParams.get("has_email") === "1";
   const filters = parseSegmentFilters({
@@ -847,7 +883,13 @@ async function preFilterCustomers(request: Request, env: AdminEnv): Promise<Resp
     const result = await env.DB.prepare(
       `UPDATE customers SET status = 'pending', updated_at = CURRENT_TIMESTAMP ${clause}`,
     ).bind(...binds).run();
-    return jsonResponse({ action, queued: result.meta.changes ?? 0 });
+    const queued = result.meta.changes ?? 0;
+    // Stage 9: re-queueing IS research being (re)started for a customer set.
+    await auditAdminAction(env, request, auth, "START_RESEARCH", "customer", null, {
+      via: "pre-filter",
+      queued,
+    });
+    return jsonResponse({ action, queued });
   }
 
   const count = await env.DB.prepare(
@@ -859,7 +901,7 @@ async function preFilterCustomers(request: Request, env: AdminEnv): Promise<Resp
   return jsonResponse({ matching: count?.n ?? 0, sample: sample.results });
 }
 
-async function updateCustomer(request: Request, env: AdminEnv, id: number): Promise<Response> {
+async function updateCustomer(request: Request, env: AdminEnv, id: number, auth: AdminAuthContext): Promise<Response> {
   const existing = await getCustomer(env, id);
   if (!existing) return jsonResponse({ detail: "Customer not found" }, 404);
 
@@ -907,6 +949,12 @@ async function updateCustomer(request: Request, env: AdminEnv, id: number): Prom
     )
       .bind(...values, id)
       .first<AdminCustomer>();
+    if (updated) {
+      // Stage 9: field names only — values can hold contact details.
+      await auditAdminAction(env, request, auth, "UPDATE_CUSTOMER", "customer", String(id), {
+        fields: Object.keys(payload).filter((k) => k !== "id"),
+      });
+    }
     return jsonResponse(updated ?? { detail: "Customer not found" }, updated ? 200 : 404);
   } catch (error) {
     return jsonResponse(
@@ -923,7 +971,7 @@ const PANEL_PROVIDERS = [
   "tavily", "exa", "brave", "searlo",
 ] as const;
 
-async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<Response> {
+async function handleProviderKeysApi(request: Request, env: AdminEnv, auth: AdminAuthContext): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
 
@@ -1006,6 +1054,12 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
        VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
     ).bind(provider, label, encrypted.cipher, encrypted.hint, encrypted.fingerprint, rpmLimit, model).run();
     invalidateProviderCache(provider);
+    // Stage 9: the row id is the resource; the key material never appears.
+    await auditAdminAction(
+      env, request, auth, "CREATE_API_KEY", "api_config",
+      result.meta?.last_row_id != null ? String(result.meta.last_row_id) : null,
+      { provider },
+    );
     return jsonResponse({ ok: true, id: result.meta?.last_row_id ?? null, encrypted: true });
   }
 
@@ -1060,12 +1114,18 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
     }
     // Rows rewritten under the same key, so cached provider state is stale.
     for (const provider of new Set(converted)) invalidateProviderCache(provider);
+    const remaining = (await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM api_configs WHERE api_key NOT LIKE 'enc:v1:%'`,
+    ).first<{ n: number }>())?.n ?? null;
+    await auditAdminAction(env, request, auth, "UPDATE_API_KEY", "api_config", null, {
+      via: "encrypt-all",
+      converted: converted.length,
+      remaining,
+    });
     return jsonResponse({
       ok: failed.length === 0,
       converted: converted.length,
-      remaining: (await env.DB.prepare(
-        `SELECT COUNT(*) AS n FROM api_configs WHERE api_key NOT LIKE 'enc:v1:%'`,
-      ).first<{ n: number }>())?.n ?? null,
+      remaining,
       failed,
     });
   }
@@ -1206,6 +1266,9 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
       added++;
     }
     invalidateProviderCache(provider);
+    await auditAdminAction(env, request, auth, "CREATE_API_KEY", "api_config", null, {
+      provider, added, skipped, via: "bulk",
+    });
     return jsonResponse({ ok: true, added, skipped });
   }
 
@@ -1242,6 +1305,11 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
         binds.push(id);
         await env.DB.prepare(`UPDATE api_configs SET ${sets.join(", ")} WHERE id = ?`).bind(...binds).run();
         invalidateProviderCache(existing.provider);
+        // Field names only — never the values (labels can hold account hints).
+        await auditAdminAction(env, request, auth, "UPDATE_API_KEY", "api_config", String(id), {
+          provider: existing.provider,
+          fields: ["label", "rpm_limit", "model", "is_active"].filter((f) => body[f] !== undefined),
+        });
       }
       return jsonResponse({ ok: true });
     }
@@ -1253,6 +1321,9 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
         `DELETE FROM api_key_health WHERE provider = ? AND key_index = ?`,
       ).bind(existing.provider, `${existing.provider}:${id}`).run();
       invalidateProviderCache(existing.provider);
+      await auditAdminAction(env, request, auth, "DELETE_API_KEY", "api_config", String(id), {
+        provider: existing.provider,
+      });
       return jsonResponse({ ok: true });
     }
   }
@@ -1266,6 +1337,9 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
       return jsonResponse({ detail: "unknown provider" }, 400);
     }
     await env.DB.prepare(`DELETE FROM api_key_health WHERE provider = ?`).bind(provider).run();
+    await auditAdminAction(env, request, auth, "UPDATE_API_KEY", "api_config", null, {
+      provider, via: "clear-cooldowns",
+    });
     return jsonResponse({ ok: true });
   }
 
@@ -1292,6 +1366,12 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
            updated_at = CURRENT_TIMESTAMP`,
       ).bind(provider, defaultModel, rpmTotal, enabled).run();
       invalidateProviderCache(provider);
+      await auditAdminAction(env, request, auth, "UPDATE_API_KEY", "provider_settings", provider, {
+        via: "provider-settings",
+        default_model: defaultModel,
+        rpm_total: rpmTotal,
+        enabled,
+      });
       return jsonResponse({ ok: true });
     }
   }
@@ -1299,7 +1379,7 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
   return jsonResponse({ detail: "Not Found" }, 404);
 }
 
-async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Response> {
+async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAuthContext): Promise<Response> {
   try {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -1472,6 +1552,12 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
         if (msg.includes("CREDENTIAL_ENC_KEY")) return jsonResponse({ detail: msg }, 400);
         return internalErrorResponse("gmail-account-save", e);
       }
+      // Stage 9: client_email identifies the account; the private key /
+      // refresh token material never enters the audit trail (§10.2).
+      await auditAdminAction(env, request, auth, "CREATE_GMAIL_ACCOUNT", "gmail_account", null, {
+        client_email: clientEmail,
+        credential_type: credentialType,
+      });
       return jsonResponse({ ok: true });
     }
     // POST /admin/api/gmail/accounts/:id/test - verify the key by requesting a Gmail token
@@ -1523,6 +1609,9 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
       sets.push("updated_at = CURRENT_TIMESTAMP");
       binds.push(id);
       await env.DB.prepare(`UPDATE gmail_accounts SET ${sets.join(", ")} WHERE id = ?`).bind(...binds).run();
+      await auditAdminAction(env, request, auth, "UPDATE_GMAIL_ACCOUNT", "gmail_account", String(id), {
+        fields: ["enabled", "label", "daily_limit"].filter((f) => (body as Record<string, unknown>)[f] !== undefined),
+      });
       return jsonResponse({ ok: true });
     }
     // DELETE /admin/api/gmail/accounts/:id
@@ -1530,6 +1619,7 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
       const id = Number(path.split("/").pop());
       if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
       await env.DB.prepare("DELETE FROM gmail_accounts WHERE id = ?").bind(id).run();
+      await auditAdminAction(env, request, auth, "DELETE_GMAIL_ACCOUNT", "gmail_account", String(id));
       return jsonResponse({ ok: true });
     }
     // POST /admin/api/gmail/encrypt-all — convert legacy cleartext sender
@@ -1573,6 +1663,11 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
         const left = await env.DB.prepare(
           "SELECT COUNT(*) AS n FROM gmail_accounts WHERE private_key NOT LIKE 'enc:v1:%'",
         ).first<{ n: number }>();
+        await auditAdminAction(env, request, auth, "UPDATE_GMAIL_ACCOUNT", "gmail_account", null, {
+          via: "encrypt-all",
+          converted,
+          remaining: left?.n ?? 0,
+        });
         return jsonResponse({ ok: failedRows.length === 0, converted, remaining: left?.n ?? 0, failed: failedRows });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -1590,6 +1685,11 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
         return jsonResponse({ detail: "limit must be an integer from 1 to 50" }, 400);
       }
       const result = await generateOutreachEmails(env, body.brand.trim(), requestedLimit);
+      await auditAdminAction(env, request, auth, "GENERATE_EMAIL", "outreach_email", null, {
+        brand: body.brand.trim(),
+        limit: requestedLimit,
+        generated: result.generated,
+      });
       return jsonResponse(result);
     }
 
@@ -1662,6 +1762,13 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
         }
       }
       const after = await getQuota(env);
+      await auditAdminAction(env, request, auth, "SEND_EMAIL", "outreach_email", null, {
+        via: "send-batch",
+        brand: body.brand ?? null,
+        attempted: drafts.results.length,
+        sent,
+        failed: results.filter((r) => !r.ok).length,
+      });
       return jsonResponse({
         attempted: drafts.results.length,
         sent,
@@ -1718,6 +1825,9 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
         gmailAccount: row.gmail_account,
       });
       const quota = await getQuota(env);
+      await auditAdminAction(env, request, auth, "SEND_EMAIL", "outreach_email", String(id), {
+        ok: result.ok,
+      });
       return jsonResponse({ ok: result.ok, error: result.error, gmail_message_id: result.gmail_message_id, from: fromEmail, quota });
     }
 
@@ -1754,7 +1864,7 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
   return body as Record<string, unknown>;
 }
 
-async function handleCampaignApi(request: Request, env: AdminEnv): Promise<Response> {
+async function handleCampaignApi(request: Request, env: AdminEnv, auth: AdminAuthContext): Promise<Response> {
   try {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -1827,6 +1937,12 @@ async function handleCampaignApi(request: Request, env: AdminEnv): Promise<Respo
         groupName,
         filters,
       });
+      await auditAdminAction(env, request, auth, "CREATE_CAMPAIGN", "campaign", String(created.id), {
+        brand: brandName,
+        group_id: groupId,
+        members: created.total,
+        capped: created.capped,
+      });
       return jsonResponse({ ok: true, ...created });
     }
 
@@ -1844,6 +1960,7 @@ async function handleCampaignApi(request: Request, env: AdminEnv): Promise<Respo
       }
       if (action === "" && request.method === "DELETE") {
         await deleteCampaign(env, id);
+        await auditAdminAction(env, request, auth, "DELETE_CAMPAIGN", "campaign", String(id));
         return jsonResponse({ ok: true });
       }
       if (action === "/members" && request.method === "GET") {
@@ -1858,11 +1975,27 @@ async function handleCampaignApi(request: Request, env: AdminEnv): Promise<Respo
       }
       if (action === "/generate" && request.method === "POST") {
         const body = await readJsonBody(request);
-        return jsonResponse(await runCampaignGenerate(env, id, parseBatchSize(body.limit, 10)));
+        const limit = parseBatchSize(body.limit, 10);
+        const result = await runCampaignGenerate(env, id, limit);
+        await auditAdminAction(env, request, auth, "GENERATE_EMAIL", "campaign", String(id), {
+          via: "campaign-generate",
+          limit,
+          generated: result.generated,
+          failed: result.failed,
+        });
+        return jsonResponse(result);
       }
       if (action === "/send" && request.method === "POST") {
         const body = await readJsonBody(request);
-        return jsonResponse(await runCampaignSend(env, id, parseBatchSize(body.limit, 10)));
+        const limit = parseBatchSize(body.limit, 10);
+        const result = await runCampaignSend(env, id, limit);
+        await auditAdminAction(env, request, auth, "SEND_EMAIL", "campaign", String(id), {
+          via: "campaign-send",
+          limit,
+          sent: result.generated,
+          failed: result.failed,
+        });
+        return jsonResponse(result);
       }
       if (action === "/status" && request.method === "POST") {
         const body = await readJsonBody(request);
@@ -1871,6 +2004,7 @@ async function handleCampaignApi(request: Request, env: AdminEnv): Promise<Respo
           return jsonResponse({ detail: "status must be draft, paused or done" }, 400);
         }
         await setCampaignStatus(env, id, status);
+        await auditAdminAction(env, request, auth, "UPDATE_CAMPAIGN", "campaign", String(id), { status });
         return jsonResponse({ ok: true });
       }
     }
@@ -1888,7 +2022,7 @@ async function handleCampaignApi(request: Request, env: AdminEnv): Promise<Respo
   }
 }
 
-async function handleAdminApi(request: Request, env: AdminEnv): Promise<Response> {
+async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthContext): Promise<Response> {
   try {
     const url = new URL(request.url);
     if (url.pathname === "/admin/api/customers" && request.method === "GET") {
@@ -1898,13 +2032,13 @@ async function handleAdminApi(request: Request, env: AdminEnv): Promise<Response
     // Original rows land in customer_imports untouched; deduped new companies
     // are inserted as pending customers so the cron pipeline enriches them.
     if (url.pathname === "/admin/api/customers/import" && request.method === "POST") {
-      return await importCustomersCsv(request, env);
+      return await importCustomersCsv(request, env, auth);
     }
     // GET /admin/api/customers/pre-filter — 海选: SQL-only targeting over
     // verified fields so users can shrink 50k rows to a research-worthy set
     // before spending any crawl/AI budget (docx 建议 Step 2 Pre-Filter).
     if (url.pathname === "/admin/api/customers/pre-filter" && request.method === "GET") {
-      return await preFilterCustomers(request, env);
+      return await preFilterCustomers(request, env, auth);
     }
     // GET /admin/api/customers/lead-score-histogram — bucketed lead_score
     // distribution over completed rows, for the panel overview card.
@@ -1937,7 +2071,7 @@ async function handleAdminApi(request: Request, env: AdminEnv): Promise<Response
         const evidence = await getCustomerEvidence(env, customer.company_id);
         return jsonResponse({ ...customer, contacts, evidence });
       }
-      if (request.method === "PATCH") return await updateCustomer(request, env, id);
+      if (request.method === "PATCH") return await updateCustomer(request, env, id, auth);
     }
     return jsonResponse({ detail: "Not Found" }, 404);
   } catch (error) {
@@ -1994,6 +2128,8 @@ async function routeAdminRequest(
     if (typeof token !== "string" || !(await constantTimeSecretMatch(token, env.ADMIN_PANEL_TOKEN))) {
       await recordLoginFailure(env, "ip", throttleKey("ip", ident));
       await recordLoginFailure(env, "global", LOGIN_GLOBAL_KEY);
+      // Stage 9: never the attempted value, only the fact of the failure.
+      await auditAdminAction(env, request, null, "LOGIN_FAILED", "admin_session", null, { via: "form" });
       return htmlResponse(`${ADMIN_LOGIN_HTML}<p class="error">授权失败，请重试。</p>`, 401);
     }
     // A correct guess clears this caller's record; leaving it would let
@@ -2006,6 +2142,7 @@ async function routeAdminRequest(
     const oldToken = readCookie(request, SESSION_COOKIE_NAME);
     if (oldToken) await revokeSessionByHash(env, await sha256Hex(oldToken));
     const session = await createAdminSession(env, request, user);
+    await auditAdminAction(env, request, { user }, "LOGIN", "admin_session", null, { via: "form" });
     return new Response(null, {
       status: 303,
       headers: {
@@ -2020,7 +2157,13 @@ async function routeAdminRequest(
     // Revoke server-side too: clearing the cookie alone would leave the row
     // live, and a stolen copy of the old cookie would keep working.
     const oldToken = readCookie(request, SESSION_COOKIE_NAME);
-    if (oldToken) await revokeSessionByHash(env, await sha256Hex(oldToken)).catch(() => {});
+    if (oldToken) {
+      // Stage 9: the row being revoked is the actor of this LOGOUT; resolve
+      // it before the revoke so the audit can name the user.
+      const auth = await authenticate(request, env);
+      await revokeSessionByHash(env, await sha256Hex(oldToken)).catch(() => {});
+      await auditAdminAction(env, request, auth, "LOGOUT", "admin_session", null, { via: "form" });
+    }
     return new Response(null, {
       status: 303,
       headers: {
@@ -2056,6 +2199,7 @@ async function routeAdminRequest(
     if (typeof credential !== "string" || !(await constantTimeSecretMatch(credential, env.ADMIN_PANEL_TOKEN))) {
       await recordLoginFailure(env, "ip", throttleKey("ip", ident));
       await recordLoginFailure(env, "global", LOGIN_GLOBAL_KEY);
+      await auditAdminAction(env, request, null, "LOGIN_FAILED", "admin_session", null, { via: "api" });
       return jsonResponse({ detail: "授权失败" }, 401);
     }
     await clearLoginFailures(env, throttleKey("ip", ident));
@@ -2063,6 +2207,7 @@ async function routeAdminRequest(
     const oldToken = readCookie(request, SESSION_COOKIE_NAME);
     if (oldToken) await revokeSessionByHash(env, await sha256Hex(oldToken));
     const session = await createAdminSession(env, request, user);
+    await auditAdminAction(env, request, { user }, "LOGIN", "admin_session", null, { via: "api" });
     const res = jsonResponse({
       user_id: user.id,
       username: user.username,
@@ -2077,6 +2222,7 @@ async function routeAdminRequest(
     const auth = await authenticate(request, env);
     if (!auth) return authFailure(request);
     if (auth.tokenHash) await revokeSessionByHash(env, auth.tokenHash);
+    await auditAdminAction(env, request, auth, "LOGOUT", "admin_session", null, { via: "api" });
     const res = jsonResponse({ ok: true, revoked: auth.tokenHash ? 1 : 0 });
     res.headers.set("Set-Cookie", sessionCookieHeader(request, "", 0));
     return res;
@@ -2139,36 +2285,50 @@ async function routeAdminRequest(
    * never re-check auth — this gate is the single choke point. */
   if (url.pathname.startsWith("/admin/api/")) {
     const auth = await authenticate(request, env);
-    if (!auth) return authFailure(request);
+    if (!auth) {
+      // Stage 9: an unauthenticated state-changing attempt on a protected
+      // route is audit-worthy; GETs are not (probes would bury the trail).
+      if (request.method !== "GET" && request.method !== "HEAD" && request.method !== "OPTIONS") {
+        await auditAdminAction(env, request, null, "ACCESS_DENIED", "admin_api", url.pathname, {
+          reason: "unauthenticated",
+        });
+      }
+      return authFailure(request);
+    }
     const permission = requiredPermission(url, request.method);
     if (permission !== null && !roleHasPermission(auth.user.role, permission)) {
+      await auditAdminAction(env, request, auth, "ACCESS_DENIED", "admin_api", url.pathname, {
+        reason: "forbidden",
+        permission,
+        method: request.method,
+      });
       return jsonResponse({ detail: `无权执行此操作（需要权限 ${permission}）` }, 403);
     }
-  }
+    // Stage 9: the gate is the single point that knows the actor, so it
+    // hands the authenticated context down to the route handlers for their
+    // per-action audit rows.
+    if (url.pathname.startsWith("/admin/api/keys")) {
+      // `await` matters: a bare `return promise` leaves the try block before the
+      // promise settles, so an async throw would skip the redaction catch below
+      // and escape the router entirely.
+      return await handleProviderKeysApi(request, env, auth);
+    }
 
-  if (url.pathname.startsWith("/admin/api/keys")) {
-    // `await` matters: a bare `return promise` leaves the try block before the
-    // promise settles, so an async throw would skip the redaction catch below
-    // and escape the router entirely.
-    return await handleProviderKeysApi(request, env);
-  }
+    // Outreach + Gmail sender pool: both live in handleOutreachApi. The pool was
+    // unreachable (404) when only the outreach prefix was routed here.
+    // 定向群发 (segment-preview / groups / campaigns) is checked first because
+    // handleCampaignApi owns those paths; everything else falls through.
+    if (url.pathname.startsWith("/admin/api/outreach/segment-preview")
+      || url.pathname.startsWith("/admin/api/outreach/groups")
+      || url.pathname.startsWith("/admin/api/outreach/campaigns")) {
+      return await handleCampaignApi(request, env, auth);
+    }
 
-  // Outreach + Gmail sender pool: both live in handleOutreachApi. The pool was
-  // unreachable (404) when only the outreach prefix was routed here.
-  // 定向群发 (segment-preview / groups / campaigns) is checked first because
-  // handleCampaignApi owns those paths; everything else falls through.
-  if (url.pathname.startsWith("/admin/api/outreach/segment-preview")
-    || url.pathname.startsWith("/admin/api/outreach/groups")
-    || url.pathname.startsWith("/admin/api/outreach/campaigns")) {
-    return await handleCampaignApi(request, env);
-  }
+    if (url.pathname.startsWith("/admin/api/outreach") || url.pathname.startsWith("/admin/api/gmail")) {
+      return await handleOutreachApi(request, env, auth);
+    }
 
-  if (url.pathname.startsWith("/admin/api/outreach") || url.pathname.startsWith("/admin/api/gmail")) {
-    return await handleOutreachApi(request, env);
-  }
-
-  if (url.pathname.startsWith("/admin/api/")) {
-    return await handleAdminApi(request, env);
+    return await handleAdminApi(request, env, auth);
   }
 
   return new Response("Not Found", { status: 404 });

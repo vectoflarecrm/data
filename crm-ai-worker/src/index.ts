@@ -3,6 +3,7 @@ import { rpmLimitFor, tryAcquireRpmSlot, rpmEnvOverride } from "./rate-limit";
 import { collectKeyPool, buildKeyOrder } from "./key-pool";
 import { getProviderState, isProviderUsable, noteProviderKeyError, noteProviderKeySuccess, noteKeyUsage, keyHealthName } from "./provider-keys";
 import { assertPublicHttpUrl } from "./security/outbound-url";
+import { writeAuditLog } from "./audit/audit-log";
 
 interface CustomerRow {
   id: number;
@@ -1835,7 +1836,20 @@ function computeLeadScore(a: CustomerAnalysis): number {
   return Math.min(100, score);
 }
 
-async function processCustomer(customer: CustomerRow, env: Env): Promise<D1PreparedStatement> {
+/**
+ * Stage 9: processCustomer returns the D1 UPDATE to apply plus the audit
+ * outcome it represents. The caller applies the update in one batch and only
+ * then writes the audit rows, so the trail records what actually landed in
+ * the database rather than what a crashed invocation merely intended.
+ */
+interface CustomerProcessResult {
+  update: D1PreparedStatement;
+  outcome: "completed" | "failed" | "retry";
+  /** Failure description (already the same text stored in remarks), for FAIL_RESEARCH. */
+  reason?: string;
+}
+
+async function processCustomer(customer: CustomerRow, env: Env): Promise<CustomerProcessResult> {
   const retryCount = getRetryCount(customer.remarks);
   try {
     // Research reuse: if a prior attempt already crawled and saved research,
@@ -1958,11 +1972,14 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
     // clearly unrelated companies (runs on free Workers AI Neurons).
     if (isRelevancePrecheckEnabled(env) && !(await runRelevancePrecheck(env, customer, researchForAi))) {
       const skipRemarks = withCompanyMarker("预检判定与水上运动行业无关（Workers AI 免费预检，未消耗付费 token）", customer.company_id);
-      return env.DB.prepare(`
-        UPDATE customers
-        SET status = 'completed', customer_segment = '不相关', lead_score = 0, remarks = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND status = 'processing'
-      `).bind(skipRemarks, customer.id);
+      return {
+        update: env.DB.prepare(`
+          UPDATE customers
+          SET status = 'completed', customer_segment = '不相关', lead_score = 0, remarks = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND status = 'processing'
+        `).bind(skipRemarks, customer.id),
+        outcome: "completed",
+      };
     }
 
     // Step 5: AI deep analysis
@@ -2043,11 +2060,14 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
       await env.DB.batch(evidenceStmts);
     }
 
-    return env.DB.prepare(`
-      UPDATE customers
-      SET status = 'completed', customer_segment = ?, product_categories = ?, company_size = ?, geographic_coverage = ?, personas_and_solutions = ?, company_profile = ?, outreach_context = ?, buying_signals = ?, lead_score = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND status = 'processing'
-    `).bind(analysis.customer_segment, analysis.product_categories, analysis.company_size, analysis.geographic_coverage, personas, companyProfileJson, outreachContextJson, buyingSignalsJson, leadScore, remarks, customer.id);
+    return {
+      update: env.DB.prepare(`
+        UPDATE customers
+        SET status = 'completed', customer_segment = ?, product_categories = ?, company_size = ?, geographic_coverage = ?, personas_and_solutions = ?, company_profile = ?, outreach_context = ?, buying_signals = ?, lead_score = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status = 'processing'
+      `).bind(analysis.customer_segment, analysis.product_categories, analysis.company_size, analysis.geographic_coverage, personas, companyProfileJson, outreachContextJson, buyingSignalsJson, leadScore, remarks, customer.id),
+      outcome: "completed",
+    };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     // Rate-limit rejections (429 / full-pool cooldown) are infinite-retry:
@@ -2060,11 +2080,15 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
       const cleanRemarks = stripRetryTag(customer.remarks ?? "");
       const nextRetryTag = `\n[retry:${retryCount + 1}]`;
       const remarks = withCompanyMarker(`${cleanRemarks}${nextRetryTag}处理失败（第${retryCount + 1}次重试）：${reason}`, customer.company_id);
-      return env.DB.prepare(`
-        UPDATE customers
-        SET status = 'pending', remarks = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND status = 'processing'
-      `).bind(remarks, customer.id);
+      return {
+        update: env.DB.prepare(`
+          UPDATE customers
+          SET status = 'pending', remarks = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND status = 'processing'
+        `).bind(remarks, customer.id),
+        outcome: "retry",
+        reason,
+      };
     }
 
     // Multi-Step Crawling & Fallback skill: bot-blocked (403) sites must not
@@ -2075,11 +2099,15 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<D1Prepa
       ? `需人工复审（反爬拦截，已尝试 Firecrawl 降级仍未成功）：${reason}`
       : `处理失败：${reason}`;
     const remarks = withCompanyMarker(failureLabel, customer.company_id);
-    return env.DB.prepare(`
-      UPDATE customers
-      SET status = 'failed', remarks = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND status = 'processing'
-    `).bind(remarks, customer.id);
+    return {
+      update: env.DB.prepare(`
+        UPDATE customers
+        SET status = 'failed', remarks = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status = 'processing'
+      `).bind(remarks, customer.id),
+      outcome: "failed",
+      reason,
+    };
   }
 }
 
@@ -2100,11 +2128,40 @@ export default {
     // tripling throughput versus one-per-tick.
     const customers = await claimCustomers(env);
     if (!customers.length) return;
+    // Stage 9 (spec §10.1): the claim IS research starting — one audit row
+    // per customer, with the cron as the system actor.
+    for (const c of customers) {
+      await writeAuditLog(env, null, {
+        actorUserId: null,
+        actorRole: "system",
+        action: "START_RESEARCH",
+        resourceType: "customer",
+        resourceId: String(c.id),
+        metadata: { company_id: c.company_id, via: "cron" },
+      });
+    }
     // Process in parallel; per-customer pacing (INTER_SOURCE_DELAY_MS between
     // searches) already respects upstream rate limits, and the RPM limiter
     // guards each provider pool.
-    const updates = await Promise.all(customers.map((c) => processCustomer(c, env)));
-    await env.DB.batch(updates);
+    const results = await Promise.all(customers.map((c) => processCustomer(c, env)));
+    await env.DB.batch(results.map((r) => r.update));
+    // Stage 9: outcome rows are written only after the batch applied, so the
+    // trail matches the database state. Retries are not audited — the row
+    // stays pending and the next claim emits a fresh START_RESEARCH.
+    for (let i = 0; i < customers.length; i++) {
+      const r = results[i];
+      if (r.outcome === "retry") continue;
+      await writeAuditLog(env, null, {
+        actorUserId: null,
+        actorRole: "system",
+        action: r.outcome === "completed" ? "COMPLETE_RESEARCH" : "FAIL_RESEARCH",
+        resourceType: "customer",
+        resourceId: String(customers[i].id),
+        metadata: r.outcome === "failed"
+          ? { company_id: customers[i].company_id, reason: r.reason?.slice(0, 300) ?? null }
+          : { company_id: customers[i].company_id },
+      });
+    }
     ctx.waitUntil(Promise.resolve());
   },
 } satisfies ExportedHandler<Env>;

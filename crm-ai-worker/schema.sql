@@ -381,3 +381,32 @@ CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry ON admin_sessions(expires_a
 -- with the ADMIN_PANEL_TOKEN secret; the session it mints binds to this row
 -- so disabled users and future RBAC roles have a stable subject.
 INSERT OR IGNORE INTO admin_users (id, username, role) VALUES ('u_admin', 'admin', 'super_admin');
+
+-- Security V2 Stage 9 (spec §10): 重要操作审计日志。
+--
+-- 每个重要操作（§10.1 列表 + 中央授权门的 ACCESS_DENIED）写一行：操作者、动作、
+-- 资源、请求关联 id 与哈希后的客户端指纹。§10.2：机密值绝不入表 —— 写入侧
+-- redactAuditMetadata() 按键名防御性打码；ip/user-agent 只存 SHA-256 哈希，
+-- 审计日志不能兼任监控日志。审计写入 fail-open：写失败只告警不阻断业务。
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id TEXT PRIMARY KEY,
+    actor_user_id TEXT,
+    actor_role TEXT,
+    action TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    resource_id TEXT,
+    request_id TEXT,
+    metadata_json TEXT,
+    ip_hash TEXT,
+    user_agent_hash TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at
+ON audit_logs(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_resource
+ON audit_logs(resource_type, resource_id);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_actor
+ON audit_logs(actor_user_id);
