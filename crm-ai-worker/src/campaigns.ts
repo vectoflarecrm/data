@@ -1,7 +1,8 @@
 import { AdminEnv } from "./admin";
 import { generateOutreachForCustomerIds, attachmentLangForCountry } from "./outreach";
 import { getQuota, sendOutreachEmail, sendDelayMs, GmailConfigError } from "./gmail";
-import { sendWithStateMachine } from "./outreach-send";
+import { sendWithStateMachine, type StateSendResult } from "./outreach-send";
+import { acquireCampaignLock, CampaignLockedError } from "./campaign-lock";
 
 /* ── 定向群发 (targeted outreach campaigns) ──────────────────────────────────
  *
@@ -617,92 +618,104 @@ export async function runCampaignGenerate(
   if (campaign.status === "paused") {
     throw new Error("群发任务已暂停：请先点「恢复」再生成");
   }
-  const batch = Math.min(Math.max(limit, 1), 50);
-  const pending = await env.DB.prepare(
-    `SELECT customer_id FROM outreach_campaign_members
-     WHERE campaign_id = ? AND status = 'pending' ORDER BY customer_id LIMIT ?`,
-  ).bind(campaignId, batch).all<{ customer_id: number }>();
-  if (!pending.results.length) {
-    const progress = (await getCampaign(env, campaignId))!;
-    await clearCampaignError(env, campaignId);
-    return { processed: 0, generated: 0, skipped: 0, failed: 0, quotaStop: false, remaining: progress.remaining, done: true, quota: null, results: [] };
+  // Single-flight (spec §13): two concurrent generate steps on the same
+  // campaign would double-spend AI tokens on the same pending members. The
+  // per-customer generation claims remain the hard guarantee; this lock
+  // prevents the duplicated work itself.
+  const lock = await acquireCampaignLock(env, campaignId);
+  if (!lock) {
+    throw new CampaignLockedError("该群发任务正在被另一个执行处理（或上次执行异常中断，锁超时后会自动释放），请稍后重试");
   }
-
-  let outcome: Awaited<ReturnType<typeof generateOutreachForCustomerIds>>;
   try {
-    outcome = await generate(
-      env,
-      campaign.brand_name,
-      pending.results.map((r) => r.customer_id),
-    );
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    await markCampaignError(env, campaignId, message);
-    throw e;
-  }
+    const batch = Math.min(Math.max(limit, 1), 50);
+    const pending = await env.DB.prepare(
+      `SELECT customer_id FROM outreach_campaign_members
+       WHERE campaign_id = ? AND status = 'pending' ORDER BY customer_id LIMIT ?`,
+    ).bind(campaignId, batch).all<{ customer_id: number }>();
+    if (!pending.results.length) {
+      const progress = (await getCampaign(env, campaignId))!;
+      await clearCampaignError(env, campaignId);
+      return { processed: 0, generated: 0, skipped: 0, failed: 0, quotaStop: false, remaining: progress.remaining, done: true, quota: null, results: [] };
+    }
 
-  const stmts: D1PreparedStatement[] = [];
-  const results: CampaignStepResult["results"] = [];
-  const touched = new Set<number>();
+    let outcome: Awaited<ReturnType<typeof generateOutreachForCustomerIds>>;
+    try {
+      outcome = await generate(
+        env,
+        campaign.brand_name,
+        pending.results.map((r) => r.customer_id),
+      );
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      await markCampaignError(env, campaignId, message);
+      throw e;
+    }
 
-  for (const row of outcome.already) {
-    // Already has a draft (or a sent one) for this brand: adopt it instead of
-    // generating a second email, so the campaign still gets sent.
-    stmts.push(env.DB.prepare(
-      `UPDATE outreach_campaign_members SET status = ?, outreach_email_id = ?, error = NULL
-       WHERE campaign_id = ? AND customer_id = ?`,
-    ).bind(row.status === "sent" ? "sent" : "generated", row.email_id, campaignId, row.customer_id));
-    touched.add(row.customer_id);
-    results.push({ customer_id: row.customer_id, ok: true });
-  }
-  for (const row of outcome.drafts) {
-    stmts.push(env.DB.prepare(
-      `UPDATE outreach_campaign_members SET status = 'generated', outreach_email_id = ?, error = NULL
-       WHERE campaign_id = ? AND customer_id = ?`,
-    ).bind(row.email_id, campaignId, row.customer_id));
-    touched.add(row.customer_id);
-    results.push({ customer_id: row.customer_id, ok: true });
-  }
+    const stmts: D1PreparedStatement[] = [];
+    const results: CampaignStepResult["results"] = [];
+    const touched = new Set<number>();
 
-  // Members the generator could not attribute an outcome to. The distinction
-  // matters for resumability: a rate-limited or temporarily-failed provider
-  // call leaves the member 'pending' so a later click can retry it, while a
-  // terminal problem (customer row gone, no research profile) is marked
-  // 'failed' so it stops blocking the campaign.
-  let failed = 0;
-  let retryable = 0;
-  const unattributed = pending.results.filter((p) => !touched.has(p.customer_id));
-  for (const row of unattributed) {
-    const message = classifyGenerationError(row.customer_id, outcome.errors);
-    if (message === null) { retryable++; continue; }
-    failed++;
-    stmts.push(env.DB.prepare(
-      `UPDATE outreach_campaign_members SET status = 'failed', error = ? WHERE campaign_id = ? AND customer_id = ?`,
-    ).bind(message.slice(0, 300), campaignId, row.customer_id));
-    results.push({ customer_id: row.customer_id, ok: false, error: message });
-  }
+    for (const row of outcome.already) {
+      // Already has a draft (or a sent one) for this brand: adopt it instead of
+      // generating a second email, so the campaign still gets sent.
+      stmts.push(env.DB.prepare(
+        `UPDATE outreach_campaign_members SET status = ?, outreach_email_id = ?, error = NULL
+         WHERE campaign_id = ? AND customer_id = ?`,
+      ).bind(row.status === "sent" ? "sent" : "generated", row.email_id, campaignId, row.customer_id));
+      touched.add(row.customer_id);
+      results.push({ customer_id: row.customer_id, ok: true });
+    }
+    for (const row of outcome.drafts) {
+      stmts.push(env.DB.prepare(
+        `UPDATE outreach_campaign_members SET status = 'generated', outreach_email_id = ?, error = NULL
+         WHERE campaign_id = ? AND customer_id = ?`,
+      ).bind(row.email_id, campaignId, row.customer_id));
+      touched.add(row.customer_id);
+      results.push({ customer_id: row.customer_id, ok: true });
+    }
 
-  for (let i = 0; i < stmts.length; i += 50) {
-    await env.DB.batch(stmts.slice(i, i + 50));
-  }
+    // Members the generator could not attribute an outcome to. The distinction
+    // matters for resumability: a rate-limited or temporarily-failed provider
+    // call leaves the member 'pending' so a later click can retry it, while a
+    // terminal problem (customer row gone, no research profile) is marked
+    // 'failed' so it stops blocking the campaign.
+    let failed = 0;
+    let retryable = 0;
+    const unattributed = pending.results.filter((p) => !touched.has(p.customer_id));
+    for (const row of unattributed) {
+      const message = classifyGenerationError(row.customer_id, outcome.errors);
+      if (message === null) { retryable++; continue; }
+      failed++;
+      stmts.push(env.DB.prepare(
+        `UPDATE outreach_campaign_members SET status = 'failed', error = ? WHERE campaign_id = ? AND customer_id = ?`,
+      ).bind(message.slice(0, 300), campaignId, row.customer_id));
+      results.push({ customer_id: row.customer_id, ok: false, error: message });
+    }
 
-  if (failed) await markCampaignError(env, campaignId, outcome.errors[0]?.message ?? "部分客户生成失败");
-  else if (retryable) await markCampaignError(env, campaignId, "AI 服务暂时不可用，这些客户保持待生成，可点「生成草稿」重试");
-  else await clearCampaignError(env, campaignId);
-  const progress = (await getCampaign(env, campaignId))!;
-  return {
-    processed: pending.results.length,
-    generated: outcome.drafts.length,
-    skipped: outcome.already.length,
-    failed,
-    quotaStop: false,
-    remaining: progress.remaining,
-    // Generation is finished when nothing is still waiting for a draft. The
-    // campaign itself is not done until those drafts have been sent.
-    done: progress.pending === 0,
-    quota: null,
-    results,
-  };
+    for (let i = 0; i < stmts.length; i += 50) {
+      await env.DB.batch(stmts.slice(i, i + 50));
+    }
+
+    if (failed) await markCampaignError(env, campaignId, outcome.errors[0]?.message ?? "部分客户生成失败");
+    else if (retryable) await markCampaignError(env, campaignId, "AI 服务暂时不可用，这些客户保持待生成，可点「生成草稿」重试");
+    else await clearCampaignError(env, campaignId);
+    const progress = (await getCampaign(env, campaignId))!;
+    return {
+      processed: pending.results.length,
+      generated: outcome.drafts.length,
+      skipped: outcome.already.length,
+      failed,
+      quotaStop: false,
+      remaining: progress.remaining,
+      // Generation is finished when nothing is still waiting for a draft. The
+      // campaign itself is not done until those drafts have been sent.
+      done: progress.pending === 0,
+      quota: null,
+      results,
+    };
+  } finally {
+    await lock.release();
+  }
 }
 
 /* ── Step 2: send the campaign's drafts (resumable, quota-aware) ─────────── */
@@ -742,109 +755,129 @@ export async function runCampaignSend(
   if (campaign.status === "paused") {
     throw new Error("群发任务已暂停：请先点「恢复」再发送");
   }
-  const batch = Math.min(Math.max(limit, 1), 50);
-
-  // INNER JOIN semantics are intentional: a member is sendable only while its
-  // draft still exists and is still unsent.
-  const members = await env.DB.prepare(
-    `SELECT m.customer_id, m.outreach_email_id, e.email_to, e.subject, e.body, c.country
-     FROM outreach_campaign_members m
-     JOIN outreach_emails e ON e.id = m.outreach_email_id
-     LEFT JOIN customers c ON c.id = m.customer_id
-     WHERE m.campaign_id = ? AND m.status = 'generated' AND e.status = 'draft'
-     ORDER BY m.customer_id LIMIT ?`,
-  ).bind(campaignId, batch).all<SendableMember>();
-
-  if (!members.results.length) {
-    const progress = (await getCampaign(env, campaignId))!;
-    await clearCampaignError(env, campaignId);
-    return { processed: 0, generated: 0, skipped: 0, failed: 0, quotaStop: false, remaining: progress.remaining, done: true, quota: await getQuotaNow(env), results: [] };
+  // Single-flight (spec §13): even though Stage 10's per-email claims already
+  // guarantee no double send, two interleaved batches would burn quota on
+  // skipped members and race the member bookkeeping. One campaign, one runner.
+  const lock = await acquireCampaignLock(env, campaignId);
+  if (!lock) {
+    throw new CampaignLockedError("该群发任务正在被另一个执行处理（或上次执行异常中断，锁超时后会自动释放），请稍后重试");
   }
+  try {
+    const batch = Math.min(Math.max(limit, 1), 50);
 
-  const settings = await env.DB.prepare(
-    "SELECT sender_email, sender_name, gmail_account FROM outreach_settings WHERE brand_name = ?",
-  ).bind(campaign.brand_name).first<{ sender_email: string | null; sender_name: string | null; gmail_account: string | null }>();
+    // INNER JOIN semantics are intentional: a member is sendable only while its
+    // draft still exists and is still unsent.
+    const members = await env.DB.prepare(
+      `SELECT m.customer_id, m.outreach_email_id, e.email_to, e.subject, e.body, c.country
+       FROM outreach_campaign_members m
+       JOIN outreach_emails e ON e.id = m.outreach_email_id
+       LEFT JOIN customers c ON c.id = m.customer_id
+       WHERE m.campaign_id = ? AND m.status = 'generated' AND e.status = 'draft'
+       ORDER BY m.customer_id LIMIT ?`,
+    ).bind(campaignId, batch).all<SendableMember>();
 
-  const quota = await getQuotaNow(env);
-  const delayMs = sendDelayMs(env);
-  const results: CampaignStepResult["results"] = [];
-  let sent = 0;
-  let failed = 0;
-  let stopped = false;
-  let quotaStop = false;
-
-  for (const member of members.results) {
-    if (quota.sent_today + sent >= quota.daily_limit) {
-      // Leave this member and every later one on 'generated' for tomorrow.
-      quotaStop = true;
-      break;
+    if (!members.results.length) {
+      const progress = (await getCampaign(env, campaignId))!;
+      await clearCampaignError(env, campaignId);
+      return { processed: 0, generated: 0, skipped: 0, failed: 0, quotaStop: false, remaining: progress.remaining, done: true, quota: await getQuotaNow(env), results: [] };
     }
-    if (sent > 0) await new Promise((r) => setTimeout(r, delayMs));
-    try {
-      const res = await send(
-        env,
-        { id: member.outreach_email_id, email_to: member.email_to ?? "", subject: member.subject, body: member.body },
-        {
-          fromEmail: settings?.sender_email ?? null,
-          fromName: settings?.sender_name ?? null,
-          brandName: campaign.brand_name,
-          attachmentLanguage: attachmentLangForCountry(member.country),
-          gmailAccount: settings?.gmail_account ?? null,
-        },
-      );
-      if (res.ok) {
-        sent++;
-        results.push({ customer_id: member.customer_id, ok: true });
-        await env.DB.prepare(
-          "UPDATE outreach_campaign_members SET status = 'sent', error = NULL WHERE campaign_id = ? AND customer_id = ?",
-        ).bind(campaignId, member.customer_id).run();
-      } else {
+
+    const settings = await env.DB.prepare(
+      "SELECT sender_email, sender_name, gmail_account FROM outreach_settings WHERE brand_name = ?",
+    ).bind(campaign.brand_name).first<{ sender_email: string | null; sender_name: string | null; gmail_account: string | null }>();
+
+    const quota = await getQuotaNow(env);
+    const delayMs = sendDelayMs(env);
+    const results: CampaignStepResult["results"] = [];
+    let sent = 0;
+    let failed = 0;
+    let skipped = 0;
+    let stopped = false;
+    let quotaStop = false;
+
+    for (const member of members.results) {
+      if (quota.sent_today + sent >= quota.daily_limit) {
+        // Leave this member and every later one on 'generated' for tomorrow.
+        quotaStop = true;
+        break;
+      }
+      if (sent > 0) await new Promise((r) => setTimeout(r, delayMs));
+      try {
+        const res = await send(
+          env,
+          { id: member.outreach_email_id, email_to: member.email_to ?? "", subject: member.subject, body: member.body },
+          {
+            fromEmail: settings?.sender_email ?? null,
+            fromName: settings?.sender_name ?? null,
+            brandName: campaign.brand_name,
+            attachmentLanguage: attachmentLangForCountry(member.country),
+            gmailAccount: settings?.gmail_account ?? null,
+          },
+        );
+        if (res.ok) {
+          sent++;
+          results.push({ customer_id: member.customer_id, ok: true });
+          await env.DB.prepare(
+            "UPDATE outreach_campaign_members SET status = 'sent', error = NULL WHERE campaign_id = ? AND customer_id = ?",
+          ).bind(campaignId, member.customer_id).run();
+        } else if ((res as StateSendResult).outcome === "skipped_locked") {
+          // Another execution owns this email right now (an operator's
+          // single-send click racing the batch, or a fail-open window before
+          // the locks table was migrated). That owner will mark the member
+          // when it finishes — burning it as 'failed' here would lie about
+          // the send outcome.
+          skipped++;
+          continue;
+        } else {
+          failed++;
+          results.push({ customer_id: member.customer_id, ok: false, error: res.error });
+          await env.DB.prepare(
+            "UPDATE outreach_campaign_members SET status = 'failed', error = ? WHERE campaign_id = ? AND customer_id = ?",
+          ).bind((res.error ?? "发送失败").slice(0, 300), campaignId, member.customer_id).run();
+        }
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        // assertQuota() throws (rather than returning ok:false) once the daily
+        // budget is gone. Treat that as a batch-level stop: the member stays
+        // 'generated' so it is retried on the next day, not burned as failed.
+        if (isQuotaStop(message)) { quotaStop = true; break; }
         failed++;
-        results.push({ customer_id: member.customer_id, ok: false, error: res.error });
+        results.push({ customer_id: member.customer_id, ok: false, error: message });
         await env.DB.prepare(
           "UPDATE outreach_campaign_members SET status = 'failed', error = ? WHERE campaign_id = ? AND customer_id = ?",
-        ).bind((res.error ?? "发送失败").slice(0, 300), campaignId, member.customer_id).run();
+        ).bind(message.slice(0, 300), campaignId, member.customer_id).run();
+        // Missing/invalid Gmail config will fail identically for every remaining
+        // member, so stop the batch instead of burning through all of them.
+        if (e instanceof GmailConfigError) { stopped = true; break; }
       }
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      // assertQuota() throws (rather than returning ok:false) once the daily
-      // budget is gone. Treat that as a batch-level stop: the member stays
-      // 'generated' so it is retried on the next day, not burned as failed.
-      if (isQuotaStop(message)) { quotaStop = true; break; }
-      failed++;
-      results.push({ customer_id: member.customer_id, ok: false, error: message });
-      await env.DB.prepare(
-        "UPDATE outreach_campaign_members SET status = 'failed', error = ? WHERE campaign_id = ? AND customer_id = ?",
-      ).bind(message.slice(0, 300), campaignId, member.customer_id).run();
-      // Missing/invalid Gmail config will fail identically for every remaining
-      // member, so stop the batch instead of burning through all of them.
-      if (e instanceof GmailConfigError) { stopped = true; break; }
     }
-  }
 
-  if (stopped) {
-    await markCampaignError(env, campaignId, "Gmail 配置缺失或无效，群发已中止");
-  } else if (failed) {
-    await markCampaignError(env, campaignId, results.find((r) => !r.ok)?.error ?? "部分邮件发送失败");
-  } else {
-    await clearCampaignError(env, campaignId);
-  }
+    if (stopped) {
+      await markCampaignError(env, campaignId, "Gmail 配置缺失或无效，群发已中止");
+    } else if (failed) {
+      await markCampaignError(env, campaignId, results.find((r) => !r.ok)?.error ?? "部分邮件发送失败");
+    } else {
+      await clearCampaignError(env, campaignId);
+    }
 
-  const progress = (await getCampaign(env, campaignId))!;
-  const after = await getQuotaNow(env);
-  return {
-    processed: results.length,
-    generated: sent,
-    skipped: 0,
-    failed,
-    // Not an error: the operator is simply out of daily quota and can resume
-    // tomorrow. Surfacing it as a failure would wrongly imply bad addresses.
-    quotaStop,
-    remaining: progress.remaining,
-    // Nothing left for the send step to do once no draft is waiting on it —
-    // members still awaiting generation are a different step's business.
-    done: progress.generated === 0,
-    quota: after,
-    results,
-  };
+    const progress = (await getCampaign(env, campaignId))!;
+    const after = await getQuotaNow(env);
+    return {
+      processed: results.length,
+      generated: sent,
+      skipped,
+      failed,
+      // Not an error: the operator is simply out of daily quota and can resume
+      // tomorrow. Surfacing it as a failure would wrongly imply bad addresses.
+      quotaStop,
+      remaining: progress.remaining,
+      // Nothing left for the send step to do once no draft is waiting on it —
+      // members still awaiting generation are a different step's business.
+      done: progress.generated === 0,
+      quota: after,
+      results,
+    };
+  } finally {
+    await lock.release();
+  }
 }

@@ -442,3 +442,13 @@ CREATE TABLE IF NOT EXISTS gmail_send_reservations (
 
 CREATE INDEX IF NOT EXISTS idx_reservations_account
 ON gmail_send_reservations(gmail_account_id, status);
+
+-- Security V2 Stage 12 (spec §13): campaign execution lock (single-flight).
+-- Claim/release semantics and failure policy: src/campaign-lock.ts and
+-- migrations/0011_campaign_locks.sql.
+CREATE TABLE IF NOT EXISTS campaign_locks (
+  campaign_id INTEGER PRIMARY KEY,
+  lock_token TEXT NOT NULL,
+  locked_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);

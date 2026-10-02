@@ -46,6 +46,7 @@ import {
   runCampaignSend,
   deserializeFilters,
 } from "./campaigns";
+import { CampaignLockedError } from "./campaign-lock";
 import { buildFilterOptions } from "./facets";
 import { roleHasPermission, requiredPermission } from "./auth/rbac";
 import { applySecurityHeaders, htmlCsp } from "./security-headers";
@@ -2026,6 +2027,11 @@ async function handleCampaignApi(request: Request, env: AdminEnv, auth: AdminAut
 
     return jsonResponse({ detail: "Not Found" }, 404);
   } catch (error) {
+    // Busy campaign (Stage 12, spec §13): another execution holds the lock —
+    // 409 turns this into an actionable "稍后重试" toast instead of a 500.
+    if (error instanceof CampaignLockedError) {
+      return jsonResponse({ detail: error.message }, 409);
+    }
     const msg = error instanceof Error ? error.message : String(error);
     // Input problems (bad filter JSON, unknown brand, empty match) are the
     // operator's to fix — 400 keeps the panel message actionable instead of
