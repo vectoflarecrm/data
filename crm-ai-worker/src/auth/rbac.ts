@@ -29,7 +29,6 @@ export type Permission =
   | "providers.write"
   | "credentials.read"
   | "credentials.write"
-  | "secrets.write"
   | "audit.read";
 
 const READ_PERMISSIONS: readonly Permission[] = [
@@ -53,7 +52,6 @@ export const ROLE_PERMISSIONS: Record<AdminRole, ReadonlySet<Permission>> = {
     "outreach.send",
     "providers.write",
     "credentials.write",
-    "secrets.write",
   ]),
   operator: new Set<Permission>([
     "customers.read",
@@ -116,7 +114,9 @@ export function requiredPermission(url: URL, method: string): Permission | null 
   }
 
   // ── Cloudflare Worker secrets (/admin/api/secrets…) ──
-  if (parts[2] === "secrets") return "secrets.write";
+  // Removed in Stage 3: the Worker no longer manages its own Cloudflare
+  // secrets at all (docs/secret-management.md). The path now falls through to
+  // the router's 404 — intentionally not mapped.
 
   // ── Gmail sender pool (/admin/api/gmail…) ──
   if (parts[2] === "gmail") {

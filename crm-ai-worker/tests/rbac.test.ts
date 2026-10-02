@@ -169,13 +169,15 @@ describe("RBAC: role boundaries (server-side enforced)", () => {
     expect(del.status).toBe(403);
   });
 
-  it("sender cannot touch provider keys or Cloudflare secrets either", async () => {
+  it("sender cannot touch provider keys; Worker self-secret management is gone entirely", async () => {
     const { db, env } = await makeEnv();
     const token = await mintSession(db, "sender");
     const keys = await call(env, "/admin/api/keys", token, json({ provider: "groq", api_key: "gsk_x" }));
     expect(keys.status).toBe(403);
+    // Stage 3 removed /admin/api/secrets — the Worker can no longer rewrite
+    // its own Cloudflare secrets, so the route 404s for every role.
     const secrets = await call(env, "/admin/api/secrets", token);
-    expect(secrets.status).toBe(403);
+    expect(secrets.status).toBe(404);
   });
 
   it("readonly cannot modify a customer", async () => {
@@ -186,27 +188,27 @@ describe("RBAC: role boundaries (server-side enforced)", () => {
     expect((await res.json() as { detail: string }).detail).toContain("customers.write");
   });
 
-  it("only super_admin can manage Cloudflare Worker secrets", async () => {
+  it("nobody can manage Cloudflare Worker secrets — endpoint removed (Stage 3)", async () => {
     const { db, env } = await makeEnv();
-    for (const role of ["operator", "researcher", "sender", "readonly"]) {
+    // Every role, super_admin included: the route is gone, not just gated.
+    for (const role of ["super_admin", "operator", "researcher", "sender", "readonly"]) {
       const token = await mintSession(db, role);
-      const res = await call(env, "/admin/api/secrets", token);
-      expect(res.status).toBe(403);
+      const get = await call(env, "/admin/api/secrets", token);
+      expect(get.status).toBe(404);
+      const update = await call(env, "/admin/api/secrets/update", token, json({ updates: [{ name: "GROQ_API_KEY", value: "gsk_x" }] }));
+      expect(update.status).toBe(404);
+      const bootstrap = await call(env, "/admin/api/secrets/bootstrap", token, json({ api_token: "cf_x", account_id: "acc" }));
+      expect(bootstrap.status).toBe(404);
     }
-    // super_admin passes the gate; the endpoint itself is unbootstrapped (503)
-    // — anything but 403 proves the permission check passed.
-    const su = await mintSession(db, "super_admin");
-    const res = await call(env, "/admin/api/secrets", su);
-    expect(res.status).not.toBe(403);
-    expect(res.status).toBe(503);
   });
 
-  it("a non-super_admin is bounced off the /admin/secrets page", async () => {
+  it("the /admin/secrets page is gone for every role", async () => {
     const { db, env } = await makeEnv();
-    const token = await mintSession(db, "operator");
-    const res = await call(env, "/admin/secrets", token);
-    expect([303, 302]).toContain(res.status);
-    expect(res.headers.get("Location")).toBe("https://worker.example/admin");
+    for (const role of ["super_admin", "operator", "sender"]) {
+      const token = await mintSession(db, role);
+      const res = await call(env, "/admin/secrets", token);
+      expect(res.status).toBe(404);
+    }
   });
 });
 

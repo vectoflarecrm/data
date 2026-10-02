@@ -169,7 +169,6 @@ evidence 表:        每条核心判断的 source_url + evidence_text + confiden
 /admin                 客户 CRUD + 评分分布卡 + CSV 导入 + 海选预过滤
                        （国家/细分/产品为下拉勾选，选项旁显示当前命中数）
 /admin/keys            动态 Key 池（D1，即时生效）/ 冷却监控 / 用量卡片 / 凭据加密
-/admin/secrets         经 Cloudflare API 直写 Worker Secrets（40 槽位）
 /admin/outreach        开发信生成与 Gmail 发送（结构化档案驱动，按国家语言）
                        └─「🎯 定向群发」标签页：客群圈选 / 保存客群 / 分批续发
 POST /admin/login      面板登录。限流在读取提交的 token 之前判断；被锁时即使 token
@@ -342,7 +341,7 @@ npx wrangler d1 execute crm-ai-db --remote --file=./schema.sql
 npx wrangler d1 execute crm-ai-db --local --file=./schema.sql
 ```
 
-写入 AI API Key（不要写入源码或提交到 Git）——三种方式：
+写入 AI API Key（不要写入源码或提交到 Git）——两种方式：
 
 **方式 A（推荐）：管理面板动态 Key 池（D1 即时生效）**
 
@@ -365,7 +364,7 @@ npx wrangler d1 execute crm-ai-db --local --file=./schema.sql
 
 1. 点「生成密钥」拿到 32 字节 base64 值；
 2. **先备份 D1**：`npx wrangler d1 export crm-ai-db --remote --output backup.sql`；
-3. 把该值保存为 Worker Secret（`/admin/secrets` 页面，或 `npx wrangler secret put CREDENTIAL_ENC_KEY`）；
+3. 把该值保存为 Worker Secret（`npx wrangler secret put CREDENTIAL_ENC_KEY`，详见 [docs/secret-management.md](docs/secret-management.md)）；
 4. 回到 `/admin/keys` 刷新，点「一键加密 N 条存量」。
 
 **这个密钥没有备份就无法恢复**——丢失后存量 Key 全部无法解密，只能重新申请。
@@ -379,17 +378,13 @@ npx wrangler d1 execute crm-ai-db --local --file=./schema.sql
 - **一处主密钥，两把子密钥**：HKDF 从主密钥派生出 AES-GCM 加密密钥和 HMAC 指纹密钥，同一份密钥材料不做跨算法复用；
 - **单行解密失败不影响整平台**：某个行用别的密钥加密过（换过密钥）会被跳过，其余 Key 照常工作。
 
-**方式 B：面板直写 Cloudflare Secrets（方案A）**
-
-`https://<worker>/admin/secrets` 页面首次会显示引导表单：粘贴一个仅有 `Workers Scripts: Edit` 权限的 [Cloudflare API Token](https://dash.cloudflare.com/profile/api-tokens) 与 Account ID，面板自动验证并写入自身凭据；之后可在页面上轮换各平台最多 40 个 Key 槽位。
-
-**方式 C：命令行 / GitHub Secrets**
+**方式 B：命令行 / GitHub Secrets**
 
 ```bash
-npx wrangler secret put CLOUDFLARE_API_TOKEN   # 仅方式B引导需要
-npx wrangler secret put CLOUDFLARE_ACCOUNT_ID
 npx wrangler secret put GEMINI_API_KEY         # 直接写入单条
 ```
+
+> 历史说明：曾有 `/admin/secrets` 面板可经 Cloudflare API 直写 Worker 自身的 Secrets（Security V2 Stage 3 已移除——生产 Worker 不应持有改写自身生产 Secret 的能力）。Secret 的增改删现在统一走 [docs/secret-management.md](docs/secret-management.md) 中的三种方式。
 
 在 GitHub 仓库 Secrets 中配置各平台 Key 后，默认 CI **不再**覆盖面板写入的 Key；只有在仓库 Secrets 额外设置 `SYNC_SECRETS_FROM_GITHUB=true` 时，CI 才会强制用 GitHub 侧的值同步覆盖。
 
@@ -479,7 +474,7 @@ OpenRouter: google/gemini-2.5-flash
 
 可用的 Worker Secret：
 
-每家 AI 平台均支持 **40 个 Key** 的运行时 Key 池（搜索类 Tavily/Exa 为 60 个），命名规则 `<平台>_API_KEY`、`<平台>_API_KEY_2` … `<平台>_API_KEY_40`，按序轮询使用，受限 Key 自动冷却；面板 `/admin/secrets` 可直接在线维护全部 Key 槽位。
+每家 AI 平台均支持 **40 个 Key** 的运行时 Key 池（搜索类 Tavily/Exa 为 60 个），命名规则 `<平台>_API_KEY`、`<平台>_API_KEY_2` … `<平台>_API_KEY_40`，按序轮询使用，受限 Key 自动冷却；也可用面板 `/admin/keys` 的 D1 动态 Key 池在线维护，即时生效。
 
 ```text
 GEMINI_API_KEY, GEMINI_API_KEY_2 … GEMINI_API_KEY_40
@@ -495,7 +490,6 @@ TAVILY_API_KEY, TAVILY_API_KEY_2 … TAVILY_API_KEY_60  (主搜索)
 EXA_API_KEY, EXA_API_KEY_2 … EXA_API_KEY_60
 BRAVE_API_KEY, BRAVE_API_KEY_2  (备用搜索, https://brave.com/search/api/)
 FIRECRAWL_API_KEY  (可选, 反爬降级, https://www.firecrawl.dev/)
-CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID  (面板引导凭据, 仅 Workers Scripts: Edit)
 ```
 
 ### 搜索平台免费额度与重置（2026-09 核实）

@@ -131,11 +131,6 @@ export interface AdminEnv extends GmailEnv {
   NVIDIA_RPM?: string;
   AMD_RPM?: string;
   OPENROUTER_RPM?: string;
-  // Cloudflare API credentials for the panel's secret-management page
-  // (bootstrap once via CI/`wrangler secret put`; keys then rotate in-panel)
-  CLOUDFLARE_API_TOKEN?: string;
-  CLOUDFLARE_ACCOUNT_ID?: string;
-  WORKER_SCRIPT_NAME?: string;
 }
 
 interface AdminCustomer {
@@ -1288,188 +1283,6 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
   return jsonResponse({ detail: "Not Found" }, 404);
 }
 
-/* ── Worker secret management (方案A: panel writes directly to Cloudflare API) ── */
-
-interface SecretDefinition {
-  name: string;
-  label: string;
-  group: string;
-  indexed?: boolean; // *_2 … *_40 suffixes generated automatically
-}
-
-// Provider pools share one definition with indexed: true (40 keys each).
-// Searlo/Tavily/Exa keep their historical pool sizes.
-// Panel Config 放在最前：分组按数组顺序渲染，避免被 500+ 个 AI Key 字段沉底。
-const SECRET_DEFINITIONS: SecretDefinition[] = [
-  { name: "GMAIL_OAUTH_CLIENT_ID", label: "Gmail OAuth 客户端 ID（OAuth 令牌发信必需）", group: "Panel Config" },
-  { name: "GMAIL_OAUTH_CLIENT_SECRET", label: "Gmail OAuth 客户端密钥（桌面应用可为空）", group: "Panel Config" },
-  { name: "GMAIL_DAILY_LIMIT", label: "Gmail 每日发送上限（默认 400）", group: "Panel Config" },
-  { name: "GMAIL_SEND_DELAY_MS", label: "发信间隔毫秒（默认 3000）", group: "Panel Config" },
-  { name: "CLOUDFLARE_API_TOKEN", label: "Cloudflare API Token (面板引导)", group: "Panel Config" },
-  { name: "CLOUDFLARE_ACCOUNT_ID", label: "Cloudflare Account ID", group: "Panel Config" },
-  { name: "WORKER_SCRIPT_NAME", label: "Worker 脚本名 (默认 crm-ai-worker)", group: "Panel Config" },
-  { name: "ADMIN_PANEL_TOKEN", label: "面板登录 Token (改后需重新登录)", group: "Panel Config" },
-  { name: "CREDENTIAL_ENC_KEY", label: "D1 凭据加密密钥 (32 字节 base64，未设置时禁止写入 Key)", group: "Panel Config" },
-  { name: "GEMINI_API_KEY", label: "Gemini", group: "AI Provider Keys", indexed: true },
-  { name: "GROQ_API_KEY", label: "Groq", group: "AI Provider Keys", indexed: true },
-  { name: "CEREBRAS_API_KEY", label: "Cerebras", group: "AI Provider Keys", indexed: true },
-  { name: "ZHIPU_API_KEY", label: "Zhipu GLM", group: "AI Provider Keys", indexed: true },
-  { name: "NVIDIA_API_KEY", label: "NVIDIA NIM", group: "AI Provider Keys", indexed: true },
-  { name: "AMD_API_KEY", label: "AMD Radeon Cloud", group: "AI Provider Keys", indexed: true },
-  { name: "MISTRAL_API_KEY", label: "Mistral", group: "AI Provider Keys", indexed: true },
-  { name: "DEEPSEEK_API_KEY", label: "DeepSeek", group: "AI Provider Keys", indexed: true },
-  { name: "OPENROUTER_API_KEY", label: "OpenRouter", group: "AI Provider Keys", indexed: true },
-  { name: "TAVILY_API_KEY", label: "Tavily (搜索)", group: "Search Keys", indexed: true },
-  { name: "EXA_API_KEY", label: "Exa (搜索)", group: "Search Keys", indexed: true },
-  { name: "BRAVE_API_KEY", label: "Brave (搜索，已停用：需绑卡)", group: "Search Keys", indexed: true },
-  { name: "SEARLO_API_KEY", label: "Searlo (搜索)", group: "Search Keys", indexed: true },
-  { name: "FIRECRAWL_API_KEY", label: "Firecrawl (反爬降级)", group: "Search Keys" },
-  { name: "GEMINI_MODEL", label: "Gemini 模型", group: "Model Overrides" },
-  { name: "GROQ_MODEL", label: "Groq 模型", group: "Model Overrides" },
-  { name: "CEREBRAS_MODEL", label: "Cerebras 模型", group: "Model Overrides" },
-  { name: "ZHIPU_MODEL", label: "Zhipu 模型", group: "Model Overrides" },
-  { name: "NVIDIA_MODEL", label: "NVIDIA 模型", group: "Model Overrides" },
-  { name: "MISTRAL_MODEL", label: "Mistral 模型", group: "Model Overrides" },
-  { name: "DEEPSEEK_MODEL", label: "DeepSeek 模型", group: "Model Overrides" },
-  { name: "OPENROUTER_MODEL", label: "OpenRouter 模型", group: "Model Overrides" },
-  { name: "GEMINI_RPM", label: "Gemini 总RPM", group: "RPM Overrides" },
-  { name: "GROQ_RPM", label: "Groq 总RPM", group: "RPM Overrides" },
-  { name: "CEREBRAS_RPM", label: "Cerebras 总RPM", group: "RPM Overrides" },
-  { name: "ZHIPU_RPM", label: "Zhipu 总RPM", group: "RPM Overrides" },
-  { name: "NVIDIA_RPM", label: "NVIDIA 总RPM", group: "RPM Overrides" },
-  { name: "MISTRAL_RPM", label: "Mistral 总RPM", group: "RPM Overrides" },
-  { name: "DEEPSEEK_RPM", label: "DeepSeek 总RPM", group: "RPM Overrides" },
-  { name: "OPENROUTER_RPM", label: "OpenRouter 总RPM", group: "RPM Overrides" },
-];
-
-const INDEXED_SECRET_MAX = 40;
-
-function secretDefinitionsExpanded(): SecretDefinition[] {
-  const expanded: SecretDefinition[] = [];
-  for (const def of SECRET_DEFINITIONS) {
-    if (!def.indexed) {
-      expanded.push(def);
-      continue;
-    }
-    const max = def.name === "TAVILY_API_KEY" || def.name === "EXA_API_KEY" ? 60 : INDEXED_SECRET_MAX;
-    expanded.push({ ...def, name: def.name, label: `${def.label} #1` });
-    for (let i = 2; i <= max; i++) {
-      expanded.push({ name: `${def.name}_${i}`, label: `${def.label} #${i}`, group: def.group });
-    }
-  }
-  return expanded;
-}
-
-/**
- * Bootstrap check: the panel can only manage secrets when the Worker itself
- * was granted a Cloudflare API token with Workers Scripts: Edit scope.
- * Set once via `npx wrangler secret put CLOUDFLARE_API_TOKEN` (plus
- * CLOUDFLARE_ACCOUNT_ID); afterwards keys rotate from the panel directly.
- */
-function secretApiConfig(env: AdminEnv): { accountTag: string; scriptName: string; apiToken: string } | null {
-  if (!env.CLOUDFLARE_API_TOKEN || !env.CLOUDFLARE_ACCOUNT_ID) return null;
-  return {
-    accountTag: env.CLOUDFLARE_ACCOUNT_ID,
-    scriptName: env.WORKER_SCRIPT_NAME || "crm-ai-worker",
-    apiToken: env.CLOUDFLARE_API_TOKEN,
-  };
-}
-
-async function cfPutWorkerSecret(
-  config: { accountTag: string; scriptName: string; apiToken: string },
-  secretName: string,
-  secretValue: string,
-): Promise<{ ok: boolean; error?: string }> {
-  const url = `https://api.cloudflare.com/client/v4/accounts/${config.accountTag}/workers/scripts/${config.scriptName}/secrets`;
-  const response = await fetch(url, {
-    method: "PUT",
-    headers: {
-      "Authorization": `Bearer ${config.apiToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ name: secretName, text: secretValue, type: "secret_text" }),
-  });
-  if (response.ok) return { ok: true };
-  let detail = `HTTP ${response.status}`;
-  try {
-    const payload = await response.json() as { errors?: Array<{ message?: string }> };
-    const first = payload.errors?.[0]?.message;
-    if (first) detail = `${detail}: ${first}`;
-  } catch { /* keep status-only detail */ }
-  return { ok: false, error: detail };
-}
-
-async function handleSecretsApi(request: Request, env: AdminEnv): Promise<Response> {
-  const url = new URL(request.url);
-
-  // One-time bootstrap: the admin pastes a Cloudflare API token + account ID
-  // in the panel; the panel uses THAT token to write the credentials onto the
-  // Worker itself. Afterwards all key management happens in-panel with no CLI.
-  if (request.method === "POST" && url.pathname === "/admin/api/secrets/bootstrap") {
-    const body = await request.json() as { api_token?: unknown; account_id?: unknown };
-    const apiToken = typeof body.api_token === "string" ? body.api_token.trim() : "";
-    const accountId = typeof body.account_id === "string" ? body.account_id.trim() : "";
-    if (!apiToken || !accountId) {
-      return jsonResponse({ detail: "api_token 和 account_id 均为必填" }, 400);
-    }
-    // Validate before saving: the token must at least be able to read scripts
-    // in the given account — a wrong-but-saved token would brick the panel.
-    const probe = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts`,
-      { headers: { "Authorization": `Bearer ${apiToken}` } },
-    );
-    if (!probe.ok) {
-      const status = probe.status;
-      const hint = status === 403 || status === 401
-        ? "Token 无效或缺少 Workers Scripts: Edit 权限"
-        : `Cloudflare API 返回 HTTP ${status}`;
-      return jsonResponse({ detail: `验证失败：${hint}` }, 400);
-    }
-    const config = { accountTag: accountId, scriptName: env.WORKER_SCRIPT_NAME || "crm-ai-worker", apiToken };
-    const putToken = await cfPutWorkerSecret(config, "CLOUDFLARE_API_TOKEN", apiToken);
-    if (!putToken.ok) return jsonResponse({ detail: `保存 CLOUDFLARE_API_TOKEN 失败：${putToken.error}` }, 500);
-    const putAccount = await cfPutWorkerSecret(config, "CLOUDFLARE_ACCOUNT_ID", accountId);
-    if (!putAccount.ok) return jsonResponse({ detail: `保存 CLOUDFLARE_ACCOUNT_ID 失败：${putAccount.error}` }, 500);
-    return jsonResponse({ ok: true, applied: ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"] });
-  }
-
-  const config = secretApiConfig(env);
-  if (!config) {
-    return jsonResponse({
-      detail: "Secret management is not bootstrapped. Submit a Cloudflare API token below, or run: npx wrangler secret put CLOUDFLARE_API_TOKEN",
-    }, 503);
-  }
-
-  if (request.method === "GET" && url.pathname === "/admin/api/secrets") {
-    // Metadata only — secret VALUES are never readable back from Cloudflare.
-    return jsonResponse({ definitions: secretDefinitionsExpanded() });
-  }
-
-  if (request.method === "POST" && url.pathname === "/admin/api/secrets/update") {
-    const body = await request.json() as { updates?: Array<{ name?: unknown; value?: unknown }> };
-    const updates = Array.isArray(body.updates) ? body.updates : [];
-    if (updates.length === 0) return jsonResponse({ detail: "updates is required" }, 400);
-    const validNames = new Set(secretDefinitionsExpanded().map((d) => d.name));
-    const applied: string[] = [];
-    const failed: Array<{ name: string; error: string }> = [];
-    for (const update of updates) {
-      const name = typeof update.name === "string" ? update.name.trim() : "";
-      const value = typeof update.value === "string" ? update.value.trim() : "";
-      if (!name || !validNames.has(name)) {
-        failed.push({ name: name || "(empty)", error: "unknown secret name" });
-        continue;
-      }
-      if (!value) continue; // empty input = leave unchanged
-      const result = await cfPutWorkerSecret(config, name, value);
-      if (result.ok) applied.push(name);
-      else failed.push({ name, error: result.error || "unknown error" });
-    }
-    return jsonResponse({ applied, failed });
-  }
-
-  return jsonResponse({ detail: "Not Found" }, 404);
-}
-
 async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Response> {
   try {
     const url = new URL(request.url);
@@ -2254,19 +2067,6 @@ export async function handleAdminRequest(
       : htmlResponse(ADMIN_LOGIN_HTML);
   }
 
-  if (url.pathname === "/admin/secrets") {
-    if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
-    const auth = await authenticate(request, env);
-    if (!auth) return htmlResponse(ADMIN_LOGIN_HTML, 401);
-    // The secrets page exists only to mutate Cloudflare Worker secrets —
-    // server-side that is super_admin-only, so bounce everyone else early
-    // instead of rendering a panel whose every call would 403.
-    if (!roleHasPermission(auth.user.role, "secrets.write")) {
-      return Response.redirect(new URL("/admin", request.url).toString(), 303);
-    }
-    return htmlResponse(SECRETS_PANEL_HTML);
-  }
-
   if (url.pathname === "/admin/keys") {
     if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
     return (await authenticate(request, env))
@@ -2293,10 +2093,6 @@ export async function handleAdminRequest(
     // promise settles, so an async throw would skip the redaction catch below
     // and escape the router entirely.
     return await handleProviderKeysApi(request, env);
-  }
-
-  if (url.pathname.startsWith("/admin/api/secrets")) {
-    return await handleSecretsApi(request, env);
   }
 
   // Outreach + Gmail sender pool: both live in handleOutreachApi. The pool was
@@ -2350,7 +2146,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 .toolbar .cp-dd input[type=checkbox]{min-width:0;width:auto;padding:0;margin:0}
 .persona-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin-bottom:10px}.persona-card h4{margin:0 0 8px;font-size:14px;color:#1e293b}.persona-card ul{margin:0;padding-left:18px;font-size:13px;color:#475569}.solution-card{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px;margin-bottom:10px}.solution-card h4{margin:0 0 6px;font-size:14px;color:#1e40af}.solution-card p{margin:0;font-size:13px;color:#1e3a5f}.section-title{font-size:15px;font-weight:600;color:#123b68;margin:18px 0 10px;padding-bottom:6px;border-bottom:2px solid #123b68}
 @media(max-width:700px){.top{align-items:flex-start;flex-direction:column}table{display:block;overflow-x:auto;white-space:nowrap}.field-row{flex-direction:column}.field-label{width:100%;min-width:0;border-right:none;border-bottom:1px solid #e2e8f0}.modal-body{padding:16px}}
-</style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div style="display:flex;gap:12px;align-items:center"><a href="/admin/outreach" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">📧 开发信管理</a><a href="/admin/secrets" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">🔑 AI Key 管理</a><a href="/admin/keys" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
+</style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div style="display:flex;gap:12px;align-items:center"><a href="/admin/outreach" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">📧 开发信管理</a><a href="/admin/keys" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
 <section class="panel"><h2>📥 客户数据导入（Seed CSV）</h2><p style="font-size:13px;color:#475569;margin:6px 0">粘贴 CSV（需表头，支持列：company_name, country, domain/website, email, product）。原始数据永久保存在 customer_imports（不可变原始层）；域名或公司名匹配的行自动去重跳过，新公司以 pending 状态进入研究队列。</p><div class="toolbar"><input id="importFileName" placeholder="文件名备注（可选）" style="max-width:220px"><button class="button" id="importBtn">导入并去重入队</button></div><textarea id="importCsv" rows="6" placeholder="company_name,country,website,email,product\nABC Sports,USA,,buyer@abcsports.com,SUP\nOcean Pro,Germany,oceanpro.de,,RIB"></textarea><div id="importMsg" class="notice hidden"></div></section>
 <section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p style="font-size:13px;color:#475569;margin:6px 0">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围，再点「重新入队」让管道二次研究高价值客户。筛选项为下拉勾选，右侧数字是该条件当前命中的客户数（勾选「有邮箱」后只计有邮箱的）。</p><div class="toolbar"><span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span><span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span><span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span><select id="pfMinScore" style="min-width:130px"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="50">最低分 ≥50</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select><label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button></div><div id="pfResult" class="notice hidden"></div></section>
 <section class="panel"><h2>客户列表</h2><div id="scoreCard" class="hidden" style="margin-bottom:12px"></div><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>评分</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
@@ -3416,96 +3212,3 @@ setInterval(function(){if(_focusCount===0&&!document.hidden)loadKeys()},30000);
 })();
 </script></body></html>`;
 
-/* ── AI Key / secrets management panel (方案A: 直写 Cloudflare API) ── */
-const SECRETS_PANEL_HTML = `<!doctype html>
-<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI Key 管理 - CRM</title><style>
-body{font-family:system-ui,sans-serif;margin:0;background:#f3f5f9;color:#1f2430}
-.top{background:#1f2430;color:#fff;padding:14px 24px;display:flex;justify-content:space-between;align-items:center}
-.top h1{font-size:18px;margin:0}
-.top a{color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 14px;border-radius:8px;font-weight:600;font-size:14px}
-.wrap{max-width:860px;margin:24px auto;padding:0 16px}
-.card{background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:20px;margin-bottom:20px}
-.notice{background:#fff8e1;border:1px solid #f0d264;border-radius:8px;padding:10px 14px;font-size:14px;margin-bottom:16px}
-.group{margin-bottom:24px}
-.group h2{font-size:16px;border-bottom:2px solid #e8ebf1;padding-bottom:6px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
-.field label{font-size:12px;color:#5a6270;display:block;margin-bottom:3px}
-.field input{width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #ccd2dd;border-radius:6px;font-size:13px}
-.field input:focus{outline:2px solid #4f7cf0;border-color:#4f7cf0}
-.bar{display:flex;gap:10px;align-items:center;position:sticky;bottom:12px;background:#1f2430;padding:12px 16px;border-radius:10px}
-.bar button{background:#4f7cf0;color:#fff;border:0;padding:9px 22px;border-radius:8px;font-weight:600;cursor:pointer}
-.bar button:disabled{opacity:.6;cursor:wait}
-.bar span{color:#cfd6e4;font-size:13px}
-#toast{position:fixed;top:18px;right:18px;background:#1f2430;color:#fff;padding:10px 16px;border-radius:8px;font-size:14px;display:none;max-width:420px}
-#toast.err{background:#b23b3b}.ok{border-color:#3f9d63!important}.err{border-color:#b23b3b!important}
-details{margin:6px 0}summary{cursor:pointer;font-weight:600;font-size:13px;color:#3b4456}
-</style></head><body>
-<header class="top"><h1>🔑 AI Key 管理（直写 Cloudflare Secrets）</h1><a href="/admin">← 返回客户管理</a></header>
-<div class="wrap">
-<div class="notice" id="bootNotice">加载中…</div>
-<div id="content"></div>
-<div class="bar"><button id="saveAll">💾 保存全部修改</button><span>留空的字段不会改动；保存后秒级生效，无需重新部署。</span></div>
-</div>
-<div id="toast"></div>
-<script>
-(function(){
-var toastEl=document.getElementById('toast');
-function toast(msg,err){toastEl.textContent=msg;toastEl.className=err?'err':'';toastEl.style.display='block';setTimeout(function(){toastEl.style.display='none'},5000)}
-function api(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin';throw new Error('登录过期')}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败');return d})})}
-var dirty={};
-function inputId(n){return 'f_'+n}
-function renderBootstrapForm(msg){
-  var notice=document.getElementById('bootNotice');
-  notice.innerHTML='<b>尚未引导：</b>'+(msg||'')+'<br>粘贴一个仅有 <code>Workers Scripts: Edit</code> 权限的 Cloudflare API Token 与 Account ID，面板会用它写入自身凭据，此后即可在页面内管理全部 Key。';
-  notice.style.display='block';
-  var card=document.createElement('div');card.className='card';
-  card.innerHTML='<h2>🔑 Cloudflare API Token 引导</h2>'+
-    '<div class="grid">'+
-    '<div class="field"><label>API Token (https://dash.cloudflare.com/profile/api-tokens)</label><input type="password" id="bootToken" autocomplete="off"></div>'+
-    '<div class="field"><label>Account ID (域名概览页右侧)</label><input type="text" id="bootAccount" autocomplete="off"></div>'+
-    '</div><p><button id="bootSave" style="background:#4f7cf0;color:#fff;border:0;padding:9px 22px;border-radius:8px;font-weight:600;cursor:pointer">验证并保存</button> <span id="bootMsg" style="font-size:13px;color:#5a6270"></span></p>';
-  document.getElementById('content').appendChild(card);
-  document.getElementById('bootSave').onclick=function(){
-    var btn=this;btn.disabled=true;btn.textContent='验证中…';
-    api('/admin/api/secrets/bootstrap',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({api_token:document.getElementById('bootToken').value.trim(),account_id:document.getElementById('bootAccount').value.trim()})})
-    .then(function(){toast('引导成功，正在加载 Key 列表…');setTimeout(function(){location.reload()},800)})
-    .catch(function(e){document.getElementById('bootMsg').textContent=e.message;btn.disabled=false;btn.textContent='验证并保存'})
-  };
-}
-api('/admin/api/secrets').then(function(data){
-  document.getElementById('bootNotice').style.display='none';
-  var root=document.getElementById('content');
-  var groups={};
-  data.definitions.forEach(function(d){(groups[d.group]=groups[d.group]||[]).push(d)});
-  Object.keys(groups).forEach(function(g){
-    var sec=document.createElement('div');sec.className='card group';
-    var h=document.createElement('h2');h.textContent=g+'（'+groups[g].length+' 项）';sec.appendChild(h);
-    var grid=document.createElement('div');grid.className='grid';
-    groups[g].forEach(function(d){
-      var f=document.createElement('div');f.className='field';
-      var l=document.createElement('label');l.textContent=d.label+' ('+d.name+')';
-      var inp=document.createElement('input');inp.type='password';inp.id=inputId(d.name);inp.name=d.name;
-      inp.placeholder='未修改';inp.autocomplete='off';
-      inp.addEventListener('input',function(){dirty[d.name]=inp.value;inp.classList.add('ok')});
-      f.appendChild(l);f.appendChild(inp);grid.appendChild(f);
-    });
-    sec.appendChild(grid);root.appendChild(sec);
-  });
-}).catch(function(e){
-  renderBootstrapForm(e.message);
-});
-document.getElementById('saveAll').onclick=function(){
-  var btn=this;var updates=Object.keys(dirty).filter(function(k){return dirty[k]&&dirty[k].trim()}).map(function(k){return {name:k,value:dirty[k].trim()}});
-  if(!updates.length){toast('没有需要保存的修改',true);return}
-  btn.disabled=true;btn.textContent='保存中…';
-  api('/admin/api/secrets/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({updates:updates})})
-  .then(function(r){
-    if(r.failed&&r.failed.length){toast('成功 '+r.applied.length+' 项；失败: '+r.failed.map(function(f){return f.name+' ('+f.error+')'}).join(', '),true)}
-    else{toast('已保存并生效: '+r.applied.join(', '));Object.keys(dirty).forEach(function(k){var el=document.getElementById(inputId(k));if(el){el.value='';el.classList.remove('ok')}});dirty={}}
-  })
-  .catch(function(e){toast(e.message,true)})
-  .finally(function(){btn.disabled=false;btn.textContent='💾 保存全部修改'})
-};
-})();
-</script></body></html>`;

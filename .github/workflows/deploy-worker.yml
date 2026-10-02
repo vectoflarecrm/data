@@ -239,8 +239,8 @@ jobs:
       CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
       ADMIN_PANEL_TOKEN: ${{ secrets.ADMIN_PANEL_TOKEN }}
       # Secret sync from GitHub is now OPT-IN: keys are managed in the admin
-      # panel (/admin/secrets, direct Cloudflare API writes). Set this repo
-      # secret to 'true' only if you want CI to force-sync keys from GitHub.
+      # panel (/admin/keys, D1 dynamic key pool) or via wrangler/CI. Set this
+      # repo secret to 'true' only if you want CI to force-sync keys from GitHub.
 
     steps:
       - name: Check out repository
@@ -553,8 +553,9 @@ jobs:
       # rotation can be done from the repo UI without Cloudflare credentials.
       # Runs unconditionally instead of riding the SYNC_SECRETS_FROM_GITHUB
       # gate above: that step deletes every secret absent from GitHub (20-odd
-      # `secret delete` lines) and provider keys now live in /admin/secrets, so
-      # switching it on for one token would drag the whole pool along.
+      # `secret delete` lines) and provider keys now live in the /admin/keys
+      # D1 pool, so switching it on for one token would drag the whole pool
+      # along.
       #
       # Reads the job-level env (line 237), and deliberately never deletes on an
       # empty value: an unset repo secret must not become a missing Worker
