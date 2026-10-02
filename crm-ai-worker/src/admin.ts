@@ -49,6 +49,7 @@ import {
 import { buildFilterOptions } from "./facets";
 import { roleHasPermission, requiredPermission } from "./auth/rbac";
 import { applySecurityHeaders, htmlCsp } from "./security-headers";
+import { originGuardRejection } from "./security/origin-guard";
 
 export interface AdminEnv extends GmailEnv {
   DB: D1Database;
@@ -1980,6 +1981,14 @@ async function routeAdminRequest(
   try {
   const url = new URL(request.url);
   if (url.pathname !== "/admin" && !url.pathname.startsWith("/admin/")) return null;
+
+  // Stage 6: a foreign-origin state-changing request (POST/PUT/PATCH/DELETE)
+  // dies here — before routing, auth, or any handler side effect. Browsers
+  // that can attach the session cookie always send `Origin` on non-GET
+  // requests, so cookie-carrying cross-site calls cannot slip past; the
+  // missing-Origin policy is documented in src/security/origin-guard.ts.
+  const csrfRejection = originGuardRejection(request);
+  if (csrfRejection) return csrfRejection;
 
   if (url.pathname === "/admin" || url.pathname === "/admin/") {
     if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
