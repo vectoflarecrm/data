@@ -102,6 +102,6 @@ Migrations (`migrations/`, forward-only, applied by CI deploy workflow):
 
 ## Security Debt Register (explicit)
 
-- Admin panels use inline `<script>` blocks with `onclick` handlers → CSP must retain `'unsafe-inline'` for now (nonce/hashed migration tracked as deferred improvement; recorded per Stage 5 requirement).
+- ~~Admin panels use inline `<script>` blocks with `onclick` handlers → CSP must retain `'unsafe-inline'` for now~~ **Resolved in Stage 5**: `htmlResponse()` mints a per-response nonce and rewrites every inline `<script>`/`<style>` tag, so `script-src`/`style-src` are nonce-based — no `unsafe-inline`, no `unsafe-eval`. Remaining, accepted debt: `style-src-attr 'unsafe-inline'` (panels use `style=""` attributes extensively; attributes cannot carry a nonce; CSS injection cannot execute script, and Stage 5 also escapes every dynamic innerHTML sink in the panels). A full class-based restyle would remove it.
 - Per-isolate rate limiting accepted as local fast-limiter; distributed limiter deferred behind a `RateLimiter` abstraction (Stage 16).
 - Legacy plaintext credentials remain readable until the Stage 4 migration encrypts them; new writes already enforce `enc:v1:`.

@@ -48,6 +48,7 @@ import {
 } from "./campaigns";
 import { buildFilterOptions } from "./facets";
 import { roleHasPermission, requiredPermission } from "./auth/rbac";
+import { applySecurityHeaders, htmlCsp } from "./security-headers";
 
 export interface AdminEnv extends GmailEnv {
   DB: D1Database;
@@ -253,12 +254,23 @@ export interface AdminAuthContext {
 }
 
 function htmlResponse(body: string, status = 200): Response {
-  return new Response(body, {
+  // Stage 5 CSP: a fresh nonce per response is injected into every inline
+  // <script>/<style> tag, so the panels pass script-src/style-src
+  // 'nonce-…' without 'unsafe-inline' or 'unsafe-eval'. All tags in the
+  // panel templates are plain (<script>/<style> with no attributes), which
+  // the exact-string replaceAll relies on. Residual tech debt —
+  // style-src-attr — is documented in src/security-headers.ts.
+  const nonce = crypto.randomUUID();
+  const hardened = body
+    .replaceAll("<script>", `<script nonce="${nonce}">`)
+    .replaceAll("<style>", `<style nonce="${nonce}">`);
+  return new Response(hardened, {
     status,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": htmlCsp(nonce),
     },
   });
 }
@@ -1953,6 +1965,18 @@ export async function handleAdminRequest(
   request: Request,
   env: AdminEnv,
 ): Promise<Response | null> {
+  // Stage 5: every response this module produces — HTML, JSON, 303 redirect
+  // or 404 text — leaves through here, so the security-header set is applied
+  // once, centrally. Null ("not an /admin path") is passed through for
+  // index.ts to handle.
+  const response = await routeAdminRequest(request, env);
+  return response === null ? null : applySecurityHeaders(response);
+}
+
+async function routeAdminRequest(
+  request: Request,
+  env: AdminEnv,
+): Promise<Response | null> {
   try {
   const url = new URL(request.url);
   if (url.pathname !== "/admin" && !url.pathname.startsWith("/admin/")) return null;
@@ -3087,6 +3111,12 @@ var toastEl=document.getElementById('toast');
 function toast(msg,err){toastEl.textContent=msg;toastEl.className=err?'err':'';toastEl.style.display='block';setTimeout(function(){toastEl.style.display='none'},4000)}
 function api(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin';throw new Error('登录过期')}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败');return d})})}
 var PROVIDER_NAMES={gemini:'Gemini',groq:'Groq',cerebras:'Cerebras',zhipu:'Zhipu',nvidia:'NVIDIA',amd:'AMD',mistral:'Mistral',deepseek:'DeepSeek',openrouter:'OpenRouter',tavily:'Tavily',exa:'Exa',brave:'Brave',searlo:'Searlo'};
+// Stage 5: every DB-sourced string below (labels, model names, upstream
+// last_error, key hints, provider keys) flows through esc() before touching
+// innerHTML. Without this a hostile label or an upstream error string
+// containing HTML became live script inside the panel.
+var esc=function(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})};
+function providerName(p){return esc(PROVIDER_NAMES[p]||p||'?')}
 // 🔐 凭据加密卡片。
 //
 // States the operator has to act on, in order of urgency:
@@ -3145,8 +3175,8 @@ function loadKeys(){
       var cd=cdMap[k.id];
       var status=k.is_active?'启用':'停用';
       if(cd){var mins=Math.max(1,Math.round((new Date(cd.exhausted_until.replace(' ','T')+'Z')-Date.now())/60000));status+='<span class="cdtag">冷却中 ~'+mins+'分钟</span>';}
-      var keyCell=k.api_key+(k.encrypted?'':'<span class="cdtag" style="background:#fee2e2;color:#991b1b">明文</span>');
-      tr.innerHTML='<td>'+PROVIDER_NAMES[k.provider]+'</td><td>'+(k.label||'-')+'</td><td><code>'+keyCell+'</code></td><td>'+(k.rpm_limit||'默认')+'</td><td>'+(k.model||'-')+'</td><td>'+status+'</td><td>'+(k.last_error||'-')+'</td>';
+      var keyCell=esc(k.api_key)+(k.encrypted?'':'<span class="cdtag" style="background:#fee2e2;color:#991b1b">明文</span>');
+      tr.innerHTML='<td>'+providerName(k.provider)+'</td><td>'+esc(k.label||'-')+'</td><td><code>'+keyCell+'</code></td><td>'+(k.rpm_limit||'默认')+'</td><td>'+esc(k.model||'-')+'</td><td>'+status+'</td><td>'+esc(k.last_error||'-')+'</td>';
       var td=document.createElement('td');
       var tog=document.createElement('button');tog.className='btn '+(k.is_active?'off':'on');tog.textContent=k.is_active?'停用':'启用';
       tog.onclick=function(){api('/admin/api/keys/'+k.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({is_active:!k.is_active})}).then(loadKeys).catch(function(e){toast(e.message,true)})};
@@ -3163,7 +3193,7 @@ function loadKeys(){
       list.forEach(function(r){
         var pct=r.monthly_capacity?Math.min(100,Math.round(r.month_calls/r.monthly_capacity*100)):null;
         var bar=pct===null?'<span style="color:#9ca3af">—</span>':'<div style="background:#e5e7eb;border-radius:6px;height:10px;width:110px;position:relative"><div style="background:'+(pct>80?'#dc2626':pct>50?'#f59e0b':'#16a34a')+';border-radius:6px;height:10px;width:'+pct+'%"></div></div><span style="font-size:11px;color:#6b7280">'+pct+'%</span>';
-        h+='<tr style="border-top:1px solid #f1f5f9"><td style="padding:4px 8px">'+PROVIDER_NAMES[r.provider]+'</td>'+
+        h+='<tr style="border-top:1px solid #f1f5f9"><td style="padding:4px 8px">'+providerName(r.provider)+'</td>'+
           '<td style="text-align:right;padding:4px 8px">'+r.month_calls+'</td><td style="text-align:right;padding:4px 8px">'+r.total_calls+'</td>'+
           '<td style="text-align:right;padding:4px 8px">'+r.active_keys+(r.cooling_keys?(' <span style="color:#dc2626;font-size:11px">(🧊'+r.cooling_keys+')</span>'):'')+'</td>'+
           '<td style="text-align:right;padding:4px 8px">'+r.keys_used_this_month+'</td>'+
@@ -3183,7 +3213,7 @@ function loadKeys(){
       cdList.forEach(function(c){
         var row=document.createElement('div');row.style.cssText='display:flex;gap:10px;align-items:center;margin:4px 0';
         var mins=Math.max(1,Math.round((new Date(c.exhausted_until.replace(' ','T')+'Z')-Date.now())/60000));
-        row.innerHTML='<span style="min-width:90px">'+PROVIDER_NAMES[c.provider]+'</span><code style="min-width:130px">'+(c.key_index||'')+'</code><span style="color:#dc2626">'+(c.last_error||'限流')+'</span><span>剩余 ~'+mins+' 分钟</span>';
+        row.innerHTML='<span style="min-width:90px">'+providerName(c.provider)+'</span><code style="min-width:130px">'+esc(c.key_index||'')+'</code><span style="color:#dc2626">'+esc(c.last_error||'限流')+'</span><span>剩余 ~'+mins+' 分钟</span>';
         var clr=document.createElement('button');clr.className='btn on';clr.textContent='清除';
         clr.onclick=function(){api('/admin/api/keys/cooldowns/'+c.provider,{method:'DELETE'}).then(loadKeys).catch(function(e){toast(e.message,true)})};
         row.appendChild(clr);cdBox.appendChild(row);
@@ -3198,7 +3228,7 @@ function loadKeys(){
         var row=document.createElement('div');row.style.cssText='display:flex;gap:10px;align-items:center;margin:4px 0;color:#6b7280;font-size:13px';
         var until='';
         try{until=new Date(c.exhausted_until.replace(' ','T')+'Z').toLocaleString();}catch(e){until=c.exhausted_until||'';}
-        row.innerHTML='<span style="min-width:90px">'+PROVIDER_NAMES[c.provider]+'</span><code style="min-width:130px">'+(c.key_index||'')+'</code><span style="color:#dc2626">'+(c.last_error||'限流')+'</span><span>冷却至 '+until+'</span>';
+        row.innerHTML='<span style="min-width:90px">'+providerName(c.provider)+'</span><code style="min-width:130px">'+esc(c.key_index||'')+'</code><span style="color:#dc2626">'+esc(c.last_error||'限流')+'</span><span>冷却至 '+esc(until)+'</span>';
         histBox.appendChild(row);
       });
     }
@@ -3207,8 +3237,8 @@ function loadKeys(){
     Object.keys(PROVIDER_NAMES).forEach(function(p){
       var s=sMap[p]||{};
       var row=document.createElement('div');row.style.cssText='display:flex;gap:10px;align-items:end;margin-bottom:8px;flex-wrap:wrap';
-      row.innerHTML='<div class="field"><label>'+PROVIDER_NAMES[p]+' 默认模型</label><input id="m_'+p+'" value="'+(s.default_model||'')+'" style="width:200px"></div>'+
-        '<div class="field"><label>总RPM (留空=按Key数推算)</label><input id="r_'+p+'" type="number" min="1" value="'+(s.rpm_total||'')+'" style="width:160px"></div>';
+      row.innerHTML='<div class="field"><label>'+PROVIDER_NAMES[p]+' 默认模型</label><input id="m_'+p+'" value="'+esc(s.default_model||'')+'" style="width:200px"></div>'+
+        '<div class="field"><label>总RPM (留空=按Key数推算)</label><input id="r_'+p+'" type="number" min="1" value="'+esc(s.rpm_total||'')+'" style="width:160px"></div>';
       var en=document.createElement('div');en.className='field';en.innerHTML='<label>启用</label>';
       var cb=document.createElement('input');cb.type='checkbox';cb.id='e_'+p;cb.checked=s.enabled===undefined?true:!!s.enabled;en.appendChild(cb);row.appendChild(en);
       var btn=document.createElement('button');btn.className='btn on';btn.textContent='保存';

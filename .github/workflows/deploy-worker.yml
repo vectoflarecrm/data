@@ -305,8 +305,11 @@ jobs:
           path = Path("wrangler.toml")
           text = path.read_text()
           placeholder = 'database_id = "REPLACE_WITH_D1_DATABASE_ID"'
-          if placeholder in text:
-              path.write_text(text.replace(placeholder, f'database_id = "{os.environ["D1_ID"]}"'))
+          # Stage 5: the repo keeps only the placeholder. Failing hard here
+          # prevents a real database id from quietly re-entering the repo.
+          if placeholder not in text:
+              raise SystemExit('wrangler.toml is missing database_id = "REPLACE_WITH_D1_DATABASE_ID" - real D1 ids must not be committed (security-v2 stage 5)')
+          path.write_text(text.replace(placeholder, f'database_id = "{os.environ["D1_ID"]}"'))
           PY
 
       - name: Initialize remote D1 schema
