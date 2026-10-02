@@ -41,6 +41,7 @@ const TOKEN_SAFETY_WINDOW_MS = 60_000;
 const EMAIL_ADDRESS_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
 
 import { decryptSecret } from "./credential-crypto";
+import { reserveQuota, releaseReservation, activeReservations } from "./gmail-quota";
 
 /* ── Base64URL helpers ── */
 
@@ -363,6 +364,8 @@ export interface ChosenAccount {
   credentialType: "service_account" | "oauth_refresh";
   senderEmail: string;
   source: "pool" | "env" | "brand-binding";
+  /** Per-account daily limit (pool override); null = env default. */
+  daily_limit?: number | null;
 }
 
 /* Resolve which service account + From mailbox to use for one send. */
@@ -388,7 +391,7 @@ export async function chooseGmailAccount(
   // 2. Legacy env-secret service account.
   const envCfg = requireGmailConfig(env);
   if (envCfg) {
-    return { clientEmail: envCfg.clientEmail, privateKeyPem: envCfg.privateKeyPem, credentialType: "service_account", senderEmail: fromEmail?.trim() || envCfg.senderEmail, source: "env" };
+    return { clientEmail: envCfg.clientEmail, privateKeyPem: envCfg.privateKeyPem, credentialType: "service_account", senderEmail: fromEmail?.trim() || envCfg.senderEmail, source: "env", daily_limit: null };
   }
 
   // 3. Pool fallback: the healthy enabled account with the most remaining quota.
@@ -415,7 +418,7 @@ function toChosen(acc: PoolAccount, fromEmail: string | null | undefined, source
   const sender = type === "oauth_refresh"
     ? acc.client_email // From is fixed to the authorized mailbox
     : fromEmail?.trim() || acc.client_email;
-  return { clientEmail: acc.client_email, privateKeyPem: acc.private_key, credentialType: type, senderEmail: sender, source };
+  return { clientEmail: acc.client_email, privateKeyPem: acc.private_key, credentialType: type, senderEmail: sender, source, daily_limit: acc.daily_limit };
 }
 
 function requireGmailConfig(env: GmailEnv): { clientEmail: string; privateKeyPem: string; senderEmail: string } | null {
@@ -435,7 +438,10 @@ export async function accountRemainingQuota(env: GmailEnv, acc: PoolAccount): Pr
     `SELECT COUNT(*) as cnt FROM gmail_send_log
      WHERE date(sent_at) = date('now') AND status = 'sent' AND sender_client_email = ?`,
   ).bind(acc.client_email).first<{ cnt: number }>();
-  return Math.max(0, limit - (row?.cnt ?? 0));
+  // Stage 11: reserved slots are taken, not available — account picking must
+  // steer towards accounts with genuinely free capacity.
+  const reserved = await activeReservations(env, acc.client_email).catch(() => 0);
+  return Math.max(0, limit - (row?.cnt ?? 0) - reserved);
 }
 
 /* Mark a pool account as failed (cooldown) or healthy after a send attempt. */
@@ -479,6 +485,9 @@ export interface QuotaInfo {
   sent_today: number;
   daily_limit: number;
   remaining: number;
+  /** Stage 11: slots currently held by in-flight sends (reserved but not
+   * yet committed to the send log). Included in `remaining`'s math. */
+  reserved_today: number;
 }
 
 export async function getQuota(env: GmailEnv): Promise<QuotaInfo> {
@@ -493,14 +502,15 @@ export async function getQuota(env: GmailEnv): Promise<QuotaInfo> {
      WHERE date(sent_at) = date('now') AND status = 'sent'`,
   ).first<{ cnt: number }>();
   const sentToday = row?.cnt ?? 0;
-  return { sent_today: sentToday, daily_limit: totalLimit, remaining: Math.max(0, totalLimit - sentToday) };
-}
-
-async function assertQuota(env: GmailEnv): Promise<void> {
-  const quota = await getQuota(env);
-  if (quota.remaining <= 0) {
-    throw new Error(`今日 Gmail 发送配额已用完（${quota.daily_limit} 封/天），明天再试、调高 GMAIL_DAILY_LIMIT 或在面板添加更多发信账号`);
-  }
+  // In-flight reservations hold real capacity (spec §12): report them and
+  // subtract, so the panel's "remaining" never promises slots that are gone.
+  const reserved = await activeReservations(env).catch(() => 0);
+  return {
+    sent_today: sentToday,
+    daily_limit: totalLimit,
+    reserved_today: reserved,
+    remaining: Math.max(0, totalLimit - sentToday - reserved),
+  };
 }
 
 async function logSend(env: GmailEnv, emailId: number, to: string, status: string, detail: string | null, senderClientEmail: string | null): Promise<void> {
@@ -595,8 +605,6 @@ export async function sendOutreachEmail(
   if (!email.email_to) return { ok: false, error: "收件人为空" };
   if (!email.subject || !email.body) return { ok: false, error: "主题或正文为空" };
 
-  await assertQuota(env);
-
   // Resolve the sending service account: brand binding → env secret → healthiest pool account.
   let account: ChosenAccount;
   try {
@@ -634,6 +642,18 @@ export async function sendOutreachEmail(
     attachments,
   });
 
+  // Stage 11 (spec §12): reserve → send → commit. The quota slot is taken
+  // atomically RIGHT BEFORE the API call — no read-then-write window, so
+  // concurrent batches cannot overshoot the account's daily cap. Quota
+  // errors throw (not return) so batch callers keep their quota-stop
+  // semantics and the state machine reverts the row to draft.
+  const accountDailyLimit = account.daily_limit && account.daily_limit > 0 ? account.daily_limit : dailyLimit(env);
+  await reserveQuota(env, {
+    accountEmail: account.clientEmail,
+    dailyLimit: accountDailyLimit,
+    outreachEmailId: email.id,
+  });
+
   // Stage 10: the send call is bounded and its network failures are typed.
   // A timeout or connection error AFTER the request left means delivery is
   // unknown — GmailTransportError tells the state machine to record
@@ -658,6 +678,8 @@ export async function sendOutreachEmail(
     const detail = (await resp.text()).replace(/\s+/g, " ").slice(0, 300);
     await logSend(env, email.id, email.email_to, "failed", `HTTP ${resp.status}: ${detail}`, account.clientEmail);
     await noteGmailAccountResult(env, account.clientEmail, false, `HTTP ${resp.status}: ${detail}`);
+    // Definite rejection: the slot is freed immediately (§12 commit path).
+    await releaseReservation(env, email.id);
     // 429 = Gmail rate limit: surface a clear message so the panel can back off
     return { ok: false, error: `HTTP ${resp.status}: ${detail}` };
   }
@@ -674,5 +696,8 @@ export async function sendOutreachEmail(
   await env.DB.prepare(
     `UPDATE outreach_emails SET status = 'sent', sent_at = CURRENT_TIMESTAMP WHERE id = ?`,
   ).bind(email.id).run();
+  // Commit: the 'sent' log row is now the quota truth; the reservation row
+  // goes away so a later retry of this email can never collide with the key.
+  await releaseReservation(env, email.id);
   return { ok: true, gmail_message_id: data.id };
 }

@@ -426,3 +426,19 @@ ON audit_logs(resource_type, resource_id);
 
 CREATE INDEX IF NOT EXISTS idx_audit_logs_actor
 ON audit_logs(actor_user_id);
+
+-- Security V2 Stage 11 (spec §12): Gmail 配额原子预留.
+-- 行仅在持有槽位期间存在；UNIQUE(idempotency_key) 保证一封邮件最多占一个槽位。
+-- 语义与生命周期见 migrations/0010_gmail_quota_reservations.sql 的注释。
+CREATE TABLE IF NOT EXISTS gmail_send_reservations (
+    id TEXT PRIMARY KEY,
+    gmail_account_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    reserved_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    outreach_email_id TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reservations_account
+ON gmail_send_reservations(gmail_account_id, status);
