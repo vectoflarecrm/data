@@ -1,6 +1,7 @@
 import { AdminEnv } from "./admin";
 import { generateOutreachForCustomerIds, attachmentLangForCountry } from "./outreach";
 import { getQuota, sendOutreachEmail, sendDelayMs, GmailConfigError } from "./gmail";
+import { sendWithStateMachine } from "./outreach-send";
 
 /* ── 定向群发 (targeted outreach campaigns) ──────────────────────────────────
  *
@@ -553,9 +554,13 @@ export interface CampaignDeps {
   quota: typeof getQuota;
 }
 
+/* Stage 10: production sends go through the sending state machine, so a
+ * duplicate campaign execution cannot double-send and a crashed worker
+ * leaves an auditable trail (draft → reserved → sending → sent/failed/
+ * uncertain). The seam keeps accepting raw senders for tests. */
 const DEFAULT_DEPS: CampaignDeps = {
   generate: generateOutreachForCustomerIds,
-  send: sendOutreachEmail,
+  send: (env, email, options) => sendWithStateMachine(env, email, options),
   quota: getQuota,
 };
 

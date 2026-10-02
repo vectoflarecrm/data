@@ -105,6 +105,10 @@ CREATE TABLE IF NOT EXISTS outreach_attachments (
 );
 
 -- Generated outreach emails
+-- Security V2 Stage 10 (spec §11): sending state machine columns + the
+-- idempotency unique partial index. Existing databases get the columns via
+-- the deploy workflow's per-statement ALTER step (see deploy-worker.yml);
+-- this CREATE covers fresh installs.
 CREATE TABLE IF NOT EXISTS outreach_emails (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   customer_id INTEGER,
@@ -118,6 +122,12 @@ CREATE TABLE IF NOT EXISTS outreach_emails (
   body TEXT,
   status TEXT DEFAULT 'draft',
   sent_at TIMESTAMP,
+  idempotency_key TEXT,
+  send_attempts INTEGER NOT NULL DEFAULT 0,
+  locked_at TEXT,
+  locked_by TEXT,
+  last_error TEXT,
+  gmail_message_id TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (customer_id) REFERENCES customers(id)
 );
@@ -125,6 +135,12 @@ CREATE TABLE IF NOT EXISTS outreach_emails (
 CREATE INDEX IF NOT EXISTS idx_outreach_customer_id ON outreach_emails(customer_id);
 CREATE INDEX IF NOT EXISTS idx_outreach_status ON outreach_emails(status);
 CREATE INDEX IF NOT EXISTS idx_outreach_product ON outreach_emails(product_category);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_idempotency
+ON outreach_emails(idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_outreach_send_lock
+ON outreach_emails(status, locked_at);
 
 -- API key health tracking (anti-ban: a key that returns 429/quota-exhausted is
 -- disabled until its cooldown expires, so we never hammer an exhausted key)

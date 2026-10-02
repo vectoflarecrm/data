@@ -10,13 +10,13 @@ import {
 } from "./outreach";
 import {
   getQuota,
-  sendOutreachEmail,
   sendDelayMs,
   getAccessToken,
   noteGmailAccountResult,
   GmailEnv,
   GmailConfigError,
 } from "./gmail";
+import { sendWithStateMachine } from "./outreach-send";
 import { invalidateProviderCache } from "./provider-keys";
 import {
   encryptSecret,
@@ -1720,7 +1720,10 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
       const body = (await request.json().catch(() => ({}))) as { brand?: string; limit?: number };
       const limit = Math.min(Math.max(Number(body.limit) || 10, 1), 50);
       const params: unknown[] = [];
-      let clause = "WHERE status = 'draft' AND email_to IS NOT NULL AND email_to != ''";
+      // Stage 10: 'failed' rows are retried by the next batch (the state
+      // machine guarantees a claimed row cannot be double-sent); rows in
+      // reserved/sending/uncertain are deliberately NOT picked here.
+      let clause = "WHERE e.status IN ('draft', 'failed') AND e.email_to IS NOT NULL AND e.email_to != ''";
       if (body.brand) {
         clause += " AND brand_name = ?";
         params.push(body.brand);
@@ -1735,7 +1738,7 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
 
       const quota = await getQuota(env);
       const delayMs = sendDelayMs(env);
-      const results: Array<{ id: number; ok: boolean; error?: string }> = [];
+      const results: Array<{ id: number; ok: boolean; error?: string; outcome?: string }> = [];
       let sent = 0;
       for (const draft of drafts.results) {
         if (quota.sent_today + sent >= quota.daily_limit) {
@@ -1744,7 +1747,7 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
         }
         if (sent > 0) await new Promise((r) => setTimeout(r, delayMs));
         try {
-          const r = await sendOutreachEmail(env, draft, {
+          const r = await sendWithStateMachine(env, draft, {
             fromEmail: draft.sender_email,
             fromName: draft.sender_name,
             brandName: draft.brand_name,
@@ -1754,7 +1757,7 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
             gmailAccount: draft.gmail_account,
           });
           if (r.ok) sent++;
-          results.push({ id: draft.id, ok: r.ok, error: r.error });
+          results.push({ id: draft.id, ok: r.ok, error: r.error, outcome: r.outcome });
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           results.push({ id: draft.id, ok: false, error: msg });
@@ -1805,7 +1808,18 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
          WHERE e.id = ?`,
       ).bind(id).first<{ id: number; email_to: string; subject: string | null; body: string | null; status: string; brand_name: string | null; country: string | null; gmail_account: string | null }>();
       if (!row) return jsonResponse({ detail: "Email not found" }, 404);
-      if (row.status !== "draft") return jsonResponse({ detail: "只有草稿可以发送" }, 400);
+      // Stage 10: failed drafts may be retried; in-flight and unknown-outcome
+      // rows must never be re-entered (the state machine would skip them
+      // anyway — this gate just gives the operator an honest message).
+      if (row.status === "reserved" || row.status === "sending") {
+        return jsonResponse({ detail: "该邮件正在发送中，请勿重复点击" }, 409);
+      }
+      if (row.status === "uncertain") {
+        return jsonResponse({ detail: "该邮件上次发送结果未知（可能已送达），已阻止重发；请核实后再处理" }, 409);
+      }
+      if (row.status !== "draft" && row.status !== "failed") {
+        return jsonResponse({ detail: "只有草稿或失败的邮件可以发送" }, 400);
+      }
       // Resolve the sending identity from the email's brand (falls back to
       // the global GMAIL_SENDER_EMAIL when the brand has none).
       let fromEmail: string | null = null;
@@ -1817,7 +1831,7 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
         fromEmail = brand?.sender_email ?? null;
         fromName = brand?.sender_name ?? null;
       }
-      const result = await sendOutreachEmail(env, row, {
+      const result = await sendWithStateMachine(env, row, {
         fromEmail,
         fromName,
         brandName: row.brand_name,
@@ -1827,8 +1841,9 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
       const quota = await getQuota(env);
       await auditAdminAction(env, request, auth, "SEND_EMAIL", "outreach_email", String(id), {
         ok: result.ok,
+        outcome: result.outcome,
       });
-      return jsonResponse({ ok: result.ok, error: result.error, gmail_message_id: result.gmail_message_id, from: fromEmail, quota });
+      return jsonResponse({ ok: result.ok, error: result.error, gmail_message_id: result.gmail_message_id, outcome: result.outcome, from: fromEmail, quota });
     }
 
     // DELETE /admin/api/outreach/emails/:id - Delete email

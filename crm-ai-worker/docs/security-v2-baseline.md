@@ -83,7 +83,7 @@ Migrations (`migrations/`, forward-only, applied by CI deploy workflow):
 | 1 | `ADMIN_PANEL_TOKEN` doubles as the long-lived browser session cookie | P0 | 1 |
 | 2 | Worker can mutate its own Cloudflare secrets (CF API token in env) | P0 | 3 |
 | 3 | Gmail quota check→send not atomic (concurrent batches exceed daily cap) | P0 | 11 |
-| 4 | No per-email send state machine (`uncertain` missing) → duplicate send on crash-after-accept | P0 | 10 |
+| 4 | No per-email send state machine (`uncertain` missing) → duplicate send on crash-after-accept — **fixed in Stage 10**: `src/outreach-send.ts` implements draft→reserved→sending→sent/failed/uncertain with atomic conditional claims, stale-lock reaping (reserved→draft, sending→uncertain), idempotency keys with a unique partial index, and a hard timeout on the Gmail API call | P0 | 10 |
 | 5 | No campaign/email claim lock → concurrent sends can double-send one email | P0 | 12 |
 | 6 | No RBAC (single root role) | P1 | 2 |
 | 7 | KEYS_PANEL_HTML interpolates `last_error`/label/key hint into innerHTML without escaping (stored XSS via upstream provider error text); campaign member name unescaped at admin.ts:2877 | P1 | 5 |

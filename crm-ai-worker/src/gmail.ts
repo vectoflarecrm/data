@@ -24,6 +24,8 @@ export interface GmailEnv {
   GMAIL_DAILY_LIMIT?: string;
   /** Optional delay between sends in ms (default 3000). */
   GMAIL_SEND_DELAY_MS?: string;
+  /** Optional hard timeout for one Gmail API send call in ms (default 30000). */
+  GMAIL_SEND_TIMEOUT_MS?: string;
 }
 
 const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.send";
@@ -76,6 +78,24 @@ interface CachedToken {
 const tokenCache = new Map<string, CachedToken>();
 
 export class GmailConfigError extends Error {}
+
+/* Security V2 Stage 10 (spec §11): thrown when the Gmail API call itself
+ * failed at the network level (connection reset, DNS, timeout) or returned
+ * an unparseable body AFTER the request may have been accepted. The caller
+ * cannot know whether Gmail delivered — this is the "network unknown" case
+ * the sending state machine maps to status 'uncertain'. Errors that happen
+ * BEFORE the send request (config, quota, token) are definite non-sends and
+ * keep their existing shapes. */
+export class GmailTransportError extends Error {}
+
+/* Hard timeout for one Gmail API send call. A hung connection must surface
+ * as GmailTransportError (→ uncertain), not block the worker until the
+ * platform kills it with the row still marked 'sending'. */
+const DEFAULT_SEND_TIMEOUT_MS = 30_000;
+export function gmailSendTimeoutMs(env: GmailEnv): number {
+  const parsed = Number(env.GMAIL_SEND_TIMEOUT_MS);
+  return Number.isSafeInteger(parsed) && parsed >= 5_000 ? parsed : DEFAULT_SEND_TIMEOUT_MS;
+}
 
 export async function getAccessToken(
   env: GmailEnv,
@@ -614,14 +634,25 @@ export async function sendOutreachEmail(
     attachments,
   });
 
-  const resp = await fetch(GMAIL_SEND_URL, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ raw: b64urlEncodeString(mime) }),
-  });
+  // Stage 10: the send call is bounded and its network failures are typed.
+  // A timeout or connection error AFTER the request left means delivery is
+  // unknown — GmailTransportError tells the state machine to record
+  // 'uncertain' instead of silently leaving the row in limbo.
+  let resp: Response;
+  try {
+    resp = await fetch(GMAIL_SEND_URL, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ raw: b64urlEncodeString(mime) }),
+      signal: AbortSignal.timeout(gmailSendTimeoutMs(env)),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new GmailTransportError(`Gmail API 请求失败（送达状态未知）：${msg}`);
+  }
 
   if (!resp.ok) {
     const detail = (await resp.text()).replace(/\s+/g, " ").slice(0, 300);
@@ -631,7 +662,13 @@ export async function sendOutreachEmail(
     return { ok: false, error: `HTTP ${resp.status}: ${detail}` };
   }
 
-  const data = (await resp.json()) as { id?: string };
+  let data: { id?: string };
+  try {
+    data = (await resp.json()) as { id?: string };
+  } catch {
+    // 2xx but unreadable body: Gmail almost certainly accepted the message.
+    throw new GmailTransportError("Gmail API 返回了无法解析的成功响应（送达状态未知）");
+  }
   await logSend(env, email.id, email.email_to, "sent", null, account.clientEmail);
   await noteGmailAccountResult(env, account.clientEmail, true);
   await env.DB.prepare(

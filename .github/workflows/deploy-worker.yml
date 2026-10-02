@@ -349,6 +349,22 @@ jobs:
           info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('api_configs') WHERE name IN ('key_hint','key_fingerprint')")"
           echo "$info" | grep -q '"n": 2' || { echo 'Migration failed: api_configs credential columns missing'; exit 1; }
 
+      - name: Migrate outreach_emails send-state columns (Security V2 Stage 10)
+        # Gmail sending state machine (spec §11): idempotency key, attempt
+        # counter, lock fields, last_error, gmail_message_id. Same per-statement
+        # ALTER pattern as above; the indexes are IF NOT EXISTS so schema.sql
+        # and this step agree on both fresh and existing databases.
+        run: |
+          for col in idempotency_key:TEXT send_attempts:"INTEGER NOT NULL DEFAULT 0" locked_at:TEXT locked_by:TEXT last_error:TEXT gmail_message_id:TEXT; do
+            name="${col%%:*}"
+            def="${col#*:}"
+            npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE outreach_emails ADD COLUMN $name $def" 2>&1 | grep -q 'duplicate column name' && echo "$name already exists" || true
+          done
+          npx wrangler d1 execute crm-ai-db --remote --command "CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_idempotency ON outreach_emails(idempotency_key) WHERE idempotency_key IS NOT NULL" || true
+          npx wrangler d1 execute crm-ai-db --remote --command "CREATE INDEX IF NOT EXISTS idx_outreach_send_lock ON outreach_emails(status, locked_at)" || true
+          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('outreach_emails') WHERE name IN ('idempotency_key','send_attempts','locked_at','locked_by','last_error','gmail_message_id')")"
+          echo "$info" | grep -q '"n": 6' || { echo 'Migration failed: outreach_emails send-state columns missing'; exit 1; }
+
       - name: Typecheck
         run: npm run typecheck
 
