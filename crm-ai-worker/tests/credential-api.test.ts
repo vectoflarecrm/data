@@ -338,3 +338,127 @@ describe("POST /admin/api/keys/encryption-key", () => {
     expect(again.value).not.toBe(body.value);
   });
 });
+
+/* ── Security V2 Stage 4: Gmail sender-pool credentials ─────────────────── */
+
+function makeGmailDb() {
+  const db = makeDb();
+  db.exec(`
+    CREATE TABLE gmail_accounts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      label TEXT,
+      credential_type TEXT NOT NULL DEFAULT 'service_account',
+      client_email TEXT NOT NULL UNIQUE,
+      private_key TEXT NOT NULL,
+      delegated_domain TEXT,
+      daily_limit INTEGER,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_error TEXT,
+      cooldown_until TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE gmail_send_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      outreach_email_id INTEGER,
+      recipient TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'sent',
+      detail TEXT,
+      sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      sender_client_email TEXT
+    );
+  `);
+  return db;
+}
+
+function insertGmailLegacy(db: any, email: string, privateKey: string) {
+  db.prepare(
+    "INSERT INTO gmail_accounts (label, credential_type, client_email, private_key) VALUES (?, 'service_account', ?, ?)",
+  ).run(email.split("@")[0], email, privateKey);
+}
+
+describe("POST /admin/api/gmail/encrypt-all (spec 5.2 migration flow)", () => {
+  it("refuses without a configured key and leaves rows untouched (fail fast)", async () => {
+    const db = makeGmailDb();
+    insertGmailLegacy(db, "svc@proj.iam.gserviceaccount.com", "-----BEGIN PRIVATE KEY-----legacy-a-----END PRIVATE KEY-----");
+    const env = makeEnv(db); // no CREDENTIAL_ENC_KEY
+
+    const res = await call(env, "/admin/api/gmail/encrypt-all", { method: "POST" });
+    expect(res.status).toBe(400);
+    const row = db.prepare("SELECT private_key FROM gmail_accounts").get() as { private_key: string };
+    expect(row.private_key).toContain("BEGIN PRIVATE KEY");
+  });
+
+  it("converts only after decrypt-roundtrip + fingerprint verification, then is idempotent", async () => {
+    const db = makeGmailDb();
+    insertGmailLegacy(db, "svc@proj.iam.gserviceaccount.com", "-----BEGIN PRIVATE KEY-----legacy-a-----END PRIVATE KEY-----");
+    insertGmailLegacy(db, "oauth@company.com", "1//0refresh-token-opaque-value-aaaaaaaaaaaa");
+    const env = makeEnv(db, MASTER_A);
+
+    const first = await (await call(env, "/admin/api/gmail/encrypt-all", { method: "POST" })).json() as {
+      ok: boolean; converted: number; remaining: number; failed: Array<{ id: number; reason: string }>;
+    };
+    expect(first.ok).toBe(true);
+    expect(first.converted).toBe(2);
+    expect(first.remaining).toBe(0);
+    expect(first.failed).toEqual([]);
+
+    const rows = db.prepare("SELECT client_email, private_key FROM gmail_accounts ORDER BY id").all() as Array<Record<string, string>>;
+    for (const row of rows) {
+      expect(row.private_key).toMatch(/^enc:v1:/);
+    }
+    // Plaintext material is gone from the table.
+    expect(JSON.stringify(rows)).not.toContain("BEGIN PRIVATE KEY");
+    expect(JSON.stringify(rows)).not.toContain("refresh-token-opaque-value");
+
+    // Idempotent: second run converts nothing and rewrites no rows.
+    const before = (db.prepare("SELECT private_key FROM gmail_accounts ORDER BY id").all() as Array<{ private_key: string }>).map((r) => r.private_key);
+    const again = await (await call(env, "/admin/api/gmail/encrypt-all", { method: "POST" })).json() as { converted: number };
+    expect(again.converted).toBe(0);
+    const after = (db.prepare("SELECT private_key FROM gmail_accounts ORDER BY id").all() as Array<{ private_key: string }>).map((r) => r.private_key);
+    expect(after).toEqual(before);
+  });
+
+  it("keeps keys decryptable by the Gmail send path afterwards", async () => {
+    const db = makeGmailDb();
+    insertGmailLegacy(db, "svc@proj.iam.gserviceaccount.com", "-----BEGIN PRIVATE KEY-----legacy-a-----END PRIVATE KEY-----");
+    const env = makeEnv(db, MASTER_A);
+    await call(env, "/admin/api/gmail/encrypt-all", { method: "POST" });
+
+    const { decryptSecret } = await import("../src/credential-crypto");
+    const stored = (db.prepare("SELECT private_key FROM gmail_accounts").get() as { private_key: string }).private_key;
+    expect(await decryptSecret(stored, env)).toBe("-----BEGIN PRIVATE KEY-----legacy-a-----END PRIVATE KEY-----");
+  });
+});
+
+describe("response redaction (spec 5.3: no credential plaintext in any API response)", () => {
+  it("GET /admin/api/gmail/accounts never returns private_key", async () => {
+    const db = makeGmailDb();
+    insertGmailLegacy(db, "svc@proj.iam.gserviceaccount.com", "-----BEGIN PRIVATE KEY-----legacy-a-----END PRIVATE KEY-----");
+    const env = makeEnv(db); // legacy plaintext row: redaction must hold regardless
+
+    const res = await call(env, "/admin/api/gmail/accounts");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { accounts: Array<Record<string, unknown>> };
+    expect(body.accounts).toHaveLength(1);
+    const account = body.accounts[0];
+    expect(account.private_key).toBeUndefined();
+    expect(account.client_email).toBe("svc@proj.iam.gserviceaccount.com");
+    expect(JSON.stringify(body)).not.toContain("BEGIN PRIVATE KEY");
+  });
+
+  it("GET /admin/api/keys returns hints and markers, never the stored value", async () => {
+    const db = makeDb();
+    insertLegacy(db, "tavily", "tvly-super-secret-value-xyz", "a");
+    const env = makeEnv(db);
+
+    const body = await (await call(env, "/admin/api/keys")).json() as {
+      keys: Array<Record<string, unknown>>; encryption: { configured: boolean; plaintext_rows: number };
+    };
+    expect(body.keys).toHaveLength(1);
+    expect(body.keys[0].api_key).toBe("tvly-s…-xyz");
+    expect(body.keys[0].encrypted).toBe(false);
+    expect(body.encryption).toEqual({ configured: false, plaintext_rows: 1 });
+    expect(JSON.stringify(body)).not.toContain("tvly-super-secret-value-xyz");
+  });
+});

@@ -1033,11 +1033,31 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv): Promise<R
     for (const row of rows.results ?? []) {
       try {
         const encrypted = await encryptSecret(row.api_key, env);
+        // Security V2 Stage 4 (spec 5.2): the plaintext row is only replaced
+        // after the ciphertext is proven to decrypt back to the same value AND
+        // re-fingerprint to the same digest. Any mismatch ⇒ skip and keep the
+        // working plaintext row; never trade a live credential for an
+        // unverifiable one.
+        const roundtrip = await decryptSecret(encrypted.cipher, env);
+        if (roundtrip !== row.api_key) {
+          failed.push({ id: row.id, reason: "解密回读不一致，已跳过（原值未动）" });
+          continue;
+        }
+        if ((await fingerprint(roundtrip, env)) !== encrypted.fingerprint) {
+          failed.push({ id: row.id, reason: "指纹校验不一致，已跳过（原值未动）" });
+          continue;
+        }
         await env.DB.prepare(
           `UPDATE api_configs SET api_key = ?, key_hint = ?, key_fingerprint = ?, updated_at = CURRENT_TIMESTAMP
            WHERE id = ?`,
         ).bind(encrypted.cipher, encrypted.hint, encrypted.fingerprint, row.id).run();
         converted.push(row.provider);
+        // Audit trail (structured console until the Stage 9 audit_logs table
+        // lands; visible via `wrangler tail`). Records the conversion event,
+        // never the credential material.
+        console.log(
+          `[security-v2:credential-migration] table=api_configs id=${row.id} provider=${row.provider} event=encrypted-verified`,
+        );
       } catch (error) {
         failed.push({ id: row.id, reason: error instanceof Error ? error.message : "unknown" });
       }
@@ -1521,21 +1541,43 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
     // rows already carrying the enc:v1: prefix are skipped.
     if (request.method === "POST" && path === "/admin/api/gmail/encrypt-all") {
       try {
+        // Fail fast before any write, mirroring /admin/api/keys/encrypt-all:
+        // a missing key must not abort halfway through live credentials.
+        if (!(await isEncryptionConfigured(env))) {
+          return jsonResponse({
+            detail: "尚未配置 CREDENTIAL_ENC_KEY：请先在「🔐 凭据加密」中生成并保存，再执行加密。",
+          }, 400);
+        }
         const rows = await env.DB.prepare(
           "SELECT id, private_key FROM gmail_accounts WHERE private_key NOT LIKE 'enc:v1:%'",
         ).all<{ id: number; private_key: string }>();
         let converted = 0;
+        const failedRows: Array<{ id: number; reason: string }> = [];
         for (const row of rows.results ?? []) {
+          // Stage 4 (spec 5.2) verification gate: decrypt roundtrip + fingerprint
+          // must both check out before the plaintext row is replaced.
           const encrypted = await encryptSecret(row.private_key, env);
+          const roundtrip = await decryptSecret(encrypted.cipher, env);
+          if (roundtrip !== row.private_key) {
+            failedRows.push({ id: row.id, reason: "解密回读不一致，已跳过（原值未动）" });
+            continue;
+          }
+          if ((await fingerprint(roundtrip, env)) !== encrypted.fingerprint) {
+            failedRows.push({ id: row.id, reason: "指纹校验不一致，已跳过（原值未动）" });
+            continue;
+          }
           await env.DB.prepare(
             "UPDATE gmail_accounts SET private_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
           ).bind(encrypted.cipher, row.id).run();
           converted++;
+          console.log(
+            `[security-v2:credential-migration] table=gmail_accounts id=${row.id} event=encrypted-verified`,
+          );
         }
         const left = await env.DB.prepare(
           "SELECT COUNT(*) AS n FROM gmail_accounts WHERE private_key NOT LIKE 'enc:v1:%'",
         ).first<{ n: number }>();
-        return jsonResponse({ ok: true, converted, remaining: left?.n ?? 0 });
+        return jsonResponse({ ok: failedRows.length === 0, converted, remaining: left?.n ?? 0, failed: failedRows });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (msg.includes("CREDENTIAL_ENC_KEY")) return jsonResponse({ detail: msg }, 400);

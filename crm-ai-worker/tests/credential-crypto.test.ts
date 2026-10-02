@@ -5,6 +5,7 @@ import {
   isEncrypted,
   fingerprint,
   getEncKeys,
+  isEncryptionConfigured,
   suggestEncKey,
   hintFor,
 } from "../src/credential-crypto";
@@ -162,5 +163,45 @@ describe("key_hint (display value)", () => {
     const b = await encryptSecret(KEY, env);
     expect(a.hint).toBe(b.hint);
     expect(a.cipher).not.toBe(b.cipher);
+  });
+});
+
+/* ── Security V2 Stage 4 (spec 5.4) additions ─────────────────────────────
+ * The originals above already cover roundtrip / wrong key / tampered
+ * ciphertext body / malformed format / legacy plaintext. These pin the
+ * remaining edges the stage spec calls out. */
+
+describe("credential encryption: Stage 4 edges", () => {
+  it("rejects a tampered IV, not just a tampered body", async () => {
+    // GCM authenticates the IV too: a flipped IV byte must fail the tag just
+    // like a flipped ciphertext byte, never yield a different keystream read.
+    const env = encEnv();
+    const { cipher } = await encryptSecret(KEY, env);
+    const parts = cipher.split(":");
+    const iv = Buffer.from(parts[2], "base64");
+    iv[0] ^= 0xff;
+    parts[2] = iv.toString("base64");
+    await expect(decryptSecret(parts.join(":"), env)).rejects.toThrow();
+  });
+
+  it("rejects a non-base64 payload that survives the format check", async () => {
+    // "enc:v1:$:$" passes the segment-count check but must die in atob, not
+    // return garbage that a caller might store back.
+    await expect(decryptSecret("enc:v1:$:$", encEnv())).rejects.toThrow();
+  });
+
+  it("isEncryptionConfigured answers without throwing for missing keys", async () => {
+    // The GET /admin/api/keys response polls this on every panel load; a
+    // missing key is an answer (false). Invalid material still throws —
+    // that is getEncKeys' documented contract, covered above.
+    expect(await isEncryptionConfigured(encEnv())).toBe(true);
+    expect(await isEncryptionConfigured({})).toBe(false);
+    expect(await isEncryptionConfigured({ CREDENTIAL_ENC_KEY: "   " })).toBe(false);
+  });
+
+  it("isEncrypted treats nullish and empty as legacy-but-empty, not ciphertext", () => {
+    expect(isEncrypted(null)).toBe(false);
+    expect(isEncrypted(undefined)).toBe(false);
+    expect(isEncrypted("")).toBe(false);
   });
 });
