@@ -167,6 +167,7 @@ evidence 表:        每条核心判断的 source_url + evidence_text + confiden
 
 ```text
 /admin                 客户 CRUD + 评分分布卡 + CSV 导入 + 海选预过滤
+                       （国家/细分/产品为下拉勾选，选项旁显示当前命中数）
 /admin/keys            动态 Key 池（D1，即时生效）/ 冷却监控 / 用量卡片 / 凭据加密
 /admin/secrets         经 Cloudflare API 直写 Worker Secrets（40 槽位）
 /admin/outreach        开发信生成与 Gmail 发送（结构化档案驱动，按国家语言）
@@ -177,6 +178,9 @@ POST /admin/login      面板登录。限流在读取提交的 token 之前判�
 GET  /admin/api/customers?min_lead_score=   列表/筛选
 POST /admin/api/customers/import            CSV 原始层 → 去重入队
 GET  /admin/api/customers/pre-filter        SQL 海选（不花 AI token）
+GET  /admin/api/customers/filter-options    海选/群发筛选下拉的候选项与命中数
+                                            （与 buildSegmentWhere 同一条 LIKE，
+                                            选项旁的数字 = 勾选后的统计结果）
 GET  /admin/api/customers/lead-score-histogram  评分分布
 GET  /admin/api/customers/:id               详情（含 contacts + evidence）
 GET  /admin/api/keys                        Key 列表（只回 key_hint）+ encryption 状态
@@ -185,6 +189,7 @@ POST /admin/api/keys                        新增单把 Key（未配置加密�
 POST /admin/api/keys/bulk                   批量导入（按 HMAC 指纹去重）
 POST /admin/api/keys/encryption-key         生成 32 字节 base64 候选密钥（只返回不保存）
 POST /admin/api/keys/encrypt-all            存量明文就地加密（幂等，返回转换/剩余数）
+POST /admin/api/gmail/encrypt-all           发信凭据存量明文就地加密（同上，同一套 AES-GCM）
 ```
 
 #### 定向群发（`outreach_campaigns`）
@@ -192,7 +197,8 @@ POST /admin/api/keys/encrypt-all            存量明文就地加密（幂等，
 `/admin/outreach` 的第二个标签页，把「给一批客户发开发信」从一次性脚本变成可续跑的任务：
 
 - **圈客**：复用 `/admin` 海选的同一套筛选条件（`buildSegmentWhere`），或手工勾选客户（≤500）；
-  筛选后可选「排除已发送过的客户」。
+  筛选后可选「排除已发送过的客户」。条件为下拉勾选（国家/细分/产品/关键词，
+  选项旁的数字是该条件当前可发信的客户数），不再手填字符串。
 - **快照**：创建任务时把命中的 customer id 写入 `outreach_campaign_members`，
   之后每一步都按这份名单走。管道会持续改写 `customers`，若每步重跑筛选，
   「预览 N 家」和「实际发出 N 家」会对不上。
@@ -237,8 +243,9 @@ POST /admin/api/keys/encrypt-all            存量明文就地加密（幂等，
 
 ```text
 src/index.ts            Cron 入口：认领 → 抓取 → 清洗 → AI 分析 → 回写（2100 行）
-src/admin.ts            面板路由与 5 个 *_HTML 面板模板（3054 行）
+src/admin.ts            面板路由与 5 个 *_HTML 面板模板（3233 行）
 src/campaigns.ts        定向群发：筛选 DSL、客群 CRUD、生成/发送两步状态机
+src/facets.ts           筛选下拉候选项（国家/细分/产品/关键词）与 LIKE 命中计数
 src/outreach.ts         开发信生成（结构化档案 → 按国家语言）
 src/gmail.ts            OAuth 发信、配额查询、失败冷却
 src/provider-keys.ts    Key 池解析（D1 优先 / env 兜底）+ 30s isolate 缓存
@@ -246,7 +253,7 @@ src/credential-crypto.ts AES-GCM 加解密 + HMAC 指纹 + HKDF 密钥派生（1
 src/rate-limit.ts       AI provider 的 per-isolate RPM 滑动窗口
 src/key-pool.ts         回退链 / 用量记录
 src/bulk-keys.ts        批量粘贴解析（`,` / Tab / `|` 分隔）
-tests/                  10 个文件 / 148 个测试
+tests/                  11 个文件 / 162 个测试
 ```
 
 ### 关键设计决策与理由（评估替代方案时的对照基线）
@@ -610,11 +617,12 @@ curl "http://127.0.0.1:8787/__scheduled?cron=*/5%20*%20*%20*%20*"
 npm test
 ```
 
-10 个测试文件 / 148 个测试，全部离线运行（不花 token、不发邮件、不需真实密钥）：
+11 个测试文件 / 162 个测试，全部离线运行（不花 token、不发邮件、不需真实密钥）：
 
 ```text
 campaign-steps.test.ts    群发状态机（CampaignDeps 注入假 AI/Gmail）652 行
 campaigns.test.ts         筛选 DSL、客群 CRUD、预览
+facets.test.ts            筛选下拉候选项：计数 = LIKE 过滤结果、候选词词表
 credential-api.test.ts    凭据加密端到端（明文兼容、去重、幂等迁移）340 行
 admin-hardening.test.ts   登录限流、错误脱敏（含 `return promise` 逃逸的回归测试）
 provider-keys.test.ts     Key 池解析与冷却槽位（含 id 遗漏的回归测试）
@@ -760,7 +768,7 @@ schema.sql
 customers: id, company_id, domain, status, customer_segment, personas_and_solutions, remarks, updated_at
 outreach_settings: brand_name, product_category, company_intro, sender_email, sender_name, company_entity（发送主体名义，正文署名用，留空则用品牌名）, signature, enabled
 outreach_attachments: brand_name, filename, mime_type, size_bytes, content_base64, language（es/de/fr/… 或 all=通用）
-gmail_accounts: label, credential_type（oauth_refresh / service_account）, client_email, private_key（refresh_token 或 PEM，不回显）, delegated_domain, daily_limit, enabled, last_error, cooldown_until
+gmail_accounts: label, credential_type（oauth_refresh / service_account）, client_email, private_key（refresh_token 或 PEM，AES-GCM 加密存储 enc:v1:…，不回显；无前缀的存量明文行可读可用，用 POST /admin/api/gmail/encrypt-all 一键转换）, delegated_domain, daily_limit, enabled, last_error, cooldown_until
 outreach_emails: customer_id, email_to, brand_name, subject, body, status, sent_at
 outreach_groups: name（唯一）, description, filters（SegmentFilters 的 JSON）
 outreach_campaigns: name, brand_name, group_id, filters, total（创建时的快照人数）, status（draft/paused/done）, last_error

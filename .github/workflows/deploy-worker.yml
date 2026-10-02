@@ -19,7 +19,10 @@ concurrency:
 jobs:
   deploy:
     name: Test, typecheck and deploy Worker
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest: the label starts migrating to Ubuntu 26
+    # on 2026-10-19, and a runner image bump is not something this Worker needs
+    # to take risks on to resolve an unrelated warning.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: crm-ai-worker
@@ -241,10 +244,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
 
@@ -545,3 +548,23 @@ jobs:
               npx wrangler secret delete "$var_name" --name crm-ai-worker 2>/dev/null || true
             fi
           done
+
+      # ADMIN_PANEL_TOKEN is the single secret that stays GitHub-managed, so a
+      # rotation can be done from the repo UI without Cloudflare credentials.
+      # Runs unconditionally instead of riding the SYNC_SECRETS_FROM_GITHUB
+      # gate above: that step deletes every secret absent from GitHub (20-odd
+      # `secret delete` lines) and provider keys now live in /admin/secrets, so
+      # switching it on for one token would drag the whole pool along.
+      #
+      # Reads the job-level env (line 237), and deliberately never deletes on an
+      # empty value: an unset repo secret must not become a missing Worker
+      # secret, because /admin 503s without it. Panel edits to this one secret
+      # are reverted on the next deploy — GitHub is the source of truth here.
+      - name: Sync ADMIN_PANEL_TOKEN from GitHub
+        run: |
+          if [ -z "$ADMIN_PANEL_TOKEN" ]; then
+            echo "GitHub Secret ADMIN_PANEL_TOKEN is empty; leaving the Worker secret untouched"
+          else
+            printf '%s' "$ADMIN_PANEL_TOKEN" | npx wrangler secret put ADMIN_PANEL_TOKEN
+            echo "Synced ADMIN_PANEL_TOKEN from GitHub (workers.dev sessions will need to re-login)"
+          fi

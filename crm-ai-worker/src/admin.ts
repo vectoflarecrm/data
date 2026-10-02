@@ -46,6 +46,7 @@ import {
   runCampaignSend,
   deserializeFilters,
 } from "./campaigns";
+import { buildFilterOptions } from "./facets";
 
 export interface AdminEnv extends GmailEnv {
   DB: D1Database;
@@ -1457,6 +1458,10 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
           ? clientEmail.split("@")[1] || null
           : null;
       try {
+        // Encrypt at rest with the same AES-GCM scheme as the AI key pool: a
+        // D1 export must not hand out the company's mailboxes. decryptSecret
+        // still reads legacy plaintext rows, so nothing breaks during rollout.
+        const encrypted = await encryptSecret(privateKey, env);
         await env.DB.prepare(
           `INSERT INTO gmail_accounts (label, credential_type, client_email, private_key, delegated_domain, daily_limit, enabled)
            VALUES (?, ?, ?, ?, ?, ?, 1)`,
@@ -1464,13 +1469,14 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
           typeof body.label === "string" ? body.label.trim().slice(0, 100) || null : null,
           credentialType,
           clientEmail,
-          privateKey,
+          encrypted.cipher,
           delegatedDomain,
           dailyLimitVal,
         ).run();
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (msg.includes("UNIQUE")) return jsonResponse({ detail: "该服务账号已存在" }, 409);
+        if (msg.includes("CREDENTIAL_ENC_KEY")) return jsonResponse({ detail: msg }, 400);
         return internalErrorResponse("gmail-account-save", e);
       }
       return jsonResponse({ ok: true });
@@ -1485,7 +1491,9 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
       if (!acc) return jsonResponse({ detail: "Account not found" }, 404);
       const credType = acc.credential_type === "oauth_refresh" ? "oauth_refresh" as const : "service_account" as const;
       try {
-        await getAccessToken(env, acc.client_email, acc.private_key, acc.client_email, credType);
+        // Reads both new ciphertext and legacy plaintext rows.
+        const keyMaterial = await decryptSecret(acc.private_key, env);
+        await getAccessToken(env, acc.client_email, keyMaterial, acc.client_email, credType);
         await noteGmailAccountResult(env, acc.client_email, true);
         return jsonResponse({ ok: true, detail: credType === "oauth_refresh" ? "refresh token 有效，token 获取成功" : "私钥有效，token 获取成功" });
       } catch (e) {
@@ -1530,6 +1538,32 @@ async function handleOutreachApi(request: Request, env: AdminEnv): Promise<Respo
       if (!Number.isSafeInteger(id) || id <= 0) return jsonResponse({ detail: "Invalid id" }, 400);
       await env.DB.prepare("DELETE FROM gmail_accounts WHERE id = ?").bind(id).run();
       return jsonResponse({ ok: true });
+    }
+    // POST /admin/api/gmail/encrypt-all — convert legacy cleartext sender
+    // credentials in place, same idea as /admin/api/keys/encrypt-all. Idempotent:
+    // rows already carrying the enc:v1: prefix are skipped.
+    if (request.method === "POST" && path === "/admin/api/gmail/encrypt-all") {
+      try {
+        const rows = await env.DB.prepare(
+          "SELECT id, private_key FROM gmail_accounts WHERE private_key NOT LIKE 'enc:v1:%'",
+        ).all<{ id: number; private_key: string }>();
+        let converted = 0;
+        for (const row of rows.results ?? []) {
+          const encrypted = await encryptSecret(row.private_key, env);
+          await env.DB.prepare(
+            "UPDATE gmail_accounts SET private_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          ).bind(encrypted.cipher, row.id).run();
+          converted++;
+        }
+        const left = await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM gmail_accounts WHERE private_key NOT LIKE 'enc:v1:%'",
+        ).first<{ n: number }>();
+        return jsonResponse({ ok: true, converted, remaining: left?.n ?? 0 });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes("CREDENTIAL_ENC_KEY")) return jsonResponse({ detail: msg }, 400);
+        return internalErrorResponse("gmail-encrypt-all", e);
+      }
     }
 
     // POST /admin/api/outreach/generate - Generate outreach emails
@@ -1719,32 +1753,6 @@ async function handleCampaignApi(request: Request, env: AdminEnv): Promise<Respo
       return jsonResponse(await previewSegment(env, filters, brand));
     }
 
-    // GET /admin/api/outreach/filter-options — dropdown choices for the campaign
-    // filter form: countries/segments from real customer data, products from the
-    // AI extraction taxonomy (matches the LIKE %term% filters in campaigns.ts).
-    if (path === "/admin/api/outreach/filter-options" && request.method === "GET") {
-      const [countryRows, segmentRows] = await Promise.all([
-        env.DB.prepare(
-          `SELECT DISTINCT country FROM customers
-           WHERE status = 'completed' AND country IS NOT NULL AND TRIM(country) != ''
-             AND email IS NOT NULL AND email != ''
-           ORDER BY country LIMIT 200`,
-        ).all<{ country: string }>(),
-        env.DB.prepare(
-          `SELECT DISTINCT customer_segment FROM customers
-           WHERE status = 'completed' AND customer_segment IS NOT NULL AND TRIM(customer_segment) != ''
-           ORDER BY customer_segment LIMIT 60`,
-        ).all<{ customer_segment: string }>(),
-      ]);
-      return jsonResponse({
-        countries: (countryRows.results ?? []).map((r) => r.country.trim()).filter(Boolean),
-        segments: (segmentRows.results ?? []).map((r) => r.customer_segment.trim()).filter(Boolean),
-        products: [
-          "Inflatable Boats", "Paddle Boards", "Kayaks", "Yachts", "Kitesurfing", "Windsurfing", "Accessories", "Apparel",
-        ],
-      });
-    }
-
     // ── Saved groups (可复用客群) ──
     if (path === "/admin/api/outreach/groups" && request.method === "GET") {
       return jsonResponse({ groups: await listGroups(env) });
@@ -1898,6 +1906,13 @@ async function handleAdminApi(request: Request, env: AdminEnv): Promise<Response
       `).first<{ total: number; unscored: number; s80: number; s60: number; s40: number; s0: number }>();
       return jsonResponse(rows ?? { total: 0, unscored: 0, s80: 0, s60: 0, s40: 0, s0: 0 });
     }
+    // GET /admin/api/customers/filter-options — option lists (with live match
+    // counts) behind the 海选 / 定向群发 filter dropdowns. Counts reuse the
+    // LIKE expressions of buildSegmentWhere(), so the number shown next to an
+    // option is what 统计匹配 will really return once it is ticked.
+    if (url.pathname === "/admin/api/customers/filter-options" && request.method === "GET") {
+      return jsonResponse(await buildFilterOptions(env, url.searchParams.get("facets")));
+    }
     const id = parseCustomerId(url.pathname);
     if (id !== null) {
       if (request.method === "GET") {
@@ -2008,7 +2023,6 @@ export async function handleAdminRequest(
   // 定向群发 (segment-preview / groups / campaigns) is checked first because
   // handleCampaignApi owns those paths; everything else falls through.
   if (url.pathname.startsWith("/admin/api/outreach/segment-preview")
-    || url.pathname.startsWith("/admin/api/outreach/filter-options")
     || url.pathname.startsWith("/admin/api/outreach/groups")
     || url.pathname.startsWith("/admin/api/outreach/campaigns")) {
     if (!(await isAuthenticated(request, env))) return authFailure(request);
@@ -2039,14 +2053,28 @@ const ADMIN_LOGIN_HTML = `<!doctype html>
 const ADMIN_PANEL_HTML = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>D1 CRM 客户管理</title><style>
-:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#172033;background:#f4f7fb}*{box-sizing:border-box}body{margin:0}.top{background:#123b68;color:#fff;padding:18px 26px;display:flex;justify-content:space-between;gap:12px;align-items:center}.top h1{font-size:22px;margin:0}.wrap{max-width:1400px;margin:22px auto;padding:0 18px}.panel{background:#fff;border:1px solid #dce5f0;border-radius:12px;padding:18px;margin-bottom:18px}.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.toolbar input,.toolbar select{font:inherit;padding:10px;border:1px solid #cbd5e1;border-radius:8px}.toolbar input{min-width:240px}.button{background:#1677d2;color:#fff;border:0;border-radius:8px;padding:10px 15px;cursor:pointer;font:inherit}.button.secondary{background:#475569}.button.danger{background:#b91c1c}.button.small{padding:6px 12px;font-size:13px}table{width:100%;border-collapse:collapse;margin-top:14px}th,td{text-align:left;padding:10px;border-bottom:1px solid #e2e8f0;vertical-align:top;font-size:14px}th{background:#f8fafc;white-space:nowrap}td{max-width:300px;overflow-wrap:anywhere}.badge{display:inline-block;border-radius:999px;padding:3px 9px;background:#e2e8f0;font-size:12px}.badge-completed{background:#d1fae5;color:#065f46}.badge-pending{background:#fef3c7;color:#92400e}.badge-failed{background:#fee2e2;color:#991b1b}.badge-processing{background:#dbeafe;color:#1e40af}.notice{margin-top:12px;padding:10px;border-radius:8px;background:#eff6ff}.success{background:#ecfdf5;color:#065f46}.error{background:#fef2f2;color:#991b1b}.hidden{display:none}.pager{display:flex;justify-content:space-between;align-items:center;margin-top:14px;gap:12px}
+:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#172033;background:#f4f7fb}*{box-sizing:border-box}body{margin:0}.top{background:#123b68;color:#fff;padding:18px 26px;display:flex;justify-content:space-between;gap:12px;align-items:center}.top h1{font-size:22px;margin:0}.wrap{max-width:1400px;margin:22px auto;padding:0 18px}.panel{background:#fff;border:1px solid #dce5f0;border-radius:12px;padding:18px;margin-bottom:18px}.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.toolbar input,.toolbar select{font:inherit;padding:10px;border:1px solid #cbd5e1;border-radius:8px}.toolbar input:not([type=checkbox]){min-width:240px}.button{background:#1677d2;color:#fff;border:0;border-radius:8px;padding:10px 15px;cursor:pointer;font:inherit}.button.secondary{background:#475569}.button.danger{background:#b91c1c}.button.small{padding:6px 12px;font-size:13px}table{width:100%;border-collapse:collapse;margin-top:14px}th,td{text-align:left;padding:10px;border-bottom:1px solid #e2e8f0;vertical-align:top;font-size:14px}th{background:#f8fafc;white-space:nowrap}td{max-width:300px;overflow-wrap:anywhere}.badge{display:inline-block;border-radius:999px;padding:3px 9px;background:#e2e8f0;font-size:12px}.badge-completed{background:#d1fae5;color:#065f46}.badge-pending{background:#fef3c7;color:#92400e}.badge-failed{background:#fee2e2;color:#991b1b}.badge-processing{background:#dbeafe;color:#1e40af}.notice{margin-top:12px;padding:10px;border-radius:8px;background:#eff6ff}.success{background:#ecfdf5;color:#065f46}.error{background:#fef2f2;color:#991b1b}.hidden{display:none}.pager{display:flex;justify-content:space-between;align-items:center;margin-top:14px;gap:12px}
 .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1000;justify-content:center;align-items:flex-start;padding:30px 18px;overflow-y:auto}.modal-overlay.active{display:flex}.modal{background:#fff;border-radius:14px;width:min(800px,100%);box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden}.modal-header{background:#123b68;color:#fff;padding:18px 24px;display:flex;justify-content:space-between;align-items:center}.modal-header h2{margin:0;font-size:20px}.modal-body{padding:24px;max-height:70vh;overflow-y:auto}.modal-footer{padding:16px 24px;background:#f8fafc;border-top:1px solid #e2e8f0;display:flex;justify-content:flex-end;gap:10px}
 .field-row{display:flex;align-items:stretch;border-bottom:1px solid #e2e8f0;min-height:48px}.field-row:last-child{border-bottom:none}.field-label{width:180px;min-width:180px;padding:12px 16px;background:#f8fafc;font-weight:600;font-size:13px;color:#475569;display:flex;align-items:center;border-right:1px solid #e2e8f0}.field-content{flex:1;padding:12px 16px;display:flex;align-items:center;gap:8px;min-height:48px}.field-value{flex:1;font-size:14px;word-break:break-word;line-height:1.5}.field-value a{color:#1677d2;text-decoration:none}.field-value a:hover{text-decoration:underline}.field-input{flex:1;display:none;gap:8px;align-items:center}.field-input input,.field-input select,.field-input textarea{font:inherit;padding:8px 12px;border:1px solid #cbd5e1;border-radius:6px;width:100%}.field-input textarea{min-height:80px;resize:vertical}.field-input input,.field-input select{max-width:100%}.field-row.editing .field-value{display:none}.field-row.editing .field-input{display:flex}.field-row.readonly .field-label{color:#94a3b8}
+.cp-dd{position:relative;display:inline-block}
+.cp-dd-btn{padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;font:inherit;font-size:13px;cursor:pointer;min-width:150px;max-width:320px;text-align:left;color:#172033;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cp-dd-btn:hover{border-color:#0f766e}
+.cp-dd-panel{display:none;position:absolute;top:calc(100% + 4px);left:0;z-index:60;background:#fff;border:1px solid #cbd5e1;border-radius:8px;box-shadow:0 10px 28px rgba(15,23,42,.14);padding:6px;max-height:260px;overflow:auto;min-width:230px}
+.cp-dd.open .cp-dd-panel{display:block}
+.cp-dd-item{display:flex;align-items:center;gap:7px;padding:5px 8px;font-size:13px;border-radius:6px;cursor:pointer;user-select:none}
+.cp-dd-item:hover{background:#f0fdfa}
+.cp-dd-item input:disabled+span{color:#9ca3af}
+.cp-dd-n{margin-left:auto;color:#64748b;font-size:11px;font-variant-numeric:tabular-nums}
+.cp-dd-sum{color:#0f766e;font-weight:600}
+.cp-dd-empty{font-size:12px;color:#9ca3af;padding:6px 8px}
+.cp-dd-search{width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;margin-bottom:4px;min-width:0}
+.cp-dd-note{font-size:11px;color:#b45309;padding:2px 8px 4px}
+.toolbar .cp-dd input[type=checkbox]{min-width:0;width:auto;padding:0;margin:0}
 .persona-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin-bottom:10px}.persona-card h4{margin:0 0 8px;font-size:14px;color:#1e293b}.persona-card ul{margin:0;padding-left:18px;font-size:13px;color:#475569}.solution-card{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px;margin-bottom:10px}.solution-card h4{margin:0 0 6px;font-size:14px;color:#1e40af}.solution-card p{margin:0;font-size:13px;color:#1e3a5f}.section-title{font-size:15px;font-weight:600;color:#123b68;margin:18px 0 10px;padding-bottom:6px;border-bottom:2px solid #123b68}
 @media(max-width:700px){.top{align-items:flex-start;flex-direction:column}table{display:block;overflow-x:auto;white-space:nowrap}.field-row{flex-direction:column}.field-label{width:100%;min-width:0;border-right:none;border-bottom:1px solid #e2e8f0}.modal-body{padding:16px}}
 </style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div style="display:flex;gap:12px;align-items:center"><a href="/admin/outreach" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">📧 开发信管理</a><a href="/admin/secrets" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">🔑 AI Key 管理</a><a href="/admin/keys" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
 <section class="panel"><h2>📥 客户数据导入（Seed CSV）</h2><p style="font-size:13px;color:#475569;margin:6px 0">粘贴 CSV（需表头，支持列：company_name, country, domain/website, email, product）。原始数据永久保存在 customer_imports（不可变原始层）；域名或公司名匹配的行自动去重跳过，新公司以 pending 状态进入研究队列。</p><div class="toolbar"><input id="importFileName" placeholder="文件名备注（可选）" style="max-width:220px"><button class="button" id="importBtn">导入并去重入队</button></div><textarea id="importCsv" rows="6" placeholder="company_name,country,website,email,product\nABC Sports,USA,,buyer@abcsports.com,SUP\nOcean Pro,Germany,oceanpro.de,,RIB"></textarea><div id="importMsg" class="notice hidden"></div></section>
-<section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p style="font-size:13px;color:#475569;margin:6px 0">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围，再点「重新入队」让管道二次研究高价值客户。</p><div class="toolbar"><input id="pfCountries" placeholder="国家（逗号分隔，如 Spain,France）" style="max-width:200px"><input id="pfSegments" placeholder="细分（如 Distributor,Dealer）" style="max-width:200px"><input id="pfProducts" placeholder="产品（如 SUP,Kayak）" style="max-width:160px"><input id="pfMinScore" type="number" min="0" max="100" placeholder="最低分" style="max-width:90px"><label style="font-size:13px"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button></div><div id="pfResult" class="notice hidden"></div></section>
+<section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p style="font-size:13px;color:#475569;margin:6px 0">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围，再点「重新入队」让管道二次研究高价值客户。筛选项为下拉勾选，右侧数字是该条件当前命中的客户数（勾选「有邮箱」后只计有邮箱的）。</p><div class="toolbar"><span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span><span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span><span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span><select id="pfMinScore" style="min-width:130px"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="50">最低分 ≥50</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select><label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button></div><div id="pfResult" class="notice hidden"></div></section>
 <section class="panel"><h2>客户列表</h2><div id="scoreCard" class="hidden" style="margin-bottom:12px"></div><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>评分</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
 </main>
 <div class="modal-overlay" id="modal"><div class="modal"><div class="modal-header"><h2 id="modalTitle">客户详情</h2><button class="button secondary small" id="closeModal">✕ 关闭</button></div><div class="modal-body" id="modalBody"></div><div class="modal-footer"><span id="modalMsg" class="notice hidden" style="margin-right:auto"></span><button class="button danger small" id="requeueBtn">设为 pending 重新处理</button><button class="button" id="submitBtn">提交修改</button></div></div></div>
@@ -2073,7 +2101,47 @@ const ADMIN_PANEL_HTML = `<!doctype html>
   var doImport=function(){var csv=$('importCsv').value;if(!csv.trim()){showMsg('importMsg','请先粘贴 CSV 内容',false);return}$('importBtn').disabled=true;$('importBtn').textContent='导入中…';api('/admin/api/customers/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({csv:csv,file_name:$('importFileName').value||null})}).then(function(d){showMsg('importMsg','✅ 导入完成：新增 '+d.inserted+' 家（进入研究队列），匹配已有 '+d.matched+' 家（跳过），无效行 '+d.skipped+'。导入批次：'+d.import_id,true);$('importCsv').value='';load()}).catch(function(e){showMsg('importMsg',e.message,false)}).finally(function(){$('importBtn').disabled=false;$('importBtn').textContent='导入并去重入队'})};
   $('importBtn').onclick=doImport;
   // Pre-filter 海选 (docx Step 2)
-  var pfParams=function(){var p=new URLSearchParams();var c=$('pfCountries').value.trim();var s=$('pfSegments').value.trim();var pr=$('pfProducts').value.trim();var m=$('pfMinScore').value;if(c)p.set('countries',c);if(s)p.set('segments',s);if(pr)p.set('products',pr);if(m&&Number(m)>0)p.set('min_lead_score',m);if($('pfHasEmail').checked)p.set('has_email','1');return p};
+  /* ── 多选下拉（国家/细分/产品）：勾选式选择项，替代手填输入框 ── */
+  var pfDDOpts={countries:[],segments:[],products:[]};
+  var pfDDSel={countries:[],segments:[],products:[]};
+  var pfDDReady=false,pfDDError=false;
+  // Mirrors MAX_FILTER_VALUES in src/campaigns.ts: the API rejects longer
+  // lists, so cap the ticks here where the operator can still see why.
+  var pfDDLimit={countries:10,segments:10,products:10};
+  var pfDDKinds=['countries','segments','products'];
+  var pfDDCap=function(k){return k.charAt(0).toUpperCase()+k.slice(1)};
+  // 海选 base rows always have research; the count follows 有邮箱 because that
+  // is exactly what pre-filter will add to its WHERE clause when ticked.
+  var pfDDCount=function(o){return $('pfHasEmail').checked?o.ne:o.n};
+  function pfDDRender(k){var panel=$('ddPanel'+pfDDCap(k));if(!panel)return;
+    if(!pfDDReady){panel.innerHTML='<div class="cp-dd-empty">'+(pfDDError?'加载失败，刷新重试':'加载中…')+'</div>';return}
+    if(!panel.__built){panel.__built=true;panel.__q='';
+      panel.innerHTML='<input class="cp-dd-search" placeholder="过滤…"><div class="cp-dd-list"></div>';
+      panel.querySelector('.cp-dd-search').oninput=function(){panel.__q=this.value;pfDDList(k)}}
+    pfDDList(k)}
+  function pfDDList(k){var panel=$('ddPanel'+pfDDCap(k));if(!panel||!panel.__built)return;
+    var q=(panel.__q||'').toLowerCase();
+    var opts=pfDDOpts[k].filter(function(o){return !q||o.v.toLowerCase().indexOf(q)>=0});
+    var arr=pfDDSel[k],limit=pfDDLimit[k],full=arr.length>=limit;
+    var items=opts.map(function(o){var on=arr.indexOf(o.v)>=0;
+      return '<label class="cp-dd-item"><input type="checkbox" '+(on?'checked':'')+(full&&!on?' disabled':'')+' data-v="'+esc(o.v)+'"><span>'+esc(o.v)+'</span><span class="cp-dd-n">'+pfDDCount(o)+'</span></label>'}).join('');
+    if(!opts.length)items='<div class="cp-dd-empty">无匹配选项</div>';
+    panel.querySelector('.cp-dd-list').innerHTML=items+(full?'<div class="cp-dd-note">最多 '+limit+' 项，取消一项可继续</div>':'');
+    panel.querySelectorAll('.cp-dd-list input').forEach(function(cb){cb.onchange=function(){pfDDToggle(k,cb.dataset.v,cb.checked)}})}
+  function pfDDToggle(k,v,on){var arr=pfDDSel[k],i=arr.indexOf(v);
+    if(on&&i<0&&arr.length<pfDDLimit[k])arr.push(v);
+    if(!on&&i>=0)arr.splice(i,1);
+    pfDDSum(k);pfDDList(k)}
+  function pfDDSum(k){var el=$('ddSum'+pfDDCap(k));if(!el)return;var arr=pfDDSel[k];
+    el.textContent=arr.length?('：'+arr.slice(0,2).join(',')+(arr.length>2?' 等'+arr.length+'项':'')):''}
+  function pfDDAll(fn){pfDDKinds.forEach(fn)}
+  function loadFilterOptions(){return api('/admin/api/customers/filter-options?facets=countries,segments,products').then(function(d){
+      pfDDOpts.countries=d.countries||[];pfDDOpts.segments=d.segments||[];pfDDOpts.products=d.products||[];
+      pfDDReady=true;pfDDAll(function(k){pfDDRender(k);pfDDSum(k)})}).catch(function(){pfDDError=true;pfDDAll(pfDDRender)})}
+  document.querySelectorAll('.cp-dd-btn').forEach(function(btn){btn.onclick=function(ev){ev.stopPropagation();var dd=btn.parentElement,was=dd.classList.contains('open');document.querySelectorAll('.cp-dd.open').forEach(function(o){o.classList.remove('open')});if(!was)dd.classList.add('open')}});
+  document.addEventListener('click',function(ev){if(!(ev.target.closest&&ev.target.closest('.cp-dd')))document.querySelectorAll('.cp-dd.open').forEach(function(o){o.classList.remove('open')})});
+  $('pfHasEmail').onchange=function(){pfDDAll(pfDDList)};
+  var pfParams=function(){var p=new URLSearchParams();var c=pfDDSel.countries.join(','),s=pfDDSel.segments.join(','),pr=pfDDSel.products.join(','),m=$('pfMinScore').value;if(c)p.set('countries',c);if(s)p.set('segments',s);if(pr)p.set('products',pr);if(m&&Number(m)>0)p.set('min_lead_score',m);if($('pfHasEmail').checked)p.set('has_email','1');return p};
   $('pfCount').onclick=function(){var p=pfParams();p.set('action','count');$('pfCount').disabled=true;api('/admin/api/customers/pre-filter?'+p.toString()).then(function(d){var s=d.sample||[];var lines=s.slice(0,5).map(function(c){return esc((c.company_name||c.display_id||c.id)+'（'+(c.lead_score??'—')+'分）')}).join('、');$('pfResult').classList.remove('hidden');$('pfResult').innerHTML='🎯 匹配 <b>'+d.matching+'</b> 家'+(lines?'。高分示例：'+lines:'');$('pfResult').style.color='#123b68'}).catch(function(e){$('pfResult').classList.remove('hidden');$('pfResult').textContent='❌ '+e.message;$('pfResult').style.color='#b91c1c'}).finally(function(){$('pfCount').disabled=false})};
   $('pfQueue').onclick=function(){if(!confirm('确定将所有匹配的已完成客户重置为 pending 重新研究？'))return;var p=pfParams();p.set('action','queue');$('pfQueue').disabled=true;api('/admin/api/customers/pre-filter?'+p.toString()).then(function(d){$('pfResult').classList.remove('hidden');$('pfResult').innerHTML='✅ 已重新入队 <b>'+d.queued+'</b> 家，等待 cron 逐批处理';$('pfResult').style.color='#123b68';load()}).catch(function(e){$('pfResult').classList.remove('hidden');$('pfResult').textContent='❌ '+e.message;$('pfResult').style.color='#b91c1c'}).finally(function(){$('pfQueue').disabled=false})};
   var fields=[
@@ -2183,6 +2251,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
   $('requeueBtn').onclick=function(){if(state.selected===null)return;api('/admin/api/customers/'+state.selected,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'pending'})}).then(function(){showMsg('modalMsg','已设为 pending',true);load()}).catch(function(e){showMsg('modalMsg',e.message,false)})};
   $('load').onclick=function(){state.offset=0;load()};$('search').onkeydown=function(e){if(e.key==='Enter'){state.offset=0;load()}};$('status').onchange=function(){state.offset=0;load()};$('prev').onclick=function(){if(state.offset>0){state.offset=Math.max(0,state.offset-state.limit);load()}};$('next').onclick=function(){if(state.offset+state.limit<state.total){state.offset+=state.limit;load()}};
   load();
+  loadFilterOptions();
 })();
 </script></body></html>`;
 
@@ -2210,8 +2279,12 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 .cp-dd.open .cp-dd-panel{display:block}
 .cp-dd-item{display:flex;align-items:center;gap:7px;padding:5px 8px;font-size:13px;border-radius:6px;cursor:pointer;user-select:none}
 .cp-dd-item:hover{background:#f0fdfa}
+.cp-dd-item input:disabled+span{color:#9ca3af}
+.cp-dd-n{margin-left:auto;color:#64748b;font-size:11px;font-variant-numeric:tabular-nums}
 .cp-dd-sum{color:#0f766e;font-weight:600}
 .cp-dd-empty{font-size:12px;color:#9ca3af;padding:6px 8px}
+.cp-dd-search{width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;margin-bottom:4px}
+.cp-dd-note{font-size:11px;color:#b45309;padding:2px 8px 4px}
 @media(max-width:700px){.top{flex-direction:column}.stats{grid-template-columns:1fr 1fr}.email-header{flex-direction:column;align-items:flex-start;gap:6px}}
 </style></head><body>
 <header class="top"><h1>📧 开发信管理</h1><div style="display:flex;gap:10px;align-items:center"><a href="/admin" style="color:#fff;text-decoration:none;font-weight:600">← 返回客户管理</a><form method="post" action="/admin/logout"><button class="btn btn-sm" style="background:rgba(255,255,255,.2);color:#fff" type="submit">退出</button></form></div></header>
@@ -2234,7 +2307,7 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 <p style="margin:6px 0 0;color:#6b7280">完整说明见仓库 <code>crm-ai-worker/docs/gmail-account-setup.md</code>。服务账号需全域委托；OAuth 令牌不需要，适合少量固定发件邮箱。</p></details>
 <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><select id="gaType" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"><option value="oauth_refresh">OAuth 令牌（推荐，无需服务账号密钥）</option><option value="service_account">服务账号（需全域委托）</option></select><input id="gaLabel" placeholder="备注（如：主账号）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:150px"><input id="gaEmail" class="ga-email-input" placeholder="发件邮箱 helen@isupfactory.com" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;flex:1;min-width:240px;font-family:monospace"><input id="gaLimit" type="number" min="1" placeholder="每日配额（默认 400）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:150px"></div>
 <div style="margin-top:8px"><textarea id="gaKey" rows="3" placeholder="粘贴 refresh_token（一长串无空格字符）" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;font-family:monospace"></textarea></div>
-<div style="margin-top:8px;display:flex;gap:8px;align-items:center"><button class="btn btn-primary" id="gaAdd">➕ 添加账号</button><span style="font-size:12px;color:#6b7280">私钥仅存入 D1，不会回显</span></div>
+<div style="margin-top:8px;display:flex;gap:8px;align-items:center"><button class="btn btn-primary" id="gaAdd">➕ 添加账号</button><span style="font-size:12px;color:#6b7280">凭据 AES-GCM 加密后存入 D1，永不回显</span></div>
 <div id="gaMsg" style="margin-top:8px;font-size:13px"></div></div>
 <div id="gaList"></div>
 </div>
@@ -2261,12 +2334,12 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 <span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span>
 <span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span>
 <span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span>
-<input id="cgKeywords" placeholder="关键词（公司/描述）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:160px">
+<span class="cp-dd" id="ddKeywords"><button type="button" class="cp-dd-btn" data-dd="keywords">🔎 关键词<span class="cp-dd-sum" id="ddSumKeywords"></span> ▾</button><div class="cp-dd-panel" id="ddPanelKeywords"></div></span>
 <select id="cgMinScore" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:110px"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select>
 <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="cgExcludeSent" checked> 排除本品牌已发送</label>
 <button class="btn btn-primary btn-sm" id="cgPreview">🔍 统计客群</button>
 </div>
-<p class="cp-hint">只统计已完成研究（<code>status=completed</code>）且<b>有邮箱</b>的客户——没有研究档案无法生成个性化开发信，没有邮箱无法发送。手工勾选的客户会与其余条件取交集。</p>
+<p class="cp-hint">只统计已完成研究（<code>status=completed</code>）且<b>有邮箱</b>的客户——没有研究档案无法生成个性化开发信，没有邮箱无法发送。手工勾选的客户会与其余条件取交集。下拉筛选项右侧的数字是该条件当前命中的<b>可发信</b>客户数（未扣除本品牌已发送）。关键词取自客户名称与描述中的高频业务词，最多可选 5 个。</p>
 <div id="cgPickedWrap" style="margin-top:8px">
 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span style="font-size:13px">手工勾选：</span><span id="cgPicked" class="cp-chip"></span><button class="btn btn-sm btn-secondary" id="cgClearPicked">清空</button></div>
 <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap"><input id="cgPickSearch" placeholder="搜索公司名/网址/国家以勾选客户" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;flex:1;min-width:220px"><button class="btn btn-sm btn-secondary" id="cgPickSearchBtn">🔎 搜索并勾选</button></div>
@@ -2508,29 +2581,51 @@ document.getElementById('emailNext').onclick=function(){if(emailState.offset+ema
 var cgPickedIds=[];
 var cgBusy={};
 function cgMsg(t,g){var e=document.getElementById('cgMsg');e.textContent=t;e.style.color=g?'#059669':'#dc2626';e.style.fontSize='13px'}
-/* ── 多选下拉（国家/细分/产品）：勾选式选择项，替代手填输入框 ── */
-var cgDDOpts={countries:[],segments:[],products:[]};
-var cgDDSel={countries:[],segments:[],products:[]};
-var cgDDLoaded=false,cgPendingDD=null;
+/* ── 多选下拉（国家/细分/产品/关键词）：勾选式选择项，替代手填输入框 ── */
+var cgDDKinds=['countries','segments','products','keywords'];
+var cgDDOpts={countries:[],segments:[],products:[],keywords:[]};
+var cgDDSel={countries:[],segments:[],products:[],keywords:[]};
+// Mirrors MAX_FILTER_VALUES / MAX_KEYWORDS in src/campaigns.ts: the API
+// rejects longer lists, so cap the ticks here where the operator can see why.
+var cgDDLimit={countries:10,segments:10,products:10,keywords:5};
+var cgDDState='loading',cgPendingDD=null;
+function cgDDCap(kind){return kind.charAt(0).toUpperCase()+kind.slice(1)}
 function cgDDRender(kind){
-  var panel=document.getElementById('ddPanel'+kind.charAt(0).toUpperCase()+kind.slice(1));
+  var panel=document.getElementById('ddPanel'+cgDDCap(kind));
   if(!panel)return;
-  var opts=cgDDOpts[kind];
-  panel.innerHTML=opts.length?opts.map(function(v){
-    return '<label class="cp-dd-item"><input type="checkbox" '+(cgDDSel[kind].indexOf(v)>=0?'checked':'')+' data-kind="'+kind+'" data-val="'+esc(v)+'"> '+esc(v)+'</label>';
-  }).join(''):'<div class="cp-dd-empty">加载中…</div>';
-  panel.querySelectorAll('input[type=checkbox]').forEach(function(cb){
-    cb.onchange=function(){cgToggleVal(cb.dataset.kind,cb.dataset.val,cb.checked)};
-  });
+  if(cgDDState!=='ready'){
+    panel.innerHTML='<div class="cp-dd-empty">'+(cgDDState==='error'?'加载失败，刷新重试':'加载中…')+'</div>';
+    return;
+  }
+  if(!panel.__built){
+    panel.__built=true;panel.__q='';
+    panel.innerHTML='<input class="cp-dd-search" placeholder="过滤…"><div class="cp-dd-list"></div>';
+    panel.querySelector('.cp-dd-search').oninput=function(){panel.__q=this.value;cgDDList(kind)};
+  }
+  cgDDList(kind);
+}
+function cgDDList(kind){
+  var panel=document.getElementById('ddPanel'+cgDDCap(kind));
+  if(!panel||!panel.__built)return;
+  var q=(panel.__q||'').toLowerCase();
+  var opts=cgDDOpts[kind].filter(function(o){return !q||o.v.toLowerCase().indexOf(q)>=0});
+  var arr=cgDDSel[kind],limit=cgDDLimit[kind],full=arr.length>=limit;
+  var items=opts.map(function(o){
+    var on=arr.indexOf(o.v)>=0;
+    return '<label class="cp-dd-item"><input type="checkbox" '+(on?'checked':'')+(full&&!on?' disabled':'')+' data-v="'+esc(o.v)+'"><span>'+esc(o.v)+'</span><span class="cp-dd-n">'+o.ne+'</span></label>';
+  }).join('');
+  if(!opts.length)items='<div class="cp-dd-empty">无匹配选项</div>';
+  panel.querySelector('.cp-dd-list').innerHTML=items+(full?'<div class="cp-dd-note">最多 '+limit+' 项，取消一项可继续</div>':'');
+  panel.querySelectorAll('.cp-dd-list input').forEach(function(cb){cb.onchange=function(){cgToggleVal(kind,cb.dataset.v,cb.checked)}});
 }
 function cgToggleVal(kind,v,on){
   var arr=cgDDSel[kind],i=arr.indexOf(v);
-  if(on&&i<0)arr.push(v);
+  if(on&&i<0&&arr.length<cgDDLimit[kind])arr.push(v);
   if(!on&&i>=0)arr.splice(i,1);
-  cgDDSum(kind);
+  cgDDSum(kind);cgDDList(kind);
 }
 function cgDDSum(kind){
-  var el=document.getElementById('ddSum'+kind.charAt(0).toUpperCase()+kind.slice(1));
+  var el=document.getElementById('ddSum'+cgDDCap(kind));
   if(!el)return;
   var arr=cgDDSel[kind];
   el.textContent=arr.length?('：'+arr.slice(0,2).join(',')+(arr.length>2?' 等'+arr.length+'项':'')):'';
@@ -2541,34 +2636,35 @@ document.querySelectorAll('.cp-dd-btn').forEach(function(btn){
 document.addEventListener('click',function(ev){if(!(ev.target.closest&&ev.target.closest('.cp-dd')))document.querySelectorAll('.cp-dd.open').forEach(function(o){o.classList.remove('open')})});
 function cgDDApply(kind,val){
   var arr=Array.isArray(val)?val.slice():(typeof val==='string'&&val.trim()?val.split(',').map(function(s){return s.trim()}).filter(Boolean):[]);
-  arr.forEach(function(v){if(v&&cgDDOpts[kind].indexOf(v)<0)cgDDOpts[kind].push(v)});
+  // A saved group can hold a value today's data no longer has; keep it visible
+  // instead of silently dropping it from the selection.
+  arr.forEach(function(v){if(v&&!cgDDOpts[kind].some(function(o){return o.v===v}))cgDDOpts[kind].push({v:v,n:0,ne:0})});
   cgDDSel[kind]=arr;
   cgDDRender(kind);cgDDSum(kind);
 }
 function loadFilterOptions(){
-  if(cgDDLoaded)return Promise.resolve();
-  return api('/admin/api/outreach/filter-options').then(function(d){
-    cgDDOpts.countries=d.countries||[];cgDDOpts.segments=d.segments||[];cgDDOpts.products=d.products||[];
-    cgDDLoaded=true;
-    ['countries','segments','products'].forEach(function(k){cgDDRender(k);cgDDSum(k)});
+  if(cgDDState==='ready')return Promise.resolve();
+  return api('/admin/api/customers/filter-options?facets=countries,segments,products,keywords').then(function(d){
+    cgDDKinds.forEach(function(k){cgDDOpts[k]=d[k]||[]});
+    cgDDState='ready';
+    cgDDKinds.forEach(function(k){cgDDRender(k);cgDDSum(k)});
     if(cgPendingDD){var p=cgPendingDD;cgPendingDD=null;Object.keys(p).forEach(function(k){cgDDApply(k,p[k])})}
-  }).catch(function(){});
+  }).catch(function(){cgDDState='error';cgDDKinds.forEach(cgDDRender)});
 }
 function cgFilters(){
   var min=Number(document.getElementById('cgMinScore').value)||0;
-  return {countries:cgDDSel.countries.join(','),segments:cgDDSel.segments.join(','),products:cgDDSel.products.join(','),keywords:document.getElementById('cgKeywords').value,min_lead_score:min,exclude_sent:document.getElementById('cgExcludeSent').checked,customer_ids:cgPickedIds};
+  return {countries:cgDDSel.countries.join(','),segments:cgDDSel.segments.join(','),products:cgDDSel.products.join(','),keywords:cgDDSel.keywords.join(','),min_lead_score:min,exclude_sent:document.getElementById('cgExcludeSent').checked,customer_ids:cgPickedIds};
 }
 function cgSetFilters(f){
   f=f||{};
-  document.getElementById('cgKeywords').value=Array.isArray(f.keywords)?f.keywords.join(','):(f.keywords||'');
   var ms=document.getElementById('cgMinScore'),mv=String(f.min_lead_score||'');
   if(mv&&!ms.querySelector('option[value="'+mv+'"]')){var o=document.createElement('option');o.value=mv;o.textContent='最低分 ≥'+mv;ms.appendChild(o)}
   ms.value=mv;
   document.getElementById('cgExcludeSent').checked=f.exclude_sent!==false;
   cgPickedIds=Array.isArray(f.customer_ids)?f.customer_ids.slice():[];
   cgRenderPicked();
-  var dd={countries:f.countries,segments:f.segments,products:f.products};
-  if(!cgDDLoaded){cgPendingDD=dd}else{Object.keys(dd).forEach(function(k){cgDDApply(k,dd[k])})}
+  var dd={countries:f.countries,segments:f.segments,products:f.products,keywords:f.keywords};
+  if(cgDDState!=='ready'){cgPendingDD=dd}else{Object.keys(dd).forEach(function(k){cgDDApply(k,dd[k])})}
 }
 function cgRenderPicked(){
   document.getElementById('cgPicked').textContent=cgPickedIds.length?('已选 '+cgPickedIds.length+' 家：'+cgPickedIds.slice(0,20).join(', ')+(cgPickedIds.length>20?' …':'')):'未勾选';

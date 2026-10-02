@@ -13,7 +13,7 @@ Cloudflare Workers 上的客户情报自动化管道：定时抓取客户信息 
 ## 控制面板
 
 ```text
-https://<worker-domain>/admin           客户管理 + 评分分布 + CSV 导入 + 海选预过滤
+https://<worker-domain>/admin           客户管理 + 评分分布 + CSV 导入 + 海选预过滤（筛选项下拉勾选）
 https://<worker-domain>/admin/keys      动态 Key 池 / 冷却监控 / 用量 / 凭据加密
 https://<worker-domain>/admin/outreach  开发信生成、Gmail 发送、🎯 定向群发
 https://<worker-domain>/admin/secrets   经 Cloudflare API 直写 Worker Secrets
@@ -44,7 +44,7 @@ https://<worker-domain>/admin/secrets   经 Cloudflare API 直写 Worker Secrets
 ```bash
 cd crm-ai-worker
 npm ci
-npm test          # vitest（148 个测试 / 10 个文件）
+npm test          # vitest（162 个测试 / 11 个文件）
 npm run typecheck
 node scripts/check-panel.mjs   # 校验全部 5 个面板模板：JS 可解析、id 唯一、getElementById 有对应元素
 npx wrangler dev --test-scheduled

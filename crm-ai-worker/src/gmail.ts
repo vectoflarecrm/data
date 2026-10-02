@@ -38,6 +38,8 @@ const DEFAULT_SEND_DELAY_MS = 3_000;
 const TOKEN_SAFETY_WINDOW_MS = 60_000;
 const EMAIL_ADDRESS_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
 
+import { decryptSecret } from "./credential-crypto";
+
 /* ── Base64URL helpers ── */
 
 function b64urlEncode(bytes: ArrayBuffer | Uint8Array): string {
@@ -322,7 +324,14 @@ async function listPoolAccounts(env: GmailEnv, onlyEnabled = false): Promise<Poo
               enabled, last_error, cooldown_until
        FROM gmail_accounts ${onlyEnabled ? "WHERE enabled = 1" : ""} ORDER BY id`,
     ).all<PoolAccount>();
-    return (rows.results ?? []).map((r) => ({ ...r, credential_type: r.credential_type || "service_account" }));
+    // private_key is stored AES-GCM encrypted (enc:v1:…); legacy plaintext rows
+    // pass through decryptSecret unchanged, so old accounts keep working
+    // without a migration.
+    return await Promise.all((rows.results ?? []).map(async (r) => ({
+      ...r,
+      credential_type: r.credential_type || "service_account",
+      private_key: await decryptSecret(r.private_key, env),
+    })));
   } catch {
     return [];
   }
