@@ -4,6 +4,7 @@ import { collectKeyPool, buildKeyOrder } from "./key-pool";
 import { getProviderState, isProviderUsable, noteProviderKeyError, noteProviderKeySuccess, noteKeyUsage, keyHealthName } from "./provider-keys";
 import { assertPublicHttpUrl } from "./security/outbound-url";
 import { writeAuditLog } from "./audit/audit-log";
+import { startResearchRun, completeResearchRun, appendFieldEvidence, newProvenance, type AnalysisProvenance } from "./research-run";
 
 export interface CustomerRow {
   id: number;
@@ -1163,6 +1164,7 @@ async function analyzeWithGemini(
   researchContext: string,
   env: Env,
   controller: AbortController,
+  prov: AnalysisProvenance,
 ): Promise<CustomerAnalysis | null> {
   // D1-first key resolution (方案B): panel-managed api_configs rows take
   // priority; env secrets remain as bootstrap fallback.
@@ -1313,6 +1315,8 @@ async function analyzeWithGemini(
           ).candidates?.[0]?.content?.parts?.[0]?.text;
           if (typeof content === "string") {
             await noteProviderKeySuccess(env, "gemini", entry);
+            prov.provider = "gemini";
+            prov.model = m;
             return parseAnalysis(content);
           }
         }
@@ -1340,6 +1344,7 @@ async function analyzeWithGroq(
   researchContext: string,
   env: Env,
   controller: AbortController,
+  prov: AnalysisProvenance,
 ): Promise<CustomerAnalysis | null> {
   const fallbackModel = env.GROQ_MODEL || "llama-3.1-70b-versatile";
   const state = await getProviderState(env, "groq");
@@ -1350,6 +1355,8 @@ async function analyzeWithGroq(
     try {
       const analysis = await openaiCompatibleAnalyze("https://api.groq.com/openai/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
       await noteProviderKeySuccess(env, "groq", entry);
+      prov.provider = "groq";
+      prov.model = entry.model || fallbackModel;
       return analysis;
     } catch (e) {
       await noteProviderKeyError(env, "groq", entry, e instanceof Error ? e.message : String(e));
@@ -1363,6 +1370,7 @@ async function analyzeWithCerebras(
   researchContext: string,
   env: Env,
   controller: AbortController,
+  prov: AnalysisProvenance,
 ): Promise<CustomerAnalysis | null> {
   // llama-3.3-70b: free tier serves 70B-class models; 8B failed to follow the
   // strict JSON extraction schema reliably on crawler-grade tasks.
@@ -1375,6 +1383,8 @@ async function analyzeWithCerebras(
     try {
       const analysis = await openaiCompatibleAnalyze("https://api.cerebras.ai/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
       await noteProviderKeySuccess(env, "cerebras", entry);
+      prov.provider = "cerebras";
+      prov.model = entry.model || fallbackModel;
       return analysis;
     } catch (e) {
       await noteProviderKeyError(env, "cerebras", entry, e instanceof Error ? e.message : String(e));
@@ -1388,6 +1398,7 @@ async function analyzeWithMistral(
   researchContext: string,
   env: Env,
   controller: AbortController,
+  prov: AnalysisProvenance,
 ): Promise<CustomerAnalysis | null> {
   const fallbackModel = env.MISTRAL_MODEL || "mistral-large-latest";
   const state = await getProviderState(env, "mistral");
@@ -1398,6 +1409,8 @@ async function analyzeWithMistral(
     try {
       const analysis = await openaiCompatibleAnalyze("https://api.mistral.ai/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
       await noteProviderKeySuccess(env, "mistral", entry);
+      prov.provider = "mistral";
+      prov.model = entry.model || fallbackModel;
       return analysis;
     } catch (e) {
       await noteProviderKeyError(env, "mistral", entry, e instanceof Error ? e.message : String(e));
@@ -1411,6 +1424,7 @@ async function analyzeWithDeepSeek(
   researchContext: string,
   env: Env,
   controller: AbortController,
+  prov: AnalysisProvenance,
 ): Promise<CustomerAnalysis | null> {
   const fallbackModel = env.DEEPSEEK_MODEL || "deepseek-chat";
   const state = await getProviderState(env, "deepseek");
@@ -1421,6 +1435,8 @@ async function analyzeWithDeepSeek(
     try {
       const analysis = await openaiCompatibleAnalyze("https://api.deepseek.com/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
       await noteProviderKeySuccess(env, "deepseek", entry);
+      prov.provider = "deepseek";
+      prov.model = entry.model || fallbackModel;
       return analysis;
     } catch (e) {
       await noteProviderKeyError(env, "deepseek", entry, e instanceof Error ? e.message : String(e));
@@ -1434,6 +1450,7 @@ async function analyzeWithZhipu(
   researchContext: string,
   env: Env,
   controller: AbortController,
+  prov: AnalysisProvenance,
 ): Promise<CustomerAnalysis | null> {
   // glm-4.7-flash: 30B-class, 200K context, permanently free — well above
   // glm-4-flash for structured crawler-data extraction.
@@ -1446,6 +1463,8 @@ async function analyzeWithZhipu(
     try {
       const analysis = await openaiCompatibleAnalyze("https://open.bigmodel.cn/api/paas/v4/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
       await noteProviderKeySuccess(env, "zhipu", entry);
+      prov.provider = "zhipu";
+      prov.model = entry.model || fallbackModel;
       return analysis;
     } catch (e) {
       await noteProviderKeyError(env, "zhipu", entry, e instanceof Error ? e.message : String(e));
@@ -1459,6 +1478,7 @@ async function analyzeWithNvidia(
   researchContext: string,
   env: Env,
   controller: AbortController,
+  prov: AnalysisProvenance,
 ): Promise<CustomerAnalysis | null> {
   const fallbackModel = env.NVIDIA_MODEL || "meta/llama-3.3-70b-instruct";
   const state = await getProviderState(env, "nvidia");
@@ -1469,6 +1489,8 @@ async function analyzeWithNvidia(
     try {
       const analysis = await openaiCompatibleAnalyze("https://integrate.api.nvidia.com/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
       await noteProviderKeySuccess(env, "nvidia", entry);
+      prov.provider = "nvidia";
+      prov.model = entry.model || fallbackModel;
       return analysis;
     } catch (e) {
       await noteProviderKeyError(env, "nvidia", entry, e instanceof Error ? e.message : String(e));
@@ -1482,6 +1504,7 @@ async function analyzeWithOpenRouter(
   researchContext: string,
   env: Env,
   controller: AbortController,
+  prov: AnalysisProvenance,
 ): Promise<CustomerAnalysis | null> {
   const fallbackModel = env.OPENROUTER_MODEL || "google/gemini-2.5-flash";
   const state = await getProviderState(env, "openrouter");
@@ -1492,6 +1515,8 @@ async function analyzeWithOpenRouter(
     try {
       const analysis = await openaiCompatibleAnalyze("https://openrouter.ai/api/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
       await noteProviderKeySuccess(env, "openrouter", entry);
+      prov.provider = "openrouter";
+      prov.model = entry.model || fallbackModel;
       return analysis;
     } catch (e) {
       await noteProviderKeyError(env, "openrouter", entry, e instanceof Error ? e.message : String(e));
@@ -1505,6 +1530,7 @@ async function analyzeWithAmd(
   researchContext: string,
   env: Env,
   controller: AbortController,
+  prov: AnalysisProvenance,
 ): Promise<CustomerAnalysis | null> {
   // AMD Radeon Cloud free model APIs (OpenAI-compatible). Registration:
   // https://developer.amd.com.cn/radeon/tokenfactory (GitHub login, no card).
@@ -1519,6 +1545,8 @@ async function analyzeWithAmd(
       // parseAnalysis still validates/normalizes the output.
       const analysis = await openaiCompatibleAnalyze("https://developer.amd.com.cn/radeon/api/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller, false);
       await noteProviderKeySuccess(env, "amd", entry);
+      prov.provider = "amd";
+      prov.model = entry.model || fallbackModel;
       return analysis;
     } catch (e) {
       await noteProviderKeyError(env, "amd", entry, e instanceof Error ? e.message : String(e));
@@ -1531,6 +1559,7 @@ async function analyzeCustomer(
   customer: CustomerRow,
   researchContext: string,
   env: Env,
+  prov: AnalysisProvenance,
 ): Promise<CustomerAnalysis> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
@@ -1553,47 +1582,47 @@ async function analyzeCustomer(
       throw new Error("所有AI Provider均不可用，请配置至少一个AI API Key");
     }
     // Try Gemini first
-    let result = await analyzeWithGemini(customer, researchContext, env, controller);
+    let result = await analyzeWithGemini(customer, researchContext, env, controller, prov);
     if (result) return result;
     ensureNotAborted();
 
     // Fallback to Groq
-    result = await analyzeWithGroq(customer, researchContext, env, controller);
+    result = await analyzeWithGroq(customer, researchContext, env, controller, prov);
     if (result) return result;
     ensureNotAborted();
 
     // Fallback to Cerebras (fast open models, free tier)
-    result = await analyzeWithCerebras(customer, researchContext, env, controller);
+    result = await analyzeWithCerebras(customer, researchContext, env, controller, prov);
     if (result) return result;
     ensureNotAborted();
 
     // Fallback to Zhipu GLM-4-Flash (permanently free, China-direct)
-    result = await analyzeWithZhipu(customer, researchContext, env, controller);
+    result = await analyzeWithZhipu(customer, researchContext, env, controller, prov);
     if (result) return result;
     ensureNotAborted();
 
     // Fallback to NVIDIA NIM (free credits, sits late to conserve them)
-    result = await analyzeWithNvidia(customer, researchContext, env, controller);
+    result = await analyzeWithNvidia(customer, researchContext, env, controller, prov);
     if (result) return result;
     ensureNotAborted();
 
     // Fallback to AMD Radeon Cloud (free model APIs: DeepSeek-V4-Flash etc.)
-    result = await analyzeWithAmd(customer, researchContext, env, controller);
+    result = await analyzeWithAmd(customer, researchContext, env, controller, prov);
     if (result) return result;
     ensureNotAborted();
 
     // Fallback to Mistral
-    result = await analyzeWithMistral(customer, researchContext, env, controller);
+    result = await analyzeWithMistral(customer, researchContext, env, controller, prov);
     if (result) return result;
     ensureNotAborted();
 
     // Fallback to DeepSeek
-    result = await analyzeWithDeepSeek(customer, researchContext, env, controller);
+    result = await analyzeWithDeepSeek(customer, researchContext, env, controller, prov);
     if (result) return result;
     ensureNotAborted();
 
     // Fallback to OpenRouter
-    result = await analyzeWithOpenRouter(customer, researchContext, env, controller);
+    result = await analyzeWithOpenRouter(customer, researchContext, env, controller, prov);
     if (result) return result;
     ensureNotAborted();
 
@@ -1871,7 +1900,14 @@ interface CustomerProcessResult {
 
 async function processCustomer(customer: CustomerRow, env: Env): Promise<CustomerProcessResult> {
   const retryCount = getRetryCount(customer.remarks);
+  // Stage 14 (spec §15): every attempt opens a research_run; evidence rows
+  // reference it and are APPENDED (history is superseded via is_current, never
+  // deleted). Provenance writes fail open — they are an auditability layer,
+  // never a reason to lose research that already spent search credits.
+  const provenance = newProvenance();
+  let researchRunId: string | null = null;
   try {
+    researchRunId = await startResearchRun(env, customer.company_id);
     // Research reuse: if a prior attempt already crawled and saved research,
     // skip the paid steps below. Every failure the pipeline can hit (AI
     // timeout, provider 429, pool cooldown) happens AFTER research, so a
@@ -1992,6 +2028,9 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
     // clearly unrelated companies (runs on free Workers AI Neurons).
     if (isRelevancePrecheckEnabled(env) && !(await runRelevancePrecheck(env, customer, researchForAi))) {
       const skipRemarks = withCompanyMarker("预检判定与水上运动行业无关（Workers AI 免费预检，未消耗付费 token）", customer.company_id);
+      // The precheck was this run's decision-maker — close the run with its
+      // provenance so the audit trail names the actual judge.
+      await completeResearchRun(env, researchRunId, { provider: "workers-ai", model: RELEVANCE_MODEL });
       return {
         update: env.DB.prepare(`
           UPDATE customers
@@ -2003,7 +2042,7 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
     }
 
     // Step 5: AI deep analysis
-    const analysis = await analyzeCustomer(customer, researchForAi, env);
+    const analysis = await analyzeCustomer(customer, researchForAi, env, provenance);
     const personas = JSON.stringify(analysis.personas_and_solutions);
     const remarks = withCompanyMarker(analysis.remarks, customer.company_id);
     // Cold-email-ready distillations: persisted as JSON columns so the outreach
@@ -2067,19 +2106,21 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
       }
     }
 
-    // Field-level evidence trail: replaces prior rows for this company so a
-    // re-analysis always reflects the latest verification pass.
+    // Field-level evidence trail (docx 建议七, Stage 14 spec §15): append-only.
+    // New rows supersede per field via is_current/valid_from/valid_until — the
+    // previous verification pass stays queryable — and carry the run id plus
+    // source/content hashes and parser/model provenance. Replaces the old
+    // DELETE-then-INSERT that destroyed the prior trail on every re-research.
     if (analysis.field_evidence.length > 0) {
-      await env.DB.prepare(`DELETE FROM evidence WHERE company_id = ?`).bind(customer.company_id).run();
-      const evidenceStmts = analysis.field_evidence.map((e) =>
-        env.DB.prepare(
-          `INSERT INTO evidence (company_id, field_name, field_value, source_url, source_type, evidence_text, confidence)
-           VALUES (?, ?, ?, ?, 'ai_analysis', ?, ?)`
-        ).bind(customer.company_id, e.field_name, e.field_value, e.source_url ?? null, e.evidence_text ?? null, e.confidence ?? null)
-      );
-      await env.DB.batch(evidenceStmts);
+      await appendFieldEvidence(env, {
+        companyId: customer.company_id,
+        runId: researchRunId,
+        provenance,
+        entries: analysis.field_evidence,
+      });
     }
 
+    await completeResearchRun(env, researchRunId, provenance);
     return {
       update: env.DB.prepare(`
         UPDATE customers
@@ -2090,6 +2131,10 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
     };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    // Stage 14: the attempt failed — close its run as failed with the reason
+    // (no-op when the run could not be opened; provider/model stay null when
+    // the failure happened before any analysis was produced).
+    await completeResearchRun(env, researchRunId, provenance, { error: reason });
     // Rate-limit rejections (429 / full-pool cooldown) are infinite-retry:
     // they depend on other tasks releasing quota, not on this record being
     // broken, so they must never consume a retry slot or burn the record.

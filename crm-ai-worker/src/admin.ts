@@ -200,16 +200,35 @@ interface EvidenceRow {
   evidence_text: string | null;
   confidence: number | null;
   collected_at: string;
+  // Stage 14 (spec §15): 1 = current fact, 0 = superseded history row.
+  is_current?: number | null;
 }
 
-async function getCustomerEvidence(env: AdminEnv, companyId: string): Promise<EvidenceRow[]> {
-  const result = await env.DB.prepare(
-    `SELECT id, field_name, field_value, source_url, source_type, evidence_text, confidence, collected_at
-     FROM evidence WHERE company_id = ? ORDER BY confidence DESC, collected_at DESC LIMIT 30`,
-  )
-    .bind(companyId)
-    .all<EvidenceRow>();
-  return result.results;
+/** Exported for tests (tests/evidence-v2.test.ts). */
+export async function getCustomerEvidence(env: AdminEnv, companyId: string): Promise<EvidenceRow[]> {
+  // Stage 14 (spec §15): evidence is append-only, so current rows are ordered
+  // before superseded history within the same confidence/age ordering. Degrades
+  // to the legacy query while the migration is pending (column missing).
+  try {
+    const result = await env.DB.prepare(
+      `SELECT id, field_name, field_value, source_url, source_type, evidence_text, confidence, collected_at, is_current
+       FROM evidence WHERE company_id = ? ORDER BY is_current DESC, confidence DESC, collected_at DESC LIMIT 30`,
+    )
+      .bind(companyId)
+      .all<EvidenceRow>();
+    return result.results;
+  } catch (e) {
+    if (e instanceof Error && e.message.includes("no such column")) {
+      const legacy = await env.DB.prepare(
+        `SELECT id, field_name, field_value, source_url, source_type, evidence_text, confidence, collected_at
+         FROM evidence WHERE company_id = ? ORDER BY confidence DESC, collected_at DESC LIMIT 30`,
+      )
+        .bind(companyId)
+        .all<EvidenceRow>();
+      return legacy.results;
+    }
+    throw e;
+  }
 }
 
 const CUSTOMER_COLUMNS = `

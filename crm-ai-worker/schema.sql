@@ -247,6 +247,10 @@ CREATE INDEX IF NOT EXISTS idx_gmail_send_log_email ON gmail_send_log(outreach_e
 -- Field-level evidence trail (docx 建议七): every AI-judged fact keeps its
 -- source URL, quoted evidence text and confidence, so a wrong judgement can be
 -- traced and re-processed instead of silently overwriting the record.
+-- Stage 14 (spec §15) — Evidence V2: the trail is APPEND-ONLY. Re-research
+-- never deletes history; prior rows for a re-asserted field are superseded via
+-- is_current = 0 + valid_until, and every row carries the research run and
+-- provenance (parser/model versions, source/content hashes).
 CREATE TABLE IF NOT EXISTS evidence (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   company_id TEXT NOT NULL,
@@ -257,10 +261,35 @@ CREATE TABLE IF NOT EXISTS evidence (
   source_type TEXT,
   evidence_text TEXT,
   confidence REAL,
-  collected_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  collected_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  research_run_id TEXT,
+  source_id TEXT,
+  source_hash TEXT,
+  content_hash TEXT,
+  parser_version TEXT,
+  model_name TEXT,
+  model_version TEXT,
+  retrieved_at TEXT,
+  is_current INTEGER NOT NULL DEFAULT 1,
+  valid_from TEXT,
+  valid_until TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_evidence_company ON evidence(company_id, field_name);
+
+-- Research runs (spec §15.1): one row per research attempt; evidence rows
+-- reference the run that produced them. status: running → completed/failed.
+CREATE TABLE IF NOT EXISTS research_runs (
+  id TEXT PRIMARY KEY,
+  customer_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  parser_version TEXT,
+  model_name TEXT,
+  model_version TEXT,
+  error TEXT
+);
 
 -- Raw import layer (docx 建议三): original uploaded rows are immutable; the
 -- normalized/enriched customer rows reference back to them. Re-importing the

@@ -365,6 +365,24 @@ jobs:
           info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('outreach_emails') WHERE name IN ('idempotency_key','send_attempts','locked_at','locked_by','last_error','gmail_message_id')")"
           echo "$info" | grep -q '"n": 6' || { echo 'Migration failed: outreach_emails send-state columns missing'; exit 1; }
 
+      - name: Migrate research runs + evidence provenance (Security V2 Stage 14)
+        # Evidence V2 (spec §15): research_runs (new table, created by
+        # schema.sql via IF NOT EXISTS — the CREATE here is belt-and-suspenders)
+        # plus append-only evidence columns. Existing rows become is_current = 1
+        # via the ALTER's NOT NULL DEFAULT — they were the current facts at
+        # migration time. Same per-statement ALTER pattern as above.
+        run: |
+          npx wrangler d1 execute crm-ai-db --remote --command "CREATE TABLE IF NOT EXISTS research_runs (id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT, parser_version TEXT, model_name TEXT, model_version TEXT, error TEXT)" || true
+          for col in research_run_id:TEXT source_id:TEXT source_hash:TEXT content_hash:TEXT parser_version:TEXT model_name:TEXT model_version:TEXT retrieved_at:TEXT "is_current:INTEGER NOT NULL DEFAULT 1" valid_from:TEXT valid_until:TEXT; do
+            name="${col%%:*}"
+            def="${col#*:}"
+            npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE evidence ADD COLUMN $name $def" 2>&1 | grep -q 'duplicate column name' && echo "$name already exists" || true
+          done
+          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('evidence') WHERE name IN ('research_run_id','source_id','source_hash','content_hash','parser_version','model_name','model_version','retrieved_at','is_current','valid_from','valid_until')")"
+          echo "$info" | grep -q '"n": 11' || { echo 'Migration failed: evidence provenance columns missing'; exit 1; }
+          info2="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'research_runs'")"
+          echo "$info2" | grep -q '"n": 1' || { echo 'Migration failed: research_runs table missing'; exit 1; }
+
       - name: Typecheck
         run: npm run typecheck
 
