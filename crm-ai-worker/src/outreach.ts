@@ -1,5 +1,5 @@
 import { AdminEnv } from "./admin";
-import { rpmLimitFor, tryAcquireRpmSlot, rpmEnvOverride } from "./rate-limit";
+import { rpmLimitFor, acquireRpmSlot, rpmEnvOverride } from "./rate-limit";
 import { collectKeyPool } from "./key-pool";
 import { getProviderState, isProviderUsable, noteProviderKeyError, noteProviderKeySuccess, type ProviderKeyEntry } from "./provider-keys";
 
@@ -681,7 +681,7 @@ async function callAiForOutreach(
       const entry = geminiKeys[(start + i) % geminiKeys.length];
       // Proactive RPM guard: when the per-minute cap is consumed, stop calling
       // Gemini entirely and let the fallback providers take over.
-      if (!tryAcquireRpmSlot("gemini", geminiRpmLimit)) break;
+      if (!(await acquireRpmSlot(env, "gemini", geminiRpmLimit))) break;
       try {
         const result = await callGeminiOutreach(env, prompt, entry.key);
         await noteProviderKeySuccess(env, "gemini", entry);
@@ -741,7 +741,7 @@ async function callAiForOutreach(
   }
   for (const api of openaiKeys) {
     if (!api.entry.key) continue;
-    if (!tryAcquireRpmSlot(api.provider, openaiRpmLimits[api.provider])) continue;
+    if (!(await acquireRpmSlot(env, api.provider, openaiRpmLimits[api.provider]))) continue;
     try {
       const result = await callOpenAIOutreach(api.url, api.entry.key, api.model, prompt, api.jsonMode);
       await noteProviderKeySuccess(env, api.provider, api.entry);

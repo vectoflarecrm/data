@@ -1,3 +1,5 @@
+import { providerRateLimiter } from "./rate-limiter";
+
 // Proactive per-provider RPM (requests per minute) limiter.
 //
 // Cloudflare Workers isolates have isolated memory, so this sliding window is
@@ -15,6 +17,12 @@
 // project pools multiple keys per provider. The aggregate provider cap is
 // therefore per-key RPM x number of configured keys, unless overridden via
 // the optional <PROVIDER>_RPM secret (interpreted as the TOTAL provider RPM).
+//
+// Security V2 (spec §17): the per-isolate window below remains the LOCAL
+// FAST LIMITER; acquireRpmSlot() layers a D1-backed distributed window on
+// top so the aggregate provider cap holds globally across isolates and
+// worker instances. The switchable RateLimiter abstraction lives in
+// rate-limiter.ts.
 
 export type ProviderId =
   | "gemini"
@@ -52,7 +60,7 @@ export const PER_KEY_RPM: Record<ProviderId, number> = {
   openrouter: 15,
 };
 
-const WINDOW_MS = 60_000;
+export const WINDOW_MS = 60_000;
 
 // provider -> timestamps of requests inside the current minute
 const buckets = new Map<string, number[]>();
@@ -123,4 +131,21 @@ export function tryAcquireRpmSlot(provider: ProviderId, limit: number): boolean 
 /** Test-only: clear all in-memory RPM buckets (window state is per-isolate). */
 export function resetRpmBuckets(): void {
   buckets.clear();
+}
+
+/**
+ * Security V2 (spec §17): async RPM acquisition through the switchable
+ * RateLimiter abstraction — the per-isolate sliding window (local fast
+ * limiter) first, then the D1-backed distributed fixed window so the
+ * aggregate provider cap holds across isolates and worker instances.
+ * Prefer this over the sync tryAcquireRpmSlot whenever an await is
+ * acceptable; the D1 tier fails open, so a migration-pending or degraded
+ * D1 degrades to exactly the pre-Stage-16 single-isolate behavior.
+ */
+export async function acquireRpmSlot(
+  env: { DB: D1Database },
+  provider: ProviderId,
+  limit: number,
+): Promise<boolean> {
+  return providerRateLimiter(env).acquire(provider, limit, WINDOW_MS);
 }

@@ -1,5 +1,5 @@
 import { handleAdminRequest } from "./admin";
-import { rpmLimitFor, tryAcquireRpmSlot, rpmEnvOverride } from "./rate-limit";
+import { rpmLimitFor, acquireRpmSlot, rpmEnvOverride } from "./rate-limit";
 import { collectKeyPool, buildKeyOrder } from "./key-pool";
 import { getProviderState, isProviderUsable, noteProviderKeyError, noteProviderKeySuccess, noteKeyUsage, keyHealthName } from "./provider-keys";
 import { assertPublicHttpUrl } from "./security/outbound-url";
@@ -1194,7 +1194,7 @@ async function analyzeWithGemini(
     for (const m of models) {
       // Proactive RPM guard: once this minute's cap is consumed, hand over to
       // the fallback chain instead of hard-hitting the upstream free tier.
-      if (!tryAcquireRpmSlot("gemini", geminiRpmLimit)) return null;
+      if (!(await acquireRpmSlot(env, "gemini", geminiRpmLimit))) return null;
       try {
         const response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m)}:generateContent`,
@@ -1351,7 +1351,7 @@ async function analyzeWithGroq(
   if (!isProviderUsable(state)) return null;
   const groqRpmLimit = state.rpmTotal ?? rpmLimitFor("groq", state.keys.length, rpmEnvOverride(env, "groq"));
   for (const entry of state.keys) {
-    if (!tryAcquireRpmSlot("groq", entry.rpmLimit ?? groqRpmLimit)) return null;
+    if (!(await acquireRpmSlot(env, "groq", entry.rpmLimit ?? groqRpmLimit))) return null;
     try {
       const analysis = await openaiCompatibleAnalyze("https://api.groq.com/openai/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
       await noteProviderKeySuccess(env, "groq", entry);
@@ -1379,7 +1379,7 @@ async function analyzeWithCerebras(
   if (!isProviderUsable(state)) return null;
   const cerebrasRpmLimit = state.rpmTotal ?? rpmLimitFor("cerebras", state.keys.length, rpmEnvOverride(env, "cerebras"));
   for (const entry of state.keys) {
-    if (!tryAcquireRpmSlot("cerebras", entry.rpmLimit ?? cerebrasRpmLimit)) return null;
+    if (!(await acquireRpmSlot(env, "cerebras", entry.rpmLimit ?? cerebrasRpmLimit))) return null;
     try {
       const analysis = await openaiCompatibleAnalyze("https://api.cerebras.ai/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
       await noteProviderKeySuccess(env, "cerebras", entry);
@@ -1405,7 +1405,7 @@ async function analyzeWithMistral(
   if (!isProviderUsable(state)) return null;
   const mistralRpmLimit = state.rpmTotal ?? rpmLimitFor("mistral", state.keys.length, rpmEnvOverride(env, "mistral"));
   for (const entry of state.keys) {
-    if (!tryAcquireRpmSlot("mistral", entry.rpmLimit ?? mistralRpmLimit)) return null;
+    if (!(await acquireRpmSlot(env, "mistral", entry.rpmLimit ?? mistralRpmLimit))) return null;
     try {
       const analysis = await openaiCompatibleAnalyze("https://api.mistral.ai/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
       await noteProviderKeySuccess(env, "mistral", entry);
@@ -1431,7 +1431,7 @@ async function analyzeWithDeepSeek(
   if (!isProviderUsable(state)) return null;
   const deepseekRpmLimit = state.rpmTotal ?? rpmLimitFor("deepseek", state.keys.length, rpmEnvOverride(env, "deepseek"));
   for (const entry of state.keys) {
-    if (!tryAcquireRpmSlot("deepseek", entry.rpmLimit ?? deepseekRpmLimit)) return null;
+    if (!(await acquireRpmSlot(env, "deepseek", entry.rpmLimit ?? deepseekRpmLimit))) return null;
     try {
       const analysis = await openaiCompatibleAnalyze("https://api.deepseek.com/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
       await noteProviderKeySuccess(env, "deepseek", entry);
@@ -1459,7 +1459,7 @@ async function analyzeWithZhipu(
   if (!isProviderUsable(state)) return null;
   const zhipuRpmLimit = state.rpmTotal ?? rpmLimitFor("zhipu", state.keys.length, rpmEnvOverride(env, "zhipu"));
   for (const entry of state.keys) {
-    if (!tryAcquireRpmSlot("zhipu", entry.rpmLimit ?? zhipuRpmLimit)) return null;
+    if (!(await acquireRpmSlot(env, "zhipu", entry.rpmLimit ?? zhipuRpmLimit))) return null;
     try {
       const analysis = await openaiCompatibleAnalyze("https://open.bigmodel.cn/api/paas/v4/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
       await noteProviderKeySuccess(env, "zhipu", entry);
@@ -1485,7 +1485,7 @@ async function analyzeWithNvidia(
   if (!isProviderUsable(state)) return null;
   const nvidiaRpmLimit = state.rpmTotal ?? rpmLimitFor("nvidia", state.keys.length, rpmEnvOverride(env, "nvidia"));
   for (const entry of state.keys) {
-    if (!tryAcquireRpmSlot("nvidia", entry.rpmLimit ?? nvidiaRpmLimit)) return null;
+    if (!(await acquireRpmSlot(env, "nvidia", entry.rpmLimit ?? nvidiaRpmLimit))) return null;
     try {
       const analysis = await openaiCompatibleAnalyze("https://integrate.api.nvidia.com/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
       await noteProviderKeySuccess(env, "nvidia", entry);
@@ -1511,7 +1511,7 @@ async function analyzeWithOpenRouter(
   if (!isProviderUsable(state)) return null;
   const openrouterRpmLimit = state.rpmTotal ?? rpmLimitFor("openrouter", state.keys.length, rpmEnvOverride(env, "openrouter"));
   for (const entry of state.keys) {
-    if (!tryAcquireRpmSlot("openrouter", entry.rpmLimit ?? openrouterRpmLimit)) return null;
+    if (!(await acquireRpmSlot(env, "openrouter", entry.rpmLimit ?? openrouterRpmLimit))) return null;
     try {
       const analysis = await openaiCompatibleAnalyze("https://openrouter.ai/api/v1/chat/completions", entry.key, entry.model || fallbackModel, customer, researchContext, controller);
       await noteProviderKeySuccess(env, "openrouter", entry);
@@ -1539,7 +1539,7 @@ async function analyzeWithAmd(
   if (!isProviderUsable(state)) return null;
   const amdRpmLimit = state.rpmTotal ?? rpmLimitFor("amd", state.keys.length, rpmEnvOverride(env, "amd"));
   for (const entry of state.keys) {
-    if (!tryAcquireRpmSlot("amd", entry.rpmLimit ?? amdRpmLimit)) return null;
+    if (!(await acquireRpmSlot(env, "amd", entry.rpmLimit ?? amdRpmLimit))) return null;
     try {
       // AMD public free endpoint: JSON mode unreliable → prompt hint only;
       // parseAnalysis still validates/normalizes the output.

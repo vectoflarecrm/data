@@ -485,3 +485,16 @@ CREATE TABLE IF NOT EXISTS campaign_locks (
   locked_at TEXT NOT NULL,
   expires_at TEXT NOT NULL
 );
+
+-- Security V2 Stage 16 (spec §17): D1-backed fixed-window counter for the
+-- distributed provider RPM limiter (src/rate-limiter.ts). One row per key;
+-- window_start rolls forward in place on each window change, so the table
+-- never grows. The atomic upsert (INSERT ... ON CONFLICT ... RETURNING)
+-- both increments and returns the count, so concurrent isolates can never
+-- overshoot the provider cap. Missing table degrades fail-open to the
+-- per-isolate limiter — see src/rate-limiter.ts.
+CREATE TABLE IF NOT EXISTS rate_limit_windows (
+  key TEXT PRIMARY KEY,
+  window_start INTEGER NOT NULL,
+  count INTEGER NOT NULL DEFAULT 1
+);
