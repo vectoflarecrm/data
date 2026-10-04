@@ -84,6 +84,15 @@ export async function getEncKeys(env: unknown): Promise<CredentialKeys | null> {
   return importKeys((env as Record<string, unknown>).CREDENTIAL_ENC_KEY);
 }
 
+/** Resolves the previous rotation key (CREDENTIAL_ENC_KEY_PREVIOUS), or
+ * null when unset. Rotation keeps decryption working across a master-key
+ * change: reads fall back to this key, and the admin reseal sweeps
+ * (keys + gmail) re-seal rows onto the current key
+ * (see docs/backup-recovery.md). */
+export async function getPreviousEncKeys(env: unknown): Promise<CredentialKeys | null> {
+  return importKeys((env as Record<string, unknown>).CREDENTIAL_ENC_KEY_PREVIOUS);
+}
+
 export async function requireEncKeys(env: unknown): Promise<CredentialKeys> {
   return requireKeys(await getEncKeys(env));
 }
@@ -120,18 +129,45 @@ export async function encryptSecret(plain: string, env: unknown): Promise<Encryp
   };
 }
 
-/** Returns cleartext for both new ciphertext and legacy plain rows. */
+/** Attempts decryption with one specific key set; null on any failure
+ * (wrong key, tampered ciphertext, damaged format). Exported for the
+ * rotation sweep, which must distinguish "sealed with the current key"
+ * from "sealed with the previous one" without exceptions as control flow. */
+export async function tryDecryptSecret(stored: string, keys: CredentialKeys): Promise<string | null> {
+  try {
+    const [, , ivPart, ctPart] = stored.split(":");
+    if (!ivPart || !ctPart) return null;
+    const plain = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: base64ToBytes(ivPart) as BufferSource },
+      keys.cipher,
+      base64ToBytes(ctPart) as BufferSource,
+    );
+    return new TextDecoder().decode(plain);
+  } catch {
+    return null;
+  }
+}
+
+/** Returns cleartext for both new ciphertext and legacy plain rows. During a
+ * key rotation (CREDENTIAL_ENC_KEY_PREVIOUS set) rows sealed under the
+ * previous master still decrypt; the reseal sweep then rewrites them onto
+ * the current key so the fallback is a transition state, not a permanent
+ * second key. */
 export async function decryptSecret(stored: string, env: unknown): Promise<string> {
   if (!isEncrypted(stored)) return stored;
-  const keys = await requireEncKeys(env);
+  // Format damage is distinct from a key mismatch: keep the original error
+  // so a corrupted row stays diagnosable without any key material nearby.
   const [, , ivPart, ctPart] = stored.split(":");
   if (!ivPart || !ctPart) throw new Error("密文格式损坏");
-  const plain = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: base64ToBytes(ivPart) as BufferSource },
-    keys.cipher,
-    base64ToBytes(ctPart) as BufferSource,
-  );
-  return new TextDecoder().decode(plain);
+  const keys = await requireEncKeys(env);
+  const plain = await tryDecryptSecret(stored, keys);
+  if (plain !== null) return plain;
+  const previous = await getPreviousEncKeys(env);
+  if (previous) {
+    const legacyPlain = await tryDecryptSecret(stored, previous);
+    if (legacyPlain !== null) return legacyPlain;
+  }
+  throw new Error("密文无法解密：与当前 CREDENTIAL_ENC_KEY 及备用密钥均不匹配");
 }
 
 /* HMAC rather than a bare hash: a plain SHA-256 of a short key is brute

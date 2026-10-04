@@ -21,6 +21,10 @@ import { invalidateProviderCache } from "./provider-keys";
 import {
   encryptSecret,
   decryptSecret,
+  tryDecryptSecret,
+  getPreviousEncKeys,
+  requireEncKeys,
+  type CredentialKeys,
   isEncrypted,
   fingerprint,
   isEncryptionConfigured,
@@ -1183,6 +1187,102 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv, auth: Admi
     });
   }
 
+  // POST /admin/api/keys/reseal — key-rotation sweep (post-V2). encrypt-all
+  // only converts legacy plaintext; reseal rewrites EVERY api_configs row
+  // that is not sealed under the *current* master: rows sealed with
+  // CREDENTIAL_ENC_KEY_PREVIOUS (rotation in progress) and leftover plaintext
+  // both get re-encrypted in place. Idempotent: rows already under the
+  // current key are counted, not touched. Same Stage 4 verification gate as
+  // encrypt-all — decrypt roundtrip + fingerprint must both check out before
+  // a live row is replaced.
+  if (request.method === "POST" && path === "/admin/api/keys/reseal") {
+    // Fail fast before any write: an unconfigured or malformed current key
+    // must not abort halfway through rewriting live credentials.
+    if (!(await isEncryptionConfigured(env))) {
+      return jsonResponse({
+        detail: "尚未配置 CREDENTIAL_ENC_KEY：请先在「🔐 凭据加密」中生成并保存，再执行重密封。",
+      }, 400);
+    }
+    const currentKeys = await requireEncKeys(env);
+    // A malformed PREVIOUS must surface as configuration feedback, not a 500.
+    let previousKeys: CredentialKeys | null;
+    try {
+      previousKeys = await getPreviousEncKeys(env);
+    } catch (e) {
+      return jsonResponse({
+        detail: `CREDENTIAL_ENC_KEY_PREVIOUS 配置无效：${e instanceof Error ? e.message : String(e)}`,
+      }, 400);
+    }
+    const rows = await env.DB.prepare(
+      "SELECT id, provider, api_key FROM api_configs",
+    ).all<{ id: number; provider: string; api_key: string }>();
+
+    let resealed = 0;
+    let alreadyCurrent = 0;
+    const converted: string[] = [];
+    const failed: Array<{ id: number; reason: string }> = [];
+    for (const row of rows.results ?? []) {
+      try {
+        let plain: string | null;
+        if (isEncrypted(row.api_key)) {
+          // Current key opens it → already sealed with the master that is
+          // in force; leave it alone so the sweep is safe to re-run.
+          plain = await tryDecryptSecret(row.api_key, currentKeys);
+          if (plain !== null) {
+            alreadyCurrent++;
+            continue;
+          }
+          // Otherwise the previous rotation key must open it, else the row
+          // is unrecoverable here — keep it and report loudly.
+          plain = previousKeys ? await tryDecryptSecret(row.api_key, previousKeys) : null;
+          if (plain === null) {
+            failed.push({ id: row.id, reason: "当前/备用密钥均无法解密，已跳过（原值未动）" });
+            continue;
+          }
+        } else {
+          // Legacy plaintext — the sweep migrates it too (encrypt-all's job,
+          // but a rotation visit must not leave plaintext behind).
+          plain = row.api_key;
+        }
+        const encrypted = await encryptSecret(plain, env);
+        const roundtrip = await tryDecryptSecret(encrypted.cipher, currentKeys);
+        if (roundtrip !== plain || (await fingerprint(plain, env)) !== encrypted.fingerprint) {
+          failed.push({ id: row.id, reason: "验证失败（回读/指纹不一致），已跳过（原值未动）" });
+          continue;
+        }
+        await env.DB.prepare(
+          `UPDATE api_configs SET api_key = ?, key_hint = ?, key_fingerprint = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+        ).bind(encrypted.cipher, encrypted.hint, encrypted.fingerprint, row.id).run();
+        resealed++;
+        converted.push(row.provider);
+        safeLog("log",
+          `[security-v2:credential-rotation] table=api_configs id=${row.id} provider=${row.provider} event=resealed-under-current-key`,
+        );
+      } catch (error) {
+        failed.push({ id: row.id, reason: error instanceof Error ? error.message : "unknown" });
+      }
+    }
+    for (const provider of new Set(converted)) invalidateProviderCache(provider);
+    const plaintextRemaining = (await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM api_configs WHERE api_key NOT LIKE 'enc:v1:%'`,
+    ).first<{ n: number }>())?.n ?? 0;
+    await auditAdminAction(env, request, auth, "UPDATE_API_KEY", "api_config", null, {
+      via: "reseal",
+      resealed,
+      already_current: alreadyCurrent,
+      previous_key_in_use: previousKeys !== null,
+      failed: failed.length,
+    });
+    return jsonResponse({
+      ok: failed.length === 0,
+      resealed,
+      already_current: alreadyCurrent,
+      plaintext_remaining: plaintextRemaining,
+      failed,
+    });
+  }
+
   // POST /admin/api/keys/encryption-key — mint a candidate CREDENTIAL_ENC_KEY.
   // Returns the value instead of saving it: setting a Worker secret needs the
   // Cloudflare API token, and a generated value the operator cannot retrieve
@@ -1726,6 +1826,85 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
         const msg = e instanceof Error ? e.message : String(e);
         if (msg.includes("CREDENTIAL_ENC_KEY")) return jsonResponse({ detail: msg }, 400);
         return internalErrorResponse("gmail-encrypt-all", e, request);
+      }
+    }
+
+    // POST /admin/api/gmail/reseal — key-rotation sweep for the sender pool
+    // (post-V2), same contract as /admin/api/keys/reseal: rows sealed under
+    // CREDENTIAL_ENC_KEY_PREVIOUS and legacy plaintext private keys are
+    // re-encrypted with the current master; rows already under the current
+    // key are counted, not touched. gmail_accounts carries no fingerprint
+    // columns, so the verification gate is the decrypt roundtrip alone.
+    if (request.method === "POST" && path === "/admin/api/gmail/reseal") {
+      try {
+        if (!(await isEncryptionConfigured(env))) {
+          return jsonResponse({
+            detail: "尚未配置 CREDENTIAL_ENC_KEY：请先在「🔐 凭据加密」中生成并保存，再执行重密封。",
+          }, 400);
+        }
+        const currentKeys = await requireEncKeys(env);
+        const previousKeys = await getPreviousEncKeys(env);
+        const rows = await env.DB.prepare(
+          "SELECT id, private_key FROM gmail_accounts",
+        ).all<{ id: number; private_key: string }>();
+        let resealed = 0;
+        let alreadyCurrent = 0;
+        const failedRows: Array<{ id: number; reason: string }> = [];
+        for (const row of rows.results ?? []) {
+          try {
+            let plain: string | null;
+            if (isEncrypted(row.private_key)) {
+              plain = await tryDecryptSecret(row.private_key, currentKeys);
+              if (plain !== null) {
+                alreadyCurrent++;
+                continue;
+              }
+              plain = previousKeys ? await tryDecryptSecret(row.private_key, previousKeys) : null;
+              if (plain === null) {
+                failedRows.push({ id: row.id, reason: "当前/备用密钥均无法解密，已跳过（原值未动）" });
+                continue;
+              }
+            } else {
+              plain = row.private_key;
+            }
+            const encrypted = await encryptSecret(plain, env);
+            const roundtrip = await tryDecryptSecret(encrypted.cipher, currentKeys);
+            if (roundtrip !== plain) {
+              failedRows.push({ id: row.id, reason: "解密回读不一致，已跳过（原值未动）" });
+              continue;
+            }
+            await env.DB.prepare(
+              "UPDATE gmail_accounts SET private_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            ).bind(encrypted.cipher, row.id).run();
+            resealed++;
+            safeLog("log",
+              `[security-v2:credential-rotation] table=gmail_accounts id=${row.id} event=resealed-under-current-key`,
+            );
+          } catch (error) {
+            failedRows.push({ id: row.id, reason: error instanceof Error ? error.message : "unknown" });
+          }
+        }
+        const plaintextLeft = await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM gmail_accounts WHERE private_key NOT LIKE 'enc:v1:%'",
+        ).first<{ n: number }>();
+        await auditAdminAction(env, request, auth, "UPDATE_GMAIL_ACCOUNT", "gmail_account", null, {
+          via: "reseal",
+          resealed,
+          already_current: alreadyCurrent,
+          previous_key_in_use: previousKeys !== null,
+          failed: failedRows.length,
+        });
+        return jsonResponse({
+          ok: failedRows.length === 0,
+          resealed,
+          already_current: alreadyCurrent,
+          plaintext_remaining: plaintextLeft?.n ?? 0,
+          failed: failedRows,
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes("CREDENTIAL_ENC_KEY")) return jsonResponse({ detail: msg }, 400);
+        return internalErrorResponse("gmail-reseal", e, request);
       }
     }
 

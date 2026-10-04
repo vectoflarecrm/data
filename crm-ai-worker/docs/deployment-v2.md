@@ -30,6 +30,8 @@ Concretely, before every deploy:
 | `GEMINI_MODEL` | Wrangler secret (optional) | model override |
 | `CLOUDFLARE_D1_DATABASE_ID` | GitHub secret | CI substitutes the real D1 id into wrangler.toml (the repo carries a placeholder) |
 | `OUTREACH_DRY_RUN` | var (optional) | **smoke tests only** — see §3. Remove after the smoke pass. |
+| `CREDENTIAL_ENC_KEY_PREVIOUS` | Wrangler secret (optional) | old master during a key rotation; decrypt fallback while set. Run the reseal sweep (docs/backup-recovery.md §4), then **remove it** — it is a transition state, not a permanent second key |
+| `AUDIT_RETENTION_DAYS` | var (optional) | audit_logs horizon: unset → 180 days, `"0"` → keep forever. Pruned by the 5-min cron; every non-empty prune writes an AUDIT_PRUNE row (see `/admin/audit`) |
 
 ## 3. Production smoke tests (spec §32)
 

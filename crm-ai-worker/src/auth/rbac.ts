@@ -109,6 +109,9 @@ export function requiredPermission(url: URL, method: string): Permission | null 
     if (path === "/admin/api/keys/encrypt-all" || path === "/admin/api/keys/encryption-key") {
       return "credentials.write";
     }
+    // Post-V2 key-rotation sweep — rewrites live credentials, same trust
+    // level as encrypt-all.
+    if (path === "/admin/api/keys/reseal") return "credentials.write";
     if (method === "GET") return "providers.read";
     return "providers.write";
   }
@@ -121,6 +124,8 @@ export function requiredPermission(url: URL, method: string): Permission | null 
   // ── Gmail sender pool (/admin/api/gmail…) ──
   if (parts[2] === "gmail") {
     if (path === "/admin/api/gmail/encrypt-all") return "credentials.write";
+    // Post-V2 key-rotation sweep for the sender pool.
+    if (path === "/admin/api/gmail/reseal") return "credentials.write";
     if (path === "/admin/api/gmail/accounts" && method === "GET") return "outreach.read";
     // Account test drives a real send through the account — sender territory.
     if (parts[3] === "accounts" && parts.length === 5 && parts[4] === "test" && method === "POST") {
