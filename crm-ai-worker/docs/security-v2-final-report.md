@@ -45,7 +45,7 @@ Headline outcomes: browser-session auth is gone (hashed, expiring, revocable ses
 
 ## Changes
 
-Stage-by-stage detail lives in `docs/stages/stage-01` … `stage-24`; the running findings ledger is `docs/security-v2-baseline.md` (20 findings, all fixed; plus the explicitly tracked debt register quoted under Remaining Risks).
+Stage-by-stage detail lives in `docs/stages/stage-01` … `stage-26`; the running findings ledger is `docs/security-v2-baseline.md` (20 findings, all fixed; plus the explicitly tracked debt register quoted under Remaining Risks).
 
 - **Stages 1-3 (auth, RBAC, secret-mgmt removal)**: `admin_users`/`admin_sessions`, hashed expiring revocable sessions, login throttling (5 fails/15 min per ident, 30/15 min global), 5-role RBAC gate on every admin route, removal of the worker's Cloudflare-secret mutation surface.
 - **Stage 4 (credential encryption)**: `enc:v1:` AES-GCM-256 envelope, `CREDENTIAL_ENC_KEY` via Wrangler, `key_hint`/`key_fingerprint`, lazy plaintext migration on read.
@@ -62,6 +62,9 @@ Stage-by-stage detail lives in `docs/stages/stage-01` … `stage-24`; the runnin
 - **Stage 23**: concurrency suite (5 files, 59 tests, 10/50/100-task storms) — found and fixed the `sender_client_email` schema drift that would have bricked fresh installs.
 - **Stage 24**: regression gate — full suite, typecheck, build dry-run, panel checks, all green.
 - **Post-spec §31/§32 hardening**: `docs/deployment-v2.md` (the no-staging safe-deploy pipeline + production smoke procedure), an unauthenticated `GET /health` liveness probe (200 only when the D1 binding answers, 503 otherwise), and the `OUTREACH_DRY_RUN` flag — "true"/"1" walks the full send state machine while the Gmail transport stays a no-op (no API call, no reservation, no quota row; rows marked `dry-run-…`), so smoke tests can never send real email.
+- **Post-V2 Stage 25 (audit retention + view)**: `AUDIT_RETENTION_DAYS` (default 180, "0" = keep forever, typo-fail-safe) pruned by the 5-min cron before the claim early-return, every non-empty prune self-recording an `AUDIT_PRUNE` row; read-only `GET /admin/api/audit-logs` (audit.read: cursor paging, action filter, no IP/UA hashes) and the `/admin/audit` panel page.
+- **Post-V2 Stage 26 (key rotation)**: `CREDENTIAL_ENC_KEY_PREVIOUS` decrypt fallback + idempotent `POST /admin/api/keys/reseal` and `POST /admin/api/gmail/reseal` sweeps (credentials.write) that re-encrypt every row onto the current master with the Stage 4 verification gate — rotation is now a documented 5-step procedure instead of panel re-entry (`docs/backup-recovery.md` §4).
+- **Post-V2 verification**: 576/576 tests (48 files: 403 pre-existing + 72 security + 59 concurrency + 9 smoke + 19 retention + 14 rotation), `tsc` exit 0, dry-run 456.28 KiB / gzip 115.15 KiB, 5 panels clean.
 
 ## Database Migrations
 
@@ -129,7 +132,7 @@ Hardened system prompts separate instructions from data; the relevance precheck 
 
 ## Audit Log
 
-Append-only `audit_logs`: actor user/role, action (create/update/delete/login/denial vocabulary), target, `metadata_json`, and since Stage 20 the `request_id` that also appears in the response header and any 500 body — the chain that answers "这一封邮件为什么被发送？". Writes are fail-open by design (a broken audit sink must not take down the panel), which the acceptance suite pins explicitly. Known gap: no retention prune yet (see Remaining Risks).
+Append-only `audit_logs`: actor user/role, action (create/update/delete/login/denial vocabulary), target, `metadata_json`, and since Stage 20 the `request_id` that also appears in the response header and any 500 body — the chain that answers "这一封邮件为什么被发送？". Writes are fail-open by design (a broken audit sink must not take down the panel), which the acceptance suite pins explicitly. Retention is bounded since post-V2 Stage 25: the 5-min cron prunes rows older than `AUDIT_RETENTION_DAYS` (default 180) and records each non-empty prune as an `AUDIT_PRUNE` row; the trail is inspectable via `GET /admin/api/audit-logs` and the `/admin/audit` panel.
 
 ## Rate Limiting
 
@@ -162,8 +165,8 @@ Accepted and documented, none unmitigated:
 2. **Fail-open by design** on audit, evidence and rate-limiter D1 writes (availability over bookkeeping), and on the campaign lock when its table is missing (per-email idempotency remains the hard guarantee). Each fail-open is an explicit, tested policy — a silent one would be a bug.
 3. **Fixed-window rate limiter** can admit up to 2× the cap across a window boundary; documented in `src/rate-limiter.ts`, caught in practice by the reactive `api_key_health` cooldown.
 4. **No FK enforcement on existing tables** (SQLite cannot add FKs without a table rebuild); orphan prevention is structural (documented in stage-17).
-5. **Audit log retention** — `audit_logs` grows unbounded; a prune job is deferred (the table is small in absolute terms for this deployment).
-6. **Single `CREDENTIAL_ENC_KEY`** — losing it means panel re-entry of credentials (recovery path documented in `docs/backup-recovery.md`); automated rotation is deferred.
+5. **Audit log retention** — resolved post-V2 (Stage 25): the cron prunes `audit_logs` beyond `AUDIT_RETENTION_DAYS` (default 180, "0" = keep forever) and self-records each prune; a misconfigured value fails safe to the default, never more aggressive.
+6. **Single `CREDENTIAL_ENC_KEY`** — rotation without panel re-entry resolved post-V2 (Stage 26): while `CREDENTIAL_ENC_KEY_PREVIOUS` is set, decryption falls back to the old master and the `keys/reseal` + `gmail/reseal` sweeps rewrite every row onto the current key (procedure in `docs/backup-recovery.md` §4). Losing the key entirely still means panel re-entry — that recovery path is unchanged.
 7. **`uncertain` Gmail sends** require an operator decision by design (auto-retry could double-send); the panel surfaces them for review.
 8. **`request_id` correlation for AI/Gmail-layer work** goes through `CAMPAIGN_*`/`RESEARCH_*` audit rows rather than every business row — a documented boundary of the traceability chain.
 9. **Legacy plaintext credential rows** are tolerated until first read (lazy migration); the fail-closed path when the master key is absent is tested.
@@ -173,8 +176,8 @@ Accepted and documented, none unmitigated:
 
 - Durable-Objects-based rate limiter — drop-in via the `RateLimiter` interface (the abstraction exists for exactly this).
 - Class-based panel restyle → drop `style-src-attr 'unsafe-inline'`.
-- Audit retention/prune job + panel view over `audit_logs`.
-- Automated `CREDENTIAL_ENC_KEY` rotation (re-encryption sweep) instead of panel re-entry.
+- ~~Audit retention/prune job + panel view over audit_logs~~ — done in post-V2 Stage 25 (`AUDIT_RETENTION_DAYS` cron prune, `/admin/api/audit-logs`, `/admin/audit`).
+- ~~Automated `CREDENTIAL_ENC_KEY` rotation (re-encryption sweep) instead of panel re-entry~~ — done in post-V2 Stage 26 (`CREDENTIAL_ENC_KEY_PREVIOUS` + reseal sweeps).
 - FK-adding table rebuilds for existing databases.
 - 2FA (WebAuthn) for admin accounts; session inventory/admin-wide revocation UI.
 - Per-row `request_id` on D1 business tables to shorten the traceability chain.
@@ -213,7 +216,7 @@ The audit that prompted this program, triaged item by item. Every item is either
 | P2 SSRF on customer domains | Implemented — Stage 7 (`assertPublicHttpUrl` choke point) |
 | P2 search-result URLs treated as untrusted | Implemented — Stage 7: every dynamic outbound fetch (customer domains, search-result links, research/social URLs) funnels through `fetchWithTimeout` → guard; the only raw `fetch()` sites are compile-time-constant vendor endpoints (verified by call-site audit) |
 | P2 per-isolate RPM drift | Implemented — Stage 16 (D1 global window + `RateLimiter` abstraction; DO limiter is the documented drop-in next step) |
-| P2 research/contact data retention & bloat | Partially — evidence versioning (Stage 14) stops re-research bloat; retention pruning deferred (audit log retention is Remaining Risks #5) |
+| P2 research/contact data retention & bloat | Mostly — evidence versioning (Stage 14) stops re-research bloat and audit-log retention landed in post-V2 Stage 25; research/contact retention pruning remains deferred (audit log retention was Remaining Risks #5, now resolved) |
 | P2 hardcoded lead-score rules | Partially — Stage 15 split `lead_score` from `completeness_score`; making weights configurable deferred |
 | P3 no audit log | Implemented — Stage 9 (+ request-id correlation Stage 20) |
 | P3 no backup/recovery strategy | Implemented — Stage 21 (`docs/backup-recovery.md`) |
