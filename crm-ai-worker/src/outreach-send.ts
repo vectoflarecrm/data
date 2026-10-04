@@ -31,6 +31,7 @@ import {
   type GmailEnv,
   type SendResult,
 } from "./gmail";
+import { safeLog } from "./security/safe-log";
 
 export type OutreachSendStatus =
   | "draft"
@@ -108,7 +109,7 @@ export async function reapStaleSends(env: GmailEnv, now: Date = new Date()): Pro
   } catch (e) {
     const msg = errorMessage(e);
     if (msg.includes("no such column")) return; // migration pending — nothing to reap
-    console.error("[outreach-send] reap failed", msg);
+    safeLog("error", "[outreach-send] reap failed", msg);
   }
 }
 

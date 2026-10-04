@@ -30,6 +30,8 @@
  * INSERTs apply atomically, so no partial state can appear.
  */
 
+import { safeLog } from "./security/safe-log";
+
 /** Version of the research → evidence writer. Stamped on runs and rows so a
  * future parser change can distinguish which code produced which facts. */
 export const EVIDENCE_PARSER_VERSION = "evidence-v2";
@@ -79,7 +81,7 @@ async function sha256Hex16(input: string): Promise<string> {
 
 function warnSkip(e: unknown): void {
   const msg = e instanceof Error ? e.message : String(e);
-  console.warn(`[research-run] provenance write skipped (fail-open): ${msg}`);
+  safeLog("warn", `[research-run] provenance write skipped (fail-open): ${msg}`);
 }
 
 /** Open a research run for one attempt. Returns the run id, or null when the

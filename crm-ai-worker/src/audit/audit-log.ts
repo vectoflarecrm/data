@@ -22,6 +22,8 @@
  * still goes out.
  */
 
+import { safeLog } from "../security/safe-log";
+
 /** Subset of the worker env the audit trail needs. */
 export interface AuditEnv {
   DB: D1Database;
@@ -180,6 +182,6 @@ export async function writeAuditLog(
     // audit is a no-op, same fail-open stance as the rest of the module.
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.includes("no such table")) return;
-    console.error(`[audit] write failed action=${event.action} resource=${event.resourceType}`, e);
+    safeLog("error", `[audit] write failed action=${event.action} resource=${event.resourceType}`, e);
   }
 }

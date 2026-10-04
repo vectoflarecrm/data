@@ -52,6 +52,7 @@ import { roleHasPermission, requiredPermission } from "./auth/rbac";
 import { applySecurityHeaders, htmlCsp } from "./security-headers";
 import { originGuardRejection } from "./security/origin-guard";
 import { sanitizeResponse } from "./security/redaction";
+import { safeLog } from "./security/safe-log";
 import { readCsvImportBody, parseCsvBounded, CsvLimitError } from "./security/csv-limits";
 import { writeAuditLog, AuditMetadata } from "./audit/audit-log";
 
@@ -321,7 +322,7 @@ export function jsonResponse(body: unknown, status = 200): Response {
  * a developer looks anyway — and the caller gets a request id to quote. */
 function internalErrorResponse(context: string, error: unknown): Response {
   const requestId = crypto.randomUUID();
-  console.error(`[admin:${context}] ${requestId}`, error);
+  safeLog("error", `[admin:${context}] ${requestId}`, error);
   return jsonResponse(
     { detail: "服务器内部错误，请查看 Worker 日志", request_id: requestId },
     500,
@@ -438,7 +439,7 @@ async function resolveAdminSession(request: Request, env: AdminEnv): Promise<Adm
   } catch (e) {
     // Fail closed: if the sessions table is missing (migration pending) no
     // session can be verified, so nothing is served on a session cookie.
-    console.error("[admin:sessions] lookup failed", e);
+    safeLog("error", "[admin:sessions] lookup failed", e);
     return null;
   }
   if (!row || row.revoked_at) return null;
@@ -1151,9 +1152,9 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv, auth: Admi
         // Audit trail (structured console until the Stage 9 audit_logs table
         // lands; visible via `wrangler tail`). Records the conversion event,
         // never the credential material.
-        console.log(
-          `[security-v2:credential-migration] table=api_configs id=${row.id} provider=${row.provider} event=encrypted-verified`,
-        );
+         safeLog("log",
+           `[security-v2:credential-migration] table=api_configs id=${row.id} provider=${row.provider} event=encrypted-verified`,
+         );
       } catch (error) {
         failed.push({ id: row.id, reason: error instanceof Error ? error.message : "unknown" });
       }
@@ -1702,9 +1703,9 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
             "UPDATE gmail_accounts SET private_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
           ).bind(encrypted.cipher, row.id).run();
           converted++;
-          console.log(
-            `[security-v2:credential-migration] table=gmail_accounts id=${row.id} event=encrypted-verified`,
-          );
+           safeLog("log",
+             `[security-v2:credential-migration] table=gmail_accounts id=${row.id} event=encrypted-verified`,
+           );
         }
         const left = await env.DB.prepare(
           "SELECT COUNT(*) AS n FROM gmail_accounts WHERE private_key NOT LIKE 'enc:v1:%'",

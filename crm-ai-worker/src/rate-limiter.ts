@@ -73,6 +73,9 @@ export interface RateLimiterEnv {
  * the worst case; that is acceptable for RPM protection because the
  * reactive 429-cooldown layer catches any residual burst.
  */
+
+import { safeLog } from "./security/safe-log";
+
 export class D1RateLimiter implements RateLimiter {
   constructor(private env: RateLimiterEnv) {}
 
@@ -94,7 +97,7 @@ export class D1RateLimiter implements RateLimiter {
       ).bind(key, windowStart).first<{ count: number }>();
       return (row?.count ?? 1) <= limit;
     } catch (e) {
-      console.warn(
+      safeLog("warn",
         `[rate-limiter] D1 window unavailable for "${key}", failing open to local-only limiting: ` +
           (e instanceof Error ? e.message : String(e)),
       );
