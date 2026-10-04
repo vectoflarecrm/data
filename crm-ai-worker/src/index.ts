@@ -5,6 +5,7 @@ import { getProviderState, isProviderUsable, noteProviderKeyError, noteProviderK
 import { assertPublicHttpUrl } from "./security/outbound-url";
 import { safeLog } from "./security/safe-log";
 import { writeAuditLog } from "./audit/audit-log";
+import { resolveAuditRetentionDays, pruneAuditLogs } from "./audit/audit-retention";
 import { startResearchRun, completeResearchRun, appendFieldEvidence, newProvenance, type AnalysisProvenance } from "./research-run";
 
 export interface CustomerRow {
@@ -55,6 +56,9 @@ interface Env {
   BRAVE_API_KEY_2?: string;
   FIRECRAWL_API_KEY?: string;
   ADMIN_PANEL_TOKEN?: string;
+  // Post-V2 (audit retention): days an audit_logs row survives. Unset →
+  // default 180; "0" disables pruning. See src/audit/audit-retention.ts.
+  AUDIT_RETENTION_DAYS?: string;
   [key: string]: unknown;
 }
 
@@ -2238,6 +2242,29 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Post-V2 (Remaining Risks #5): retention prune runs on EVERY tick, before
+    // the claim early-return — a tick that researches nothing must still
+    // maintain the trail. Fail-open: a broken prune never breaks research.
+    const retentionDays = resolveAuditRetentionDays(env);
+    if (retentionDays !== null) {
+      try {
+        const pruned = await pruneAuditLogs(env, retentionDays);
+        // Only a prune that actually deleted rows is audit-worthy — otherwise
+        // the 5-minute cron would bury the trail in no-op AUDIT_PRUNE rows.
+        if (pruned > 0) {
+          await writeAuditLog(env, null, {
+            actorUserId: null,
+            actorRole: "system",
+            action: "AUDIT_PRUNE",
+            resourceType: "audit_log",
+            resourceId: null,
+            metadata: { pruned, retention_days: retentionDays },
+          });
+        }
+      } catch (e) {
+        safeLog("error", "[audit-retention] prune failed, continuing research tick", e instanceof Error ? e.message : String(e));
+      }
+    }
     // Claim-first design: rows are flipped to 'processing' before any slow work
     // starts, so an overlapping cron tick can never double-claim the same
     // customer — it just claims the next BATCH_SIZE rows and proceeds in

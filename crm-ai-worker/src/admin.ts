@@ -2110,6 +2110,19 @@ async function getCustomerCompleteness(env: AdminEnv, id: number): Promise<numbe
   }
 }
 
+/** Row shape of the read-only audit view (GET /admin/api/audit-logs). */
+interface AuditLogViewRow {
+  id: string;
+  created_at: string;
+  actor_user_id: string | null;
+  actor_role: string | null;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  request_id: string | null;
+  metadata_json: string | null;
+}
+
 async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthContext): Promise<Response> {
   try {
     const url = new URL(request.url);
@@ -2149,6 +2162,46 @@ async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthCo
     // option is what 统计匹配 will really return once it is ticked.
     if (url.pathname === "/admin/api/customers/filter-options" && request.method === "GET") {
       return jsonResponse(await buildFilterOptions(env, url.searchParams.get("facets")));
+    }
+    // GET /admin/api/audit-logs — read-only view over the audit trail
+    // (post-V2, Remaining Risks #5 companion). audit.read gate is in rbac.ts.
+    // Query: ?limit= (default 100, clamp 1..500), ?before=<created_at> cursor
+    // (strictly older rows), ?action= exact filter. ip_hash / user_agent_hash
+    // stay out of the response — the panel answers "what happened", not "who
+    // sat behind which address".
+    if (url.pathname === "/admin/api/audit-logs" && request.method === "GET") {
+      const limitRaw = Number(url.searchParams.get("limit") ?? "100");
+      const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.floor(limitRaw), 1), 500) : 100;
+      const before = url.searchParams.get("before");
+      const action = url.searchParams.get("action")?.trim() ?? "";
+      const where: string[] = [];
+      const params: string[] = [];
+      if (before && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(before)) {
+        where.push("created_at < ?");
+        params.push(before);
+      }
+      if (action !== "") {
+        where.push("action = ?");
+        params.push(action);
+      }
+      const rows = await env.DB.prepare(
+        `SELECT id, created_at, actor_user_id, actor_role, action, resource_type, resource_id, request_id, metadata_json
+         FROM audit_logs ${where.length ? "WHERE " + where.join(" AND ") : ""}
+         ORDER BY created_at DESC, id DESC LIMIT ?`,
+      ).bind(...params, String(limit)).all<AuditLogViewRow>();
+      const logs = (rows.results ?? []).map((row) => {
+        let metadata: unknown = null;
+        try {
+          metadata = row.metadata_json ? JSON.parse(row.metadata_json) : null;
+        } catch {
+          metadata = null;
+        }
+        return { ...row, metadata_json: undefined, metadata };
+      });
+      // Full page ⇒ there may be more; hand the caller the last row's
+      // created_at as the next `before` cursor. Short page ⇒ end of trail.
+      const nextBefore = logs.length === limit ? logs[logs.length - 1].created_at : null;
+      return jsonResponse({ logs, next_before: nextBefore });
     }
     const id = parseCustomerId(url.pathname);
     if (id !== null) {
@@ -2387,6 +2440,15 @@ async function routeAdminRequest(
     if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
     return (await authenticate(request, env))
       ? htmlResponse(KEYS_PANEL_HTML)
+      : htmlResponse(ADMIN_LOGIN_HTML);
+  }
+
+  // Post-V2: read-only audit trail viewer (backing API is
+  // GET /admin/api/audit-logs, gated audit.read in rbac.ts).
+  if (url.pathname === "/admin/audit") {
+    if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
+    return (await authenticate(request, env))
+      ? htmlResponse(AUDIT_PANEL_HTML)
       : htmlResponse(ADMIN_LOGIN_HTML);
   }
 
@@ -3550,6 +3612,90 @@ var _focusCount=0;
 document.addEventListener('focusin',function(e){if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')_focusCount++});
 document.addEventListener('focusout',function(e){if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')_focusCount=Math.max(0,_focusCount-1)});
 setInterval(function(){if(_focusCount===0&&!document.hidden)loadKeys()},30000);
+})();
+</script></body></html>`;
+
+/* Post-V2 — read-only audit trail viewer. Backing API: GET /admin/api/audit-logs
+ * (audit.read). Same escaping discipline as the other panels (Stage 5): every
+ * dynamic value goes through esc() before it touches innerHTML. The inner
+ * script deliberately avoids template literals — it lives inside one. */
+const AUDIT_PANEL_HTML = `<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>审计日志 - CRM</title><style>
+body{font-family:system-ui,sans-serif;margin:0;background:#f3f5f9;color:#1f2430}
+.top{background:#1f2430;color:#fff;padding:14px 24px;display:flex;justify-content:space-between;align-items:center}
+.top h1{font-size:18px;margin:0}
+.top a{color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 14px;border-radius:8px;font-weight:600;font-size:14px}
+.wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+.card{background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:20px;margin-bottom:20px}
+h2{font-size:16px;margin:0 0 12px}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.bar input{padding:7px 9px;border:1px solid #ccd2dd;border-radius:6px;font-size:13px;width:220px}
+.btn{border:0;border-radius:6px;padding:7px 14px;cursor:pointer;font-size:13px;font-weight:600;background:#3f9d63;color:#fff}
+.btn.gray{background:#8b93a3}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:#f0f2f7;padding:8px;text-align:left;font-size:12px;color:#5a6270}
+td{padding:8px;border-bottom:1px solid #eef1f6;vertical-align:top}
+.mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+.act{display:inline-block;padding:1px 8px;border-radius:10px;background:#e3ecf7;color:#1d4ed8;font-size:12px;font-weight:600}
+.act.warn{background:#fde8e8;color:#b23b3b}
+.meta{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#5a6270;word-break:break-all;max-width:340px}
+#toast{position:fixed;top:18px;right:18px;background:#1f2430;color:#fff;padding:10px 16px;border-radius:8px;font-size:14px;display:none;max-width:420px;z-index:9}
+#toast.err{background:#b23b3b}
+.hint{font-size:12px;color:#7a8291;margin-top:6px}
+</style></head><body>
+<header class="top"><h1>🧾 审计日志（只读）</h1><a href="/admin">← 返回客户管理</a></header>
+<div class="wrap">
+<div class="card">
+  <div class="bar">
+    <input id="fAction" placeholder="按动作过滤，如 ACCESS_DENIED">
+    <button class="btn" id="fGo">刷新</button>
+    <button class="btn gray" id="more" style="display:none">加载更多 ↓</button>
+  </div>
+  <table><thead><tr><th>时间 (UTC)</th><th>操作人</th><th>动作</th><th>资源</th><th>request_id</th><th>详情</th></tr></thead>
+  <tbody id="rows"><tr><td colspan="6">加载中…</td></tr></tbody></table>
+  <p class="hint">数据源 /admin/api/audit-logs（权限 audit.read）。保留策略由 AUDIT_RETENTION_DAYS 控制，cron 每 5 分钟自动清理过期行。</p>
+</div>
+</div>
+<div id="toast"></div>
+<script>
+(function(){
+'use strict';
+function esc(v){return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
+function toast(msg,isErr){var t=document.getElementById('toast');t.textContent=msg;t.className=isErr?'err':'';t.style.display='block';setTimeout(function(){t.style.display='none'},3200)}
+function api(path){return fetch(path,{credentials:'same-origin'}).then(function(r){return r.json().then(function(body){if(!r.ok)throw new Error(body.detail||('HTTP '+r.status));return body})})}
+var _next=null;
+function renderRows(logs,append){
+  var tb=document.getElementById('rows');
+  if(!append)tb.innerHTML='';
+  if(!logs.length&&!append){tb.innerHTML='<tr><td colspan="6">无记录</td></tr>';return}
+  var html='';
+  for(var i=0;i<logs.length;i++){
+    var l=logs[i];
+    var meta=l.metadata?esc(JSON.stringify(l.metadata)):'';
+    var actor=l.actor_role?esc(l.actor_role)+(l.actor_user_id?' ('+esc(l.actor_user_id)+')':''):'<span class="mono">—</span>';
+    var cls=l.action==='ACCESS_DENIED'||l.action==='LOGIN_FAILURE'?'act warn':'act';
+    html+='<tr><td class="mono">'+esc(l.created_at)+'</td><td>'+actor+'</td>'
+      +'<td><span class="'+cls+'">'+esc(l.action)+'</span></td>'
+      +'<td class="mono">'+esc(l.resource_type)+(l.resource_id?':'+esc(l.resource_id):'')+'</td>'
+      +'<td class="mono">'+(l.request_id?esc(l.request_id):'—')+'</td>'
+      +'<td class="meta">'+(meta||'—')+'</td></tr>';
+  }
+  tb.insertAdjacentHTML('beforeend',html);
+}
+function load(before){
+  var action=document.getElementById('fAction').value.trim();
+  var q='/admin/api/audit-logs?limit=100'+(before?'&before='+encodeURIComponent(before):'')+(action?'&action='+encodeURIComponent(action):'');
+  api(q).then(function(body){
+    renderRows(body.logs||[],!!before);
+    _next=body.next_before;
+    document.getElementById('more').style.display=_next?'':'none';
+  }).catch(function(e){toast(e.message,true)});
+}
+document.getElementById('fGo').onclick=function(){load()};
+document.getElementById('fAction').addEventListener('keydown',function(e){if(e.key==='Enter')load()});
+document.getElementById('more').onclick=function(){if(_next)load(_next)};
+load();
 })();
 </script></body></html>`;
 

@@ -29,3 +29,9 @@ database_id = "REPLACE_WITH_D1_DATABASE_ID"
 # Set it for production smoke tests, then REMOVE it. See docs/deployment-v2.md.
 # [vars]
 # OUTREACH_DRY_RUN = "true"
+
+# Post-V2 (audit retention): days an audit_logs row survives. The cron tick
+# (every 5 min) prunes older rows and writes an AUDIT_PRUNE audit row.
+# Unset → default 180 days; "0" disables pruning entirely.
+# [vars]
+# AUDIT_RETENTION_DAYS = "180"

@@ -173,6 +173,12 @@ export function requiredPermission(url: URL, method: string): Permission | null 
     return "outreach.read";
   }
 
+  // ── Audit trail (/admin/api/audit-logs) — read-only view (post-V2).
+  // Mutations don't exist: non-GET maps to null and 404s in the router.
+  if (parts[2] === "audit-logs") {
+    return method === "GET" ? "audit.read" : null;
+  }
+
   // ── Customers (/admin/api/customers…) ──
   if (parts[2] === "customers") {
     if (parts[3] === "import" && method === "POST") return "customers.write";
