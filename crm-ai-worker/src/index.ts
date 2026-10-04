@@ -1838,6 +1838,11 @@ export {
   RELEVANCE_PRECHECK_SYSTEM,
 };
 
+// Exported for unit tests (tests/concurrency/research-claim.test.ts): the
+// research claim path is a single atomic UPDATE ... RETURNING, and the
+// concurrency suite proves N parallel claims never take the same row.
+export { claimCustomers };
+
 function isRetryableAiError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const msg = error.message;

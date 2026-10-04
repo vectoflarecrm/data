@@ -365,6 +365,17 @@ jobs:
           info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('outreach_emails') WHERE name IN ('idempotency_key','send_attempts','locked_at','locked_by','last_error','gmail_message_id')")"
           echo "$info" | grep -q '"n": 6' || { echo 'Migration failed: outreach_emails send-state columns missing'; exit 1; }
 
+      - name: Migrate gmail_send_log sender column (Security V2 Stage 23)
+        # sender_client_email (per-account daily quota counting, gmail-quota.ts)
+        # lived only in migrations/0003 — a fresh schema.sql install lacked it
+        # and reserveQuota failed closed. schema.sql's CREATE now has it; this
+        # per-statement ALTER with duplicate-column tolerance self-heals any
+        # database created from the old schema.sql, same pattern as above.
+        run: |
+          npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE gmail_send_log ADD COLUMN sender_client_email TEXT" 2>&1 | grep -q 'duplicate column name' && echo "sender_client_email already exists" || true
+          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('gmail_send_log') WHERE name = 'sender_client_email'")"
+          echo "$info" | grep -q '"n": 1' || { echo 'Migration failed: gmail_send_log sender column missing'; exit 1; }
+
       - name: Migrate research runs + evidence provenance (Security V2 Stage 14)
         # Evidence V2 (spec §15): research_runs (new table, created by
         # schema.sql via IF NOT EXISTS — the CREATE here is belt-and-suspenders)

@@ -1,0 +1,12 @@
+-- 2026-10: Security V2 Stage 23 — gmail_send_log.sender_client_email 补齐
+-- 背景：该列自 0003 起只对存量库经 ALTER 添加，schema.sql 的 CREATE TABLE
+--       一直缺失（漂移）。全新数据库执行 schema.sql 后，gmail-quota.ts 的
+--       reserveQuota 会因 "no such column: sender_client_email" 整体 fail-closed，
+--       导致新库上所有邮件都无法发送。
+-- 修复（三处一致）：
+--   1) schema.sql 的 CREATE TABLE gmail_send_log 已补 sender_client_email TEXT；
+--   2) deploy workflow 每次部署执行幂等 ALTER + 列校验（自愈任何旧 schema 建的库）；
+--   3) 本文件作为变更记录。
+-- 存量线上库：0003 已加过该列，本文件与 workflow 步骤均为无操作，可跳过。
+-- 全新数据库：直接执行 schema.sql 即可，无需本文件。
+ALTER TABLE gmail_send_log ADD COLUMN sender_client_email TEXT;

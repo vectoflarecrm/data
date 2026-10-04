@@ -243,6 +243,11 @@ CREATE TABLE IF NOT EXISTS gmail_send_log (
   recipient TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'sent' CHECK (status IN ('sent', 'failed')),
   detail TEXT,
+  -- Security V2 Stage 23 fix: which pool account sent this row (per-account
+  -- daily quota counting in gmail-quota.ts depends on it). The column
+  -- existed only in migrations/0003 for existing databases — a fresh
+  -- schema.sql install lacked it and reserveQuota failed closed.
+  sender_client_email TEXT,
   sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
