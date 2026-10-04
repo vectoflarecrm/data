@@ -383,6 +383,15 @@ jobs:
           info2="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'research_runs'")"
           echo "$info2" | grep -q '"n": 1' || { echo 'Migration failed: research_runs table missing'; exit 1; }
 
+      - name: Migrate customers completeness column (Security V2 Stage 15)
+        # Spec §16: data_completeness_score is a quality axis SEPARATE from
+        # lead_score (fit vs. how well we know the record). Same per-statement
+        # ALTER pattern; no backfill — NULL means "not yet scored".
+        run: |
+          npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE customers ADD COLUMN data_completeness_score INTEGER" 2>&1 | grep -q 'duplicate column name' && echo "data_completeness_score already exists" || true
+          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('customers') WHERE name = 'data_completeness_score'")"
+          echo "$info" | grep -q '"n": 1' || { echo 'Migration failed: data_completeness_score missing'; exit 1; }
+
       - name: Typecheck
         run: npm run typecheck
 

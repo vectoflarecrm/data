@@ -2062,6 +2062,21 @@ async function handleCampaignApi(request: Request, env: AdminEnv, auth: AdminAut
   }
 }
 
+/** Stage 15 (spec §16): read the completeness score independently of the
+ * shared CUSTOMER_COLUMNS list, so existing fixtures/panels that do not know
+ * the column keep working. Returns null while the migration is pending. */
+async function getCustomerCompleteness(env: AdminEnv, id: number): Promise<number | null> {
+  try {
+    const row = await env.DB.prepare(
+      "SELECT data_completeness_score FROM customers WHERE id = ?",
+    ).bind(id).first<{ data_completeness_score: number | null }>();
+    return row?.data_completeness_score ?? null;
+  } catch (e) {
+    if (e instanceof Error && e.message.includes("no such column")) return null;
+    throw e;
+  }
+}
+
 async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthContext): Promise<Response> {
   try {
     const url = new URL(request.url);
@@ -2109,7 +2124,10 @@ async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthCo
         if (!customer) return jsonResponse({ detail: "Customer not found" }, 404);
         const contacts = await getCustomerContacts(env, customer.company_id);
         const evidence = await getCustomerEvidence(env, customer.company_id);
-        return jsonResponse({ ...customer, contacts, evidence });
+        // Stage 15: both quality axes on one response — fit (lead_score) and
+        // data completeness are separate metrics (spec §16), never derived
+        // from each other.
+        return jsonResponse({ ...customer, contacts, evidence, data_completeness_score: await getCustomerCompleteness(env, id) });
       }
       if (request.method === "PATCH") return await updateCustomer(request, env, id, auth);
     }
@@ -2528,7 +2546,12 @@ const ADMIN_PANEL_HTML = `<!doctype html>
     {key:'full_research_text',label:'完整研究文本',type:'textarea'},
     {key:'social_accounts_verified',label:'已验证社交媒体',type:'textarea'},
     {key:'personas_and_solutions',label:'AI 分析结果 JSON',type:'textarea',parseJson:true},
-    {key:'remarks',label:'中文备注 (Remarks)',type:'textarea'}
+    {key:'remarks',label:'中文备注 (Remarks)',type:'textarea'},
+    // Stage 15 (spec §16): two independent quality axes, both system-computed
+    // by the research pipeline — readonly, so they are never hand-edited and
+    // never overwrite each other.
+    {key:'lead_score',label:'线索评分 (Lead Score)',readonly:true},
+    {key:'data_completeness_score',label:'数据完整度 (Data Completeness)',readonly:true}
   ];
   var buildModal=function(c){state.dirty={};var h='';
     fields.forEach(function(f){

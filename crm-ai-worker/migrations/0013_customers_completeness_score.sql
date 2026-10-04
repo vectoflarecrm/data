@@ -1,0 +1,28 @@
+-- Security V2 Stage 15 (spec §16) — separate lead score and data completeness.
+--
+-- lead_score (pre-existing) answers "is this company worth pursuing?" — ICP
+-- fit, product fit, buyer role, buying signals, reachability, strategic
+-- relevance, computed by the deterministic computeLeadScore() in index.ts.
+--
+-- data_completeness_score answers "how well do we actually know this
+-- record?" — company identity, domain, country, contact, email, phone,
+-- social, products, evidence, freshness (10 points each, computed by the
+-- disjoint-input computeCompletenessScore()).
+--
+-- The two scores are written by the same research pass but to separate
+-- columns, from disjoint inputs: a perfect-fit distributor with a bare record
+-- can be lead 60 / data 20, and neither score is ever derived from or
+-- overwritten by the other (spec §16.3).
+--
+-- No backfill: existing rows keep NULL (= not yet scored by the new formula);
+-- the next research run stamps the value. NULL sorts after scored rows in the
+-- panel and means "no completeness verdict yet" — distinct from 0 ("we know
+-- this record is nearly empty").
+--
+-- Deploy note: existing databases get the column via the per-statement ALTER
+-- step in .github/workflows/deploy-worker.yml (ADD COLUMN is not idempotent
+-- inside a D1 batch file). The admin detail API reads it through a
+-- missing-column-tolerant helper, so a migration-pending window degrades to
+-- null instead of erroring.
+
+ALTER TABLE customers ADD COLUMN data_completeness_score INTEGER;

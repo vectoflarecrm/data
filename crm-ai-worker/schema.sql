@@ -309,9 +309,13 @@ CREATE INDEX IF NOT EXISTS idx_customer_imports_batch ON customer_imports(import
 
 -- Lead scoring (docx 建议/九): SQL-first targeting so only high-value customers
 -- consume crawl + AI budget. Recomputed after each successful analysis.
--- Columns lead_score / buying_signals / source_import_id are added by the CI
--- migration step (per-statement ALTER with duplicate-column tolerance), since
--- D1 fails a whole schema file on any duplicate ALTER.
+-- Stage 15 (spec §16) adds data_completeness_score as a SEPARATE quality axis
+-- (identity/domain/country/contact/email/phone/social/products/evidence/
+-- freshness) — neither score derives from or overwrites the other.
+-- Columns lead_score / buying_signals / source_import_id /
+-- data_completeness_score are added by the CI migration steps (per-statement
+-- ALTER with duplicate-column tolerance), since D1 fails a whole schema file
+-- on any duplicate ALTER.
 
 -- Saved customer groups (定向群发/客群): a reusable 海选 filter set so a
 -- segment ("西班牙经销商") can be re-targeted later without retyping criteria.

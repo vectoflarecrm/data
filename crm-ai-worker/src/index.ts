@@ -1825,11 +1825,13 @@ async function runRelevancePrecheck(
   }
 }
 
-// Exported for unit tests (tests/relevance.test.ts, tests/prompt-injection.test.ts).
+// Exported for unit tests (tests/relevance.test.ts, tests/prompt-injection.test.ts,
+// tests/score-separation.test.ts).
 export {
   parseRelevanceVerdict,
   isRelevancePrecheckEnabled,
   computeLeadScore,
+  computeCompletenessScore,
   parseAnalysis,
   buildUserPrompt,
   AI_SYSTEM_PROMPT,
@@ -1882,6 +1884,37 @@ function computeLeadScore(a: CustomerAnalysis): number {
   // Data completeness proxy: verified coverage/size fields.
   if (a.company_size && !a.company_size.includes("信息不足")) score += 5;
   if (a.geographic_coverage && !a.geographic_coverage.includes("信息不足")) score += 5;
+  return Math.min(100, score);
+}
+
+// Stage 15 (spec §16): data completeness is a SEPARATE quality axis from the
+// lead score. Lead score answers "is this company worth pursuing?" (ICP fit,
+// product fit, buyer role, buying signals, reachability, strategic relevance
+// — the dimensions of §16.1, already covered by computeLeadScore above).
+// Completeness answers "how well do we actually KNOW this record?" (§16.2:
+// identity, domain, country, contact, email, phone, social, products,
+// evidence, freshness). The two formulas read the same verified facts through
+// separate lenses and write separate columns — a perfect-fit distributor with
+// no email and a bare record can be lead 60 / data 20, and neither score is
+// ever derived from or overwritten by the other.
+function computeCompletenessScore(
+  customer: CustomerRow,
+  analysis: CustomerAnalysis,
+  verifiedSocialCount: number,
+): number {
+  let score = 0;
+  // §16.2 dimensions, 10 points each, deterministic over verified inputs.
+  if ((customer.company_name ?? "").trim()) score += 10;            // company identity
+  if ((customer.domain ?? "").trim()) score += 10;                  // domain
+  if ((customer.country ?? "").trim()) score += 10;                 // country
+  if (analysis.found_contacts.length > 0) score += 10;              // contact person
+  if (analysis.found_contacts.some((c) => c.email)) score += 10;    // email
+  if (analysis.found_contacts.some((c) => c.cellphone || c.whatsapp)) score += 10; // phone
+  if (verifiedSocialCount > 0) score += 10;                         // social
+  const cats = (analysis.product_categories ?? "").trim();
+  if (cats && !cats.includes("信息不足")) score += 10;              // products
+  if (analysis.field_evidence.length > 0) score += 10;              // evidence
+  score += 10;                                                      // freshness: stamped by this research pass
   return Math.min(100, score);
 }
 
@@ -2051,6 +2084,9 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
     const outreachContextJson = analysis.outreach_context ? JSON.stringify(analysis.outreach_context) : null;
     const buyingSignalsJson = analysis.buying_signals.length ? JSON.stringify(analysis.buying_signals) : null;
     const leadScore = computeLeadScore(analysis);
+    // Stage 15 (spec §16): independent quality axis — separate formula,
+    // separate column; neither score influences or overwrites the other.
+    const completenessScore = computeCompletenessScore(customer, analysis, verifiedSocial.length);
 
     // Step 5: Save found contacts to contacts table
     if (analysis.found_contacts && analysis.found_contacts.length > 0) {
@@ -2124,9 +2160,9 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
     return {
       update: env.DB.prepare(`
         UPDATE customers
-        SET status = 'completed', customer_segment = ?, product_categories = ?, company_size = ?, geographic_coverage = ?, personas_and_solutions = ?, company_profile = ?, outreach_context = ?, buying_signals = ?, lead_score = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
+        SET status = 'completed', customer_segment = ?, product_categories = ?, company_size = ?, geographic_coverage = ?, personas_and_solutions = ?, company_profile = ?, outreach_context = ?, buying_signals = ?, lead_score = ?, data_completeness_score = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ? AND status = 'processing'
-      `).bind(analysis.customer_segment, analysis.product_categories, analysis.company_size, analysis.geographic_coverage, personas, companyProfileJson, outreachContextJson, buyingSignalsJson, leadScore, remarks, customer.id),
+      `).bind(analysis.customer_segment, analysis.product_categories, analysis.company_size, analysis.geographic_coverage, personas, companyProfileJson, outreachContextJson, buyingSignalsJson, leadScore, completenessScore, remarks, customer.id),
       outcome: "completed",
     };
   } catch (error) {
