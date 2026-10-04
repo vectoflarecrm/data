@@ -51,6 +51,7 @@ import { buildFilterOptions } from "./facets";
 import { roleHasPermission, requiredPermission } from "./auth/rbac";
 import { applySecurityHeaders, htmlCsp } from "./security-headers";
 import { originGuardRejection } from "./security/origin-guard";
+import { sanitizeResponse } from "./security/redaction";
 import { readCsvImportBody, parseCsvBounded, CsvLimitError } from "./security/csv-limits";
 import { writeAuditLog, AuditMetadata } from "./audit/audit-log";
 
@@ -298,8 +299,13 @@ function htmlResponse(body: string, status = 200): Response {
   });
 }
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
+/** Exported for tests (tests/response-redaction.test.ts) — the single JSON
+ * choke point every admin API response passes through, so the §19 redaction
+ * net in sanitizeResponse() covers all of them. */
+export function jsonResponse(body: unknown, status = 200): Response {
+  // Stage 18 (spec §19): sanitize BEFORE serializing — no §19 key name may
+  // ever reach a caller, even if a handler accidentally includes one.
+  return new Response(JSON.stringify(sanitizeResponse(body)), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
@@ -1032,8 +1038,12 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv, auth: Admi
       const hint = typeof row.key_hint === "string" && row.key_hint
         ? row.key_hint
         : isEncrypted(stored) ? "…" : hintFor(stored);
-      const { api_key: _raw, key_hint: _hint, ...rest } = row;
-      return { ...rest, api_key: hint, encrypted: isEncrypted(stored) };
+      const { api_key: _raw, key_hint: _storedHint, ...rest } = row;
+      // Stage 18 (spec §19): the masked display form rides under key_hint —
+      // its real name. It used to be returned as `api_key`, which is on the
+      // §19 forbidden-key list, so the response-wide redaction net would have
+      // blanked it; the value is a hint by construction, never the secret.
+      return { ...rest, key_hint: hint, encrypted: isEncrypted(stored) };
     });
     return jsonResponse({
       keys: rows,
@@ -3406,7 +3416,7 @@ function loadKeys(){
       var cd=cdMap[k.id];
       var status=k.is_active?'启用':'停用';
       if(cd){var mins=Math.max(1,Math.round((new Date(cd.exhausted_until.replace(' ','T')+'Z')-Date.now())/60000));status+='<span class="cdtag">冷却中 ~'+mins+'分钟</span>';}
-      var keyCell=esc(k.api_key)+(k.encrypted?'':'<span class="cdtag" style="background:#fee2e2;color:#991b1b">明文</span>');
+      var keyCell=esc(k.key_hint)+(k.encrypted?'':'<span class="cdtag" style="background:#fee2e2;color:#991b1b">明文</span>');
       tr.innerHTML='<td>'+providerName(k.provider)+'</td><td>'+esc(k.label||'-')+'</td><td><code>'+keyCell+'</code></td><td>'+(k.rpm_limit||'默认')+'</td><td>'+esc(k.model||'-')+'</td><td>'+status+'</td><td>'+esc(k.last_error||'-')+'</td>';
       var td=document.createElement('td');
       var tog=document.createElement('button');tog.className='btn '+(k.is_active?'off':'on');tog.textContent=k.is_active?'停用':'启用';

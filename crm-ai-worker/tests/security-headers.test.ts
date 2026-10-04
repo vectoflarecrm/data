@@ -246,11 +246,12 @@ describe("stage 5: KEYS panel escapes DB-sourced strings", () => {
 
   it("escapes operator labels, model names, upstream errors and key hints", () => {
     // Key row: label/model/last_error come from the operator or upstream
-    // providers; api_key is a hint sliced out of raw key material.
+    // providers; key_hint is a hint sliced out of raw key material (Stage 18
+    // renamed the response field off the §19-forbidden api_key name).
     expect(keysScript).toMatch(/esc\(k\.label\|\|'-'\)/);
     expect(keysScript).toMatch(/esc\(k\.model\|\|'-'\)/);
     expect(keysScript).toMatch(/esc\(k\.last_error\|\|'-'\)/);
-    expect(keysScript).toMatch(/var keyCell=esc\(k\.api_key\)/);
+    expect(keysScript).toMatch(/var keyCell=esc\(k\.key_hint\)/);
     expect(keysScript).toMatch(/providerName\(k\.provider\)/);
   });
 

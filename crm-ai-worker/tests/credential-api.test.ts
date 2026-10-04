@@ -183,11 +183,11 @@ describe("POST /admin/api/keys", () => {
     insertLegacy(db, "groq", "gsk_live_abcdef123456");
     const env = makeEnv(db, MASTER_A);
     const body = await (await call(env, "/admin/api/keys")).json() as {
-      keys: Array<{ api_key: string; encrypted: boolean }>;
+      keys: Array<{ key_hint: string; encrypted: boolean }>;
       encryption: { configured: boolean; plaintext_rows: number };
     };
     expect(body.keys[0].encrypted).toBe(false);
-    expect(body.keys[0].api_key).toBe("gsk_li…3456");
+    expect(body.keys[0].key_hint).toBe("gsk_li…3456");
     expect(body.encryption).toEqual({ configured: true, plaintext_rows: 1 });
   });
 
@@ -456,7 +456,7 @@ describe("response redaction (spec 5.3: no credential plaintext in any API respo
       keys: Array<Record<string, unknown>>; encryption: { configured: boolean; plaintext_rows: number };
     };
     expect(body.keys).toHaveLength(1);
-    expect(body.keys[0].api_key).toBe("tvly-s…-xyz");
+    expect(body.keys[0].key_hint).toBe("tvly-s…-xyz");
     expect(body.keys[0].encrypted).toBe(false);
     expect(body.encryption).toEqual({ configured: false, plaintext_rows: 1 });
     expect(JSON.stringify(body)).not.toContain("tvly-super-secret-value-xyz");
