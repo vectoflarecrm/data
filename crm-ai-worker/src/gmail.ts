@@ -26,6 +26,10 @@ export interface GmailEnv {
   GMAIL_SEND_DELAY_MS?: string;
   /** Optional hard timeout for one Gmail API send call in ms (default 30000). */
   GMAIL_SEND_TIMEOUT_MS?: string;
+  /** §32 smoke-test flag: "true"/"1" swaps the Gmail transport for a no-op
+   * so production smoke tests can run the full send state machine without
+   * touching Gmail or consuming quota. See docs/deployment-v2.md. */
+  OUTREACH_DRY_RUN?: string;
 }
 
 const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.send";

@@ -3,6 +3,7 @@ import { rpmLimitFor, acquireRpmSlot, rpmEnvOverride } from "./rate-limit";
 import { collectKeyPool, buildKeyOrder } from "./key-pool";
 import { getProviderState, isProviderUsable, noteProviderKeyError, noteProviderKeySuccess, noteKeyUsage, keyHealthName } from "./provider-keys";
 import { assertPublicHttpUrl } from "./security/outbound-url";
+import { safeLog } from "./security/safe-log";
 import { writeAuditLog } from "./audit/audit-log";
 import { startResearchRun, completeResearchRun, appendFieldEvidence, newProvenance, type AnalysisProvenance } from "./research-run";
 
@@ -2219,6 +2220,18 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // §32 production smoke test: unauthenticated liveness probe. 200 only
+    // when the D1 binding answers a trivial query — a deployed worker whose
+    // database binding is broken must fail the smoke test loudly.
+    if (request.method === "GET" && new URL(request.url).pathname === "/health") {
+      try {
+        await env.DB.prepare("SELECT 1 AS ok").first();
+        return Response.json({ ok: true, service: "crm-ai-worker" });
+      } catch (e) {
+        safeLog("error", "[health] D1 probe failed", e instanceof Error ? e.message : String(e));
+        return Response.json({ ok: false, service: "crm-ai-worker" }, { status: 503 });
+      }
+    }
     const adminEnv = { ...env } as import("./admin").AdminEnv;
     const adminResponse = await handleAdminRequest(request, adminEnv);
     return adminResponse ?? new Response("Not Found", { status: 404 });

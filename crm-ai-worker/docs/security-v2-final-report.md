@@ -1,12 +1,12 @@
 # Security V2 Final Report
 
-Branch `feature/security-v2` · Stages 0-24 · 26 commits · final verification 534/534 tests, `tsc --noEmit` clean, `wrangler deploy --dry-run` 439.10 KiB (gzip 111.86 KiB), 4 admin panels clean.
+Branch `feature/security-v2` · Stages 0-24 · 26 commits · final verification 543/543 tests, `tsc --noEmit` clean, `wrangler deploy --dry-run` 440.02 KiB (gzip 112.15 KiB), 4 admin panels clean.
 
 ## Executive Summary
 
 The CRM AI Worker entered this program with a single static `ADMIN_PANEL_TOKEN` doubling as browser session, credentials stored in plaintext and echoed back through the panel API, no audit trail, a fire-and-forget Gmail sender that could double-send and overshoot account quotas under concurrent Cron invocations, and no SSRF/CSV/prompt-injection hardening. Security V2 rebuilt the trust boundary in 24 verifiable stages on the standing constraint of **no rewrites**: every change is an additive service, migration, helper, validation or test, every stage ended with the full suite green and a committed stage report, and three defects were caught by the new suites themselves (a mis-gated campaign permission, a trailing-dot SSRF bypass, and a schema drift that would have bricked fresh installs).
 
-Headline outcomes: browser-session auth is gone (hashed, expiring, revocable sessions behind an RBAC gate); the worker can no longer mutate Cloudflare secrets (that surface was removed, credentials moved to AES-GCM-encrypted D1 rows with masked display); every mutating action is audited with actor, role and request id; Gmail sending is a crash-safe state machine with idempotent claims, atomic quota reservation and single-flight campaign locks; outbound fetches, CSV imports and AI prompts are hardened; and the whole program is pinned by 534 tests — 72 security acceptance, 59 concurrency (10/50/100-task storms), the rest stage suites and pre-existing regression tests.
+Headline outcomes: browser-session auth is gone (hashed, expiring, revocable sessions behind an RBAC gate); the worker can no longer mutate Cloudflare secrets (that surface was removed, credentials moved to AES-GCM-encrypted D1 rows with masked display); every mutating action is audited with actor, role and request id; Gmail sending is a crash-safe state machine with idempotent claims, atomic quota reservation and single-flight campaign locks; outbound fetches, CSV imports and AI prompts are hardened; and the whole program is pinned by 543 tests — 72 security acceptance, 59 concurrency (10/50/100-task storms), 9 smoke-mechanism, the rest stage suites and pre-existing regression tests.
 
 ## Security Acceptance Checklist (spec §26)
 
@@ -39,9 +39,9 @@ Headline outcomes: browser-session auth is gone (hashed, expiring, revocable ses
 | Backup/recovery documented | [x] | Stage 21: `docs/backup-recovery.md` (RPO/RTO, Time Travel runbook, credential/campaign/research recovery, quarterly drill) |
 | Security tests pass | [x] | Stage 22: 72/72 across 10 files in `tests/security/` |
 | Concurrency tests pass | [x] | Stage 23: 59/59 across 5 files in `tests/concurrency/`, storms at 10/50/100 tasks |
-| Regression tests pass | [x] | Stage 24: 534/534, 44 files, zero regressions |
+| Regression tests pass | [x] | Stage 24: 543/543, 46 files, zero regressions |
 | Typecheck passes | [x] | Stage 24: `npm run typecheck` exit 0 |
-| Build passes | [x] | Stage 24: `wrangler deploy --dry-run` 439.10 KiB / gzip 111.86 KiB, clean exit |
+| Build passes | [x] | Stage 24: `wrangler deploy --dry-run` 440.02 KiB / gzip 112.15 KiB, clean exit |
 
 ## Changes
 
@@ -61,6 +61,7 @@ Stage-by-stage detail lives in `docs/stages/stage-01` … `stage-24`; the runnin
 - **Stage 22**: security acceptance suite (10 files, 72 tests) through the real `handleAdminRequest` path — found and fixed the RBAC campaign-action segment bug and the `https://localhost./` trailing-dot SSRF bypass.
 - **Stage 23**: concurrency suite (5 files, 59 tests, 10/50/100-task storms) — found and fixed the `sender_client_email` schema drift that would have bricked fresh installs.
 - **Stage 24**: regression gate — full suite, typecheck, build dry-run, panel checks, all green.
+- **Post-spec §31/§32 hardening**: `docs/deployment-v2.md` (the no-staging safe-deploy pipeline + production smoke procedure), an unauthenticated `GET /health` liveness probe (200 only when the D1 binding answers, 503 otherwise), and the `OUTREACH_DRY_RUN` flag — "true"/"1" walks the full send state machine while the Gmail transport stays a no-op (no API call, no reservation, no quota row; rows marked `dry-run-…`), so smoke tests can never send real email.
 
 ## Database Migrations
 
@@ -136,8 +137,8 @@ Three layers: (1) per-isolate sliding window (`LocalRateLimiter`, the cheap loca
 
 ## Tests
 
-- **Total**: 534 tests, 44 files, all passing (`npm test` → `vitest run`).
-- Composition: 403 pre-existing + stage suites (Stages 2-20, each stage's unit/integration file), 72 security acceptance (`tests/security/`, Stage 22), 59 concurrency (`tests/concurrency/`, Stage 23).
+- **Total**: 543 tests, 46 files, all passing (`npm test` → `vitest run`).
+- Composition: 403 pre-existing + stage suites (Stages 2-20, each stage's unit/integration file), 72 security acceptance (`tests/security/`, Stage 22), 59 concurrency (`tests/concurrency/`, Stage 23), 9 smoke mechanism (`tests/health.test.ts` 4, `tests/outreach-dry-run.test.ts` 5).
 - Suites deliberately overlap: stage suites prove each layer's unit behavior, the security suite proves the layered combination through the real `handleAdminRequest` entry, the concurrency suite proves the single-statement atomicity the layers rely on under 10/50/100-task storms.
 - The suites bite: Stage 22 found a real RBAC gating bug and a real SSRF bypass; Stage 23 found a real schema drift. All three were fixed with regression pins the same day they were found.
 
@@ -151,7 +152,7 @@ Three layers: (1) per-isolate sliding window (`LocalRateLimiter`, the cheap loca
 
 ## Regression Results
 
-Stage 24 gate, all green: `npm test` 534/534 (44 files); `npm run typecheck` exit 0; no linter is configured in this repo — the actual static gates are `tsc --noEmit` plus the repo-wide static tests inside vitest (notably the no-console guard); build = `npx wrangler deploy --dry-run --outdir dist-dryrun` → 439.10 KiB / gzip 111.86 KiB, clean exit; `scripts/check-panel.mjs` → 4 panels clean. Zero regressions across the entire program.
+Stage 24 gate, all green: `npm test` 543/543 (46 files); `npm run typecheck` exit 0; no linter is configured in this repo — the actual static gates are `tsc --noEmit` plus the repo-wide static tests inside vitest (notably the no-console guard); build = `npx wrangler deploy --dry-run --outdir dist-dryrun` → 440.02 KiB / gzip 112.15 KiB, clean exit; `scripts/check-panel.mjs` → 4 panels clean. Zero regressions across the entire program.
 
 ## Remaining Risks
 
@@ -166,6 +167,7 @@ Accepted and documented, none unmitigated:
 7. **`uncertain` Gmail sends** require an operator decision by design (auto-retry could double-send); the panel surfaces them for review.
 8. **`request_id` correlation for AI/Gmail-layer work** goes through `CAMPAIGN_*`/`RESEARCH_*` audit rows rather than every business row — a documented boundary of the traceability chain.
 9. **Legacy plaintext credential rows** are tolerated until first read (lazy migration); the fail-closed path when the master key is absent is tested.
+10. **A forgotten `OUTREACH_DRY_RUN` flag** would silently swallow every real send (rows would pile up with `dry-run-` message ids and no `gmail_send_log` trail) — the deployment runbook makes removing the flag the last step of every smoke pass, and the `dry-run-` prefix is the designed detection signal.
 
 ## Deferred Improvements
 
@@ -179,9 +181,11 @@ Accepted and documented, none unmitigated:
 
 ## Deployment Instructions
 
+The full pipeline and smoke procedure is `docs/deployment-v2.md` (spec §31/§32). Summary:
+
 1. **Secrets** (operator, via Wrangler — never in git): `ADMIN_PANEL_TOKEN`, `CREDENTIAL_ENC_KEY` (32 random bytes, base64), `GEMINI_API_KEY`, `GEMINI_MODEL` (+ optional `CAMPAIGN_LOCK_TTL_MS`). Verify with `npx wrangler secret list`.
-2. **Deploy**: push to the deploy branch — GitHub Actions runs `schema.sql` (IF NOT EXISTS, idempotent), then the per-statement ALTER steps with `pragma_table_info` verification (self-healing, fail the deploy if a column is missing), then `wrangler deploy`.
-3. **Post-deploy verification**: panels load and log in; a login writes an `audit_logs` row with a `request_id`; `X-Request-ID` appears on API responses.
+2. **Deploy**: push to the deploy branch — GitHub Actions runs `schema.sql` (IF NOT EXISTS, idempotent), then the per-statement ALTER steps with `pragma_table_info` verification (self-healing, fail the deploy if a column is missing), then `wrangler deploy`. Never deploy by hand over production.
+3. **Post-deploy smoke** (per `docs/deployment-v2.md`): read-only probes — `GET /health` (200 only when the D1 binding answers), `/admin`, `/admin/api/auth/me`, `/admin/api/customers` — then the dry-run exercise with `OUTREACH_DRY_RUN=true`: create test customer → research → generate → send. The flag makes every send a no-op through the full state machine (rows marked `dry-run-…`, no Gmail call, no quota trail), so **smoke tests can never send real email**; remove the flag afterwards.
 4. **New installs**: `schema.sql` alone is sufficient (migrations 0005-0016 are for the pre-existing database; the workflow steps make them no-ops there). The Stage 23 drift fix is what makes this true — a fresh-install smoke test of quota reservation is part of the concurrency suite's fixture seeding.
 5. **Backup posture** (per `docs/backup-recovery.md`): weekly `wrangler d1 export` off-platform, a Time Travel bookmark note before risky migrations, quarterly restore drill.
 

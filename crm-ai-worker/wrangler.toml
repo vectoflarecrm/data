@@ -23,3 +23,9 @@ database_id = "REPLACE_WITH_D1_DATABASE_ID"
 # npx wrangler secret put GEMINI_API_KEY
 # Optional secret/configuration:
 # npx wrangler secret put GEMINI_MODEL
+
+# §32 smoke-test flag (optional, default off). "true"/"1" makes every send a
+# no-op that still walks the full state machine — no Gmail call, no quota.
+# Set it for production smoke tests, then REMOVE it. See docs/deployment-v2.md.
+# [vars]
+# OUTREACH_DRY_RUN = "true"

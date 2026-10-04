@@ -84,6 +84,25 @@ function isQuotaStopError(message: string): boolean {
   return message.includes("配额") || message.includes("quota") || message.includes("Quota");
 }
 
+/* ── Dry-run guard (spec §32) ──────────────────────────────────────────────
+ * OUTREACH_DRY_RUN=true turns every send into a no-op that still walks the
+ * FULL state machine (claim → sending → sent): production smoke tests can
+ * prove the whole chain works without calling Gmail, without consuming a
+ * reservation, and without a 'sent' quota row. The guard resolves BEFORE the
+ * injected transport on purpose — with the flag on, no code path can reach a
+ * real transport, not even by accident. Rows touched by a dry run are
+ * unmistakable: gmail_message_id starts with "dry-run-". */
+
+function isDryRunEnabled(env: GmailEnv): boolean {
+  const flag = env.OUTREACH_DRY_RUN;
+  return flag === "true" || flag === "1";
+}
+
+async function dryRunTransport(): Promise<SendResult> {
+  safeLog("warn", "[outreach-send] DRY RUN：OUTREACH_DRY_RUN 已开启，本次发送未调用 Gmail");
+  return { ok: true, gmail_message_id: `dry-run-${crypto.randomUUID().slice(0, 8)}` };
+}
+
 /* ── Stale lock recovery ──────────────────────────────────────────────────
  * Called before every claim. 'reserved' rows died before the Gmail call
  * started (nothing was sent) → safe to retry. 'sending' rows died with the
@@ -170,7 +189,7 @@ export async function sendWithStateMachine(
   options?: Parameters<typeof sendOutreachEmail>[2],
   deps?: SendMachineDeps,
 ): Promise<StateSendResult> {
-  const transport = deps?.transport ?? sendOutreachEmail;
+  const transport = isDryRunEnabled(env) ? dryRunTransport : (deps?.transport ?? sendOutreachEmail);
   const now = deps?.now ?? (() => new Date());
   const workerId = `worker-${crypto.randomUUID().slice(0, 8)}`;
 
