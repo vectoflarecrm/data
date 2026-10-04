@@ -59,7 +59,7 @@ overwritten by the other (§16.3).
 - `schema.sql`: comment block updated to name the second axis and the CI
   ALTER convention. `README.md`: formula card for the new score.
 
-## Tests (+8 → 359 total)
+## Tests (+8 → 351 total)
 `tests/score-separation.test.ts` (§16.3 mapped in the header):
 - §16.2 accounting: fully known record = 100; each dimension exactly 10
   points; a phone-only contact counts both the contact-person and phone
