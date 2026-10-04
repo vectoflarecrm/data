@@ -53,6 +53,7 @@ import { applySecurityHeaders, htmlCsp } from "./security-headers";
 import { originGuardRejection } from "./security/origin-guard";
 import { sanitizeResponse } from "./security/redaction";
 import { safeLog } from "./security/safe-log";
+import { setRequestId, getRequestId } from "./security/request-context";
 import { readCsvImportBody, parseCsvBounded, CsvLimitError } from "./security/csv-limits";
 import { writeAuditLog, AuditMetadata } from "./audit/audit-log";
 
@@ -320,8 +321,10 @@ export function jsonResponse(body: unknown, status = 200): Response {
  * upstream provider URL, and this panel's errors are readable by anyone who
  * reaches the route. The real message goes to the Worker log — which is where
  * a developer looks anyway — and the caller gets a request id to quote. */
-function internalErrorResponse(context: string, error: unknown): Response {
-  const requestId = crypto.randomUUID();
+function internalErrorResponse(context: string, error: unknown, request?: Request): Response {
+  // Stage 20: reuse the request's id when available so the 500's body
+  // request_id, the X-Request-ID header and the log line all match.
+  const requestId = getRequestId(request ?? null) ?? crypto.randomUUID();
   safeLog("error", `[admin:${context}] ${requestId}`, error);
   return jsonResponse(
     { detail: "服务器内部错误，请查看 Worker 日志", request_id: requestId },
@@ -639,6 +642,9 @@ async function auditAdminAction(
     action,
     resourceType,
     resourceId,
+    // Stage 20 (spec §21): correlate the audit row with the request that
+    // produced it — same UUID as the X-Request-ID response header.
+    requestId: getRequestId(request),
     metadata,
   });
 }
@@ -1597,7 +1603,7 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
         const msg = e instanceof Error ? e.message : String(e);
         if (msg.includes("UNIQUE")) return jsonResponse({ detail: "该服务账号已存在" }, 409);
         if (msg.includes("CREDENTIAL_ENC_KEY")) return jsonResponse({ detail: msg }, 400);
-        return internalErrorResponse("gmail-account-save", e);
+        return internalErrorResponse("gmail-account-save", e, request);
       }
       // Stage 9: client_email identifies the account; the private key /
       // refresh token material never enters the audit trail (§10.2).
@@ -1719,7 +1725,7 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (msg.includes("CREDENTIAL_ENC_KEY")) return jsonResponse({ detail: msg }, 400);
-        return internalErrorResponse("gmail-encrypt-all", e);
+        return internalErrorResponse("gmail-encrypt-all", e, request);
       }
     }
 
@@ -1903,7 +1909,7 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
 
     return jsonResponse({ detail: "Not Found" }, 404);
   } catch (error) {
-    return internalErrorResponse("outreach-api", error);
+    return internalErrorResponse("outreach-api", error, request);
   }
 }
 
@@ -2084,7 +2090,7 @@ async function handleCampaignApi(request: Request, env: AdminEnv, auth: AdminAut
     // reporting a server fault. Anything else is an unexpected fault and must
     // not be echoed back: this used to return `msg` for both cases.
     const isUserError = /不能为空|必须是|最多|不存在|未启用|尚未配置|没有匹配|已存在|超出|Invalid/.test(msg);
-    if (!isUserError) return internalErrorResponse("campaign-api", error);
+    if (!isUserError) return internalErrorResponse("campaign-api", error, request);
     return jsonResponse({ detail: msg }, 400);
   }
 }
@@ -2160,7 +2166,7 @@ async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthCo
     }
     return jsonResponse({ detail: "Not Found" }, 404);
   } catch (error) {
-    return internalErrorResponse("admin-api", error);
+    return internalErrorResponse("admin-api", error, request);
   }
 }
 
@@ -2172,8 +2178,29 @@ export async function handleAdminRequest(
   // or 404 text — leaves through here, so the security-header set is applied
   // once, centrally. Null ("not an /admin path") is passed through for
   // index.ts to handle.
+  //
+  // Stage 20 (spec §21): one UUID per request, minted here — never accepted
+  // from the client — stamped on the response (X-Request-ID) and carried in
+  // the request context so audit rows and error logs written while serving
+  // this request correlate with it.
+  const requestId = crypto.randomUUID();
+  setRequestId(request, requestId);
   const response = await routeAdminRequest(request, env);
-  return response === null ? null : applySecurityHeaders(response);
+  if (response === null) return null;
+  return applySecurityHeaders(withRequestId(response, requestId));
+}
+
+/** Stamps the request id onto a response. Response headers are guard-
+ * protected in some runtimes, so the response is rebuilt with an extended
+ * header set; the body stream is transferred unread. */
+function withRequestId(response: Response, requestId: string): Response {
+  const headers = new Headers(response.headers);
+  headers.set("X-Request-ID", requestId);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 async function routeAdminRequest(
@@ -2418,7 +2445,7 @@ async function routeAdminRequest(
 
   return new Response("Not Found", { status: 404 });
   } catch (error) {
-    return internalErrorResponse("admin-router", error);
+    return internalErrorResponse("admin-router", error, request);
   }
 }
 
