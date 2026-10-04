@@ -977,10 +977,14 @@ async function updateCustomer(request: Request, env: AdminEnv, id: number, auth:
     }
     return jsonResponse(updated ?? { detail: "Customer not found" }, updated ? 200 : 404);
   } catch (error) {
-    return jsonResponse(
-      { detail: error instanceof Error ? error.message : "Invalid customer data" },
-      400,
-    );
+    const msg = error instanceof Error ? error.message : "Invalid customer data";
+    // Stage 17 (spec §18.1): the partial unique index on customers(domain)
+    // turns a duplicate-domain PATCH into a clear 409 rather than a raw
+    // SQLite error string.
+    if (msg.includes("UNIQUE constraint failed: customers.domain")) {
+      return jsonResponse({ detail: "该 domain 已被其他客户占用" }, 409);
+    }
+    return jsonResponse({ detail: msg }, 400);
   }
 }
 
@@ -1069,6 +1073,18 @@ async function handleProviderKeysApi(request: Request, env: AdminEnv, auth: Admi
       }, 400);
     }
     const encrypted = await encryptSecret(apiKey, env);
+    // Stage 17 (spec §18.1): reject a duplicate API fingerprint up front.
+    // Bulk import already dedupes this way ("duplicates within the paste AND
+    // keys already stored for the provider are skipped"); the single-key form
+    // now enforces the same per-provider rule, and the partial unique index
+    // idx_api_configs_fingerprint (deploy-worker.yml) backstops it against
+    // concurrent writes.
+    const dupe = await env.DB.prepare(
+      `SELECT id FROM api_configs WHERE provider = ? AND key_fingerprint = ? LIMIT 1`,
+    ).bind(provider, encrypted.fingerprint).first<{ id: number }>();
+    if (dupe) {
+      return jsonResponse({ detail: "该 provider 下已存在相同的 API key（指纹重复），已拒绝保存" }, 409);
+    }
     const result = await env.DB.prepare(
       `INSERT INTO api_configs (provider, label, api_key, key_hint, key_fingerprint, rpm_limit, model, is_active)
        VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,

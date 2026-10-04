@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS customers (
   id INTEGER PRIMARY KEY,
   company_id TEXT NOT NULL UNIQUE,
+  display_id TEXT,
   domain TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
   company_name TEXT,
@@ -58,6 +59,10 @@ CREATE TABLE IF NOT EXISTS customers (
   -- AI-recommended outreach angle + evidence lines, also JSON. Consumed by the
   -- outreach prompt builder for second-pass personalization.
   outreach_context TEXT CHECK (outreach_context IS NULL OR json_valid(outreach_context)),
+  lead_score INTEGER,
+  buying_signals TEXT,
+  source_import_id TEXT,
+  data_completeness_score INTEGER,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -312,10 +317,11 @@ CREATE INDEX IF NOT EXISTS idx_customer_imports_batch ON customer_imports(import
 -- Stage 15 (spec §16) adds data_completeness_score as a SEPARATE quality axis
 -- (identity/domain/country/contact/email/phone/social/products/evidence/
 -- freshness) — neither score derives from or overwrites the other.
--- Columns lead_score / buying_signals / source_import_id /
--- data_completeness_score are added by the CI migration steps (per-statement
--- ALTER with duplicate-column tolerance), since D1 fails a whole schema file
--- on any duplicate ALTER.
+-- lead_score / buying_signals / source_import_id / data_completeness_score
+-- (and display_id, which previously existed only in production) are part of
+-- the CREATE above for fresh installs; existing databases get them from the
+-- CI migration steps (per-statement ALTER with duplicate-column tolerance),
+-- since D1 fails a whole schema file on any duplicate ALTER.
 
 -- Saved customer groups (定向群发/客群): a reusable 海选 filter set so a
 -- segment ("西班牙经销商") can be re-targeted later without retyping criteria.
@@ -498,3 +504,43 @@ CREATE TABLE IF NOT EXISTS rate_limit_windows (
   window_start INTEGER NOT NULL,
   count INTEGER NOT NULL DEFAULT 1
 );
+
+-- Security V2 Stage 17 (spec §18): contacts table. The research pipeline and
+-- the admin detail view have always read and written it, but it was never
+-- defined in this file — fresh databases lacked it entirely (the research
+-- save step failed with "no such table") while production carried a manually
+-- created table of unknown shape. The column set below is exactly what the
+-- code touches (admin.ts getCustomerContacts SELECT list; index.ts research
+-- INSERT). Uniqueness is enforced through the named indexes applied by the
+-- dedicated CI step (idx_contacts_contact_id / idx_contacts_seq), not inline
+-- constraints, so a pre-existing production table and fresh installs
+-- converge on the same named indexes instead of diverging constraint
+-- objects.
+CREATE TABLE IF NOT EXISTS contacts (
+  id INTEGER PRIMARY KEY,
+  contact_id TEXT NOT NULL,
+  company_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  first_name TEXT,
+  last_name TEXT,
+  full_name TEXT,
+  title TEXT,
+  department TEXT,
+  email TEXT,
+  cellphone TEXT,
+  tel TEXT,
+  whatsapp TEXT,
+  linkedin_url TEXT,
+  social_accounts TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company_id);
+
+-- Research-run history lookups (per-customer run list).
+CREATE INDEX IF NOT EXISTS idx_research_runs_customer ON research_runs(customer_id);
+
+-- The §18.1 UNIQUE indexes — customers(domain), api_configs(provider,
+-- key_fingerprint), contacts.contact_id and contacts(company_id, seq) — are
+-- applied by the dedicated CI step, NOT here: schema.sql runs against the
+-- live database on every deploy and must never fail on pre-existing data
+-- (same reasoning as the Stage 10 idempotency index — see deploy-worker.yml).

@@ -392,6 +392,27 @@ jobs:
           info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('customers') WHERE name = 'data_completeness_score'")"
           echo "$info" | grep -q '"n": 1' || { echo 'Migration failed: data_completeness_score missing'; exit 1; }
 
+      - name: Migrate contacts + integrity indexes (Security V2 Stage 17)
+        # Spec §18: the contacts table was read/written by the code but only
+        # ever created manually in production — the CREATE here (plus
+        # schema.sql) fixes fresh installs and pins the production shape.
+        # The §18.1 UNIQUE indexes are created with || true tolerance (Stage
+        # 10 idempotency-index precedent): if a live table already holds
+        # duplicates the creation is skipped with a warning instead of
+        # blocking the deploy — the verification query below reports which
+        # indexes exist so a skipped one is visible in the CI log.
+        run: |
+          npx wrangler d1 execute crm-ai-db --remote --command "CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY, contact_id TEXT NOT NULL, company_id TEXT NOT NULL, seq INTEGER NOT NULL, first_name TEXT, last_name TEXT, full_name TEXT, title TEXT, department TEXT, email TEXT, cellphone TEXT, tel TEXT, whatsapp TEXT, linkedin_url TEXT, social_accounts TEXT)" || true
+          npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE customers ADD COLUMN display_id TEXT" 2>&1 | grep -q 'duplicate column name' && echo "display_id already exists" || true
+          npx wrangler d1 execute crm-ai-db --remote --command "CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_domain ON customers(domain) WHERE domain != ''" || echo "WARNING: idx_customers_domain skipped (duplicate domains exist — clean them and re-run)"
+          npx wrangler d1 execute crm-ai-db --remote --command "CREATE UNIQUE INDEX IF NOT EXISTS idx_api_configs_fingerprint ON api_configs(provider, key_fingerprint) WHERE key_fingerprint IS NOT NULL" || echo "WARNING: idx_api_configs_fingerprint skipped (duplicate fingerprints exist — clean them and re-run)"
+          npx wrangler d1 execute crm-ai-db --remote --command "CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_contact_id ON contacts(contact_id)" || echo "WARNING: idx_contacts_contact_id skipped (duplicate contact_id values exist)"
+          npx wrangler d1 execute crm-ai-db --remote --command "CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_seq ON contacts(company_id, seq)" || echo "WARNING: idx_contacts_seq skipped (duplicate (company_id, seq) pairs exist)"
+          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'contacts'")"
+          echo "$info" | grep -q '"n": 1' || { echo 'Migration failed: contacts table missing'; exit 1; }
+          indexes="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN ('idx_customers_domain','idx_api_configs_fingerprint','idx_contacts_contact_id','idx_contacts_seq','idx_contacts_company','idx_research_runs_customer')")"
+          echo "integrity indexes present: $indexes"
+
       - name: Typecheck
         run: npm run typecheck
 
