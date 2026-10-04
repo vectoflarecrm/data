@@ -149,7 +149,10 @@ export function assertPublicHttpUrl(raw: string): URL {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new OutboundUrlError(raw, `scheme ${url.protocol} not allowed`);
   }
-  const host = url.hostname.toLowerCase();
+  const host = url.hostname.toLowerCase().replace(/\.+$/, "");
+  // Stage 22 fix: DNS treats "localhost." the same as "localhost" (trailing
+  // dots are root-marker syntax), so the root label must not smuggle a
+  // refused hostname past the literal comparisons below.
   if (host === "localhost") {
     throw new OutboundUrlError(raw, "localhost refused");
   }

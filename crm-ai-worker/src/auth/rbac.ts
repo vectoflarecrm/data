@@ -141,7 +141,11 @@ export function requiredPermission(url: URL, method: string): Permission | null 
       if (parts.length === 4) return method === "GET" ? "campaigns.read" : "campaigns.write";
       if (parts.length >= 5) {
         if (method === "GET") return "campaigns.read";
-        const action = parts[4];
+        // Stage 22 fix: the action lives at parts[5] ("/campaigns/:id/send"),
+        // parts[4] is the numeric id — the old parts[4] check never matched,
+        // so campaign send was gated as campaigns.write and the sender role
+        // (outreach.send) was wrongly denied its designed capability.
+        const action = parts.length >= 6 ? parts[5] : "";
         if (action === "send") return "outreach.send";
         return "campaigns.write"; // status changes, draft generation, deletes
       }
