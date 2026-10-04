@@ -195,3 +195,32 @@ The full pipeline and smoke procedure is `docs/deployment-v2.md` (spec §31/§32
 2. **Data**: D1 Time Travel — `npx wrangler d1 time-travel info` / `restore` (in-place and destructive; the command prints an undo bookmark — record it before doing anything else). Window: 30 days (paid) / 7 days (free).
 3. **Off-platform restore**: the weekly `wrangler d1 export` dump, per the runbook in `docs/backup-recovery.md`.
 4. **Credentials after key loss/rotation**: re-enter credentials in the panel (each row's `key_hint` identifies which key sealed it); never delete rows to "fix" encryption — the lazy migration re-seals on next write once a valid key is present.
+
+## Appendix: coverage of the original audit (建议.txt)
+
+The audit that prompted this program, triaged item by item. Every item is either implemented or an explicitly documented deferral — nothing was silently dropped between audit → spec → implementation.
+
+| Audit item | Status |
+|---|---|
+| P0 Admin Token = root key → sessions + role split | Implemented — Stages 2/3 |
+| P0 Gmail quota check→send→log race | Implemented — Stage 11 (atomic reservation) |
+| P0 Gmail double-send on worker timeout | Implemented — Stage 10 (state machine + idempotency) |
+| P0 Cloudflare secret self-management (persistent-compromise chain) | Implemented — Stage 3 (surface removed) |
+| P1 plaintext credentials tolerated in schema | Implemented — Stage 4 encryption + lazy migration; schema-level `CHECK(enc:v1:)` impossible on existing SQLite tables without rebuild → Remaining Risks #9 |
+| P1 missing CSP/HSTS/X-Frame-Options | Implemented — Stage 5 (nonce CSP, stronger than the audit's `unsafe-inline` suggestion) |
+| P1 single admin role | Implemented — Stage 3 (5 roles, deny-by-default) |
+| P1 CSV without size/row/field limits | Implemented — Stage 8 (5 MB / 2 000 rows / 200 cols / 10 k-char fields, stricter than suggested) |
+| P2 SSRF on customer domains | Implemented — Stage 7 (`assertPublicHttpUrl` choke point) |
+| P2 search-result URLs treated as untrusted | Implemented — Stage 7: every dynamic outbound fetch (customer domains, search-result links, research/social URLs) funnels through `fetchWithTimeout` → guard; the only raw `fetch()` sites are compile-time-constant vendor endpoints (verified by call-site audit) |
+| P2 per-isolate RPM drift | Implemented — Stage 16 (D1 global window + `RateLimiter` abstraction; DO limiter is the documented drop-in next step) |
+| P2 research/contact data retention & bloat | Partially — evidence versioning (Stage 14) stops re-research bloat; retention pruning deferred (audit log retention is Remaining Risks #5) |
+| P2 hardcoded lead-score rules | Partially — Stage 15 split `lead_score` from `completeness_score`; making weights configurable deferred |
+| P3 no audit log | Implemented — Stage 9 (+ request-id correlation Stage 20) |
+| P3 no backup/recovery strategy | Implemented — Stage 21 (`docs/backup-recovery.md`) |
+| P3 no real task queue/lease | Accepted as documented design — atomic `UPDATE … RETURNING` claims (Stage 23-proven) cover current scale; queue migration is a Phase 3/4 architecture step (spec §35 forbids unmotivated big refactors) |
+| Cloudflare Access instead of self-managed auth | Deferred improvement — sessions + RBAC + throttling implemented now; Access integration listed under Deferred Improvements (2FA/WebAuthn) |
+| D1 database id in wrangler.toml | Implemented pre-V2 — placeholder + CI secret substitution |
+| Evidence provenance (source_hash/content_hash/model/version) | Implemented — Stage 14 (`research_runs` carries parser_version, model_name, model_version; evidence rows carry source_id/source_hash/content_hash) |
+| Indirect prompt injection from crawled content | Implemented — Stage 13 |
+| Customers-table normalization (companies/people/facts; `full_research_text` out of customers) | Deferred — Phase 3 architecture evolution (audit's own recommendation order puts it after security/reliability); current split (contacts, evidence, research_runs, outreach_emails) is the incremental path |
+| AI intelligence pipeline (fact extraction → entity resolution → scoring) | Deferred — Phase 4, beyond Security V2 scope |
