@@ -441,6 +441,39 @@ jobs:
           info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('customer_imports') WHERE name = 'request_id'")"
           echo "$info" | grep -q '"n": 1' || { echo 'Migration failed: customer_imports.request_id missing'; exit 1; }
 
+      - name: Rebuild outreach_emails with FK (post-V2 Stage 34)
+        # Schema drift fix: fresh installs always had the FOREIGN KEY
+        # (customer_id) REFERENCES customers(id) declaration (schema.sql)
+        # and D1 enforces FKs by default in every transaction — only legacy
+        # databases still run a pre-FK outreach_emails shape. SQLite cannot
+        # ALTER a table to add a FOREIGN KEY, so this is a single-transaction
+        # table rebuild (wrangler --file runs the whole file as one implicit
+        # transaction; any statement failing rolls the entire file back).
+        # Skipped entirely when the FK is already present (idempotent and
+        # rows_written-quota friendly). Orphaned drafts would make the
+        # INSERT SELECT fail the rebuilt FK — checked first, and a failure
+        # names the cleanup SQL instead of silently dropping data.
+        run: |
+          fk="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_foreign_key_list('outreach_emails')")"
+          if echo "$fk" | grep -q '"n": 0'; then
+            orphans="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM outreach_emails e LEFT JOIN customers c ON c.id = e.customer_id WHERE e.customer_id IS NOT NULL AND c.id IS NULL")"
+            if echo "$orphans" | grep -q '"n": 0'; then
+              before_n="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM outreach_emails" | grep -o '"n": [0-9]*')"
+              echo 'outreach_emails FK missing and no orphans - rebuilding table (single transaction)'
+              npx wrangler d1 execute crm-ai-db --remote --file=./migrations/0019_outreach_emails_fk_rebuild.sql
+              after_n="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM outreach_emails" | grep -o '"n": [0-9]*')"
+              [ "$before_n" = "$after_n" ] || { echo "Migration failed: outreach_emails row count changed ($before_n -> $after_n)"; exit 1; }
+            else
+              echo "Migration blocked: orphaned outreach_emails rows exist ($orphans). Clean them up first, e.g.:"
+              echo '  DELETE FROM outreach_emails WHERE customer_id IS NOT NULL AND customer_id NOT IN (SELECT id FROM customers);'
+              exit 1
+            fi
+          else
+            echo 'outreach_emails FK already present - skipping rebuild'
+          fi
+          fk="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_foreign_key_list('outreach_emails')")"
+          echo "$fk" | grep -q '"n": 1' || { echo 'Migration failed: outreach_emails FK missing after rebuild'; exit 1; }
+
       - name: Typecheck
         run: npm run typecheck
 
