@@ -925,6 +925,10 @@ async function importCustomersCsv(request: Request, env: AdminEnv, auth: AdminAu
   if (iName === -1) return jsonResponse({ detail: "CSV must contain a company_name column" }, 400);
 
   const importId = `imp_${Date.now().toString(36)}`;
+  // Stage 33: every customer_imports row of this import carries the request
+  // id — same id as the IMPORT audit row, so a row traces to its request in
+  // one hop.
+  const importRequestId = getRequestId(request);
   const normalizeDomain = (raw: string | undefined): string | null => {
     if (!raw) return null;
     try {
@@ -969,9 +973,9 @@ async function importCustomersCsv(request: Request, env: AdminEnv, auth: AdminAu
     if (existingId) {
       matched++;
       insertStmts.push(env.DB.prepare(
-        `INSERT INTO customer_imports (import_id, file_name, row_number, raw_json, mapped_company_id, dedup_status)
-         VALUES (?, ?, ?, ?, ?, 'matched')`,
-      ).bind(importId, body.file_name ?? null, r, rawJson, existingId));
+        `INSERT INTO customer_imports (import_id, file_name, row_number, raw_json, mapped_company_id, dedup_status, request_id)
+         VALUES (?, ?, ?, ?, ?, 'matched', ?)`,
+      ).bind(importId, body.file_name ?? null, r, rawJson, existingId, importRequestId));
       continue;
     }
 
@@ -992,9 +996,9 @@ async function importCustomersCsv(request: Request, env: AdminEnv, auth: AdminAu
       importId,
     ));
     insertStmts.push(env.DB.prepare(
-      `INSERT INTO customer_imports (import_id, file_name, row_number, raw_json, mapped_company_id, dedup_status)
-       VALUES (?, ?, ?, ?, ?, 'inserted')`,
-    ).bind(importId, body.file_name ?? null, r, rawJson, companyId));
+      `INSERT INTO customer_imports (import_id, file_name, row_number, raw_json, mapped_company_id, dedup_status, request_id)
+       VALUES (?, ?, ?, ?, ?, 'inserted', ?)`,
+    ).bind(importId, body.file_name ?? null, r, rawJson, companyId, importRequestId));
     inserted++;
   }
 
@@ -2034,7 +2038,7 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
       if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 50) {
         return jsonResponse({ detail: "limit must be an integer from 1 to 50" }, 400);
       }
-      const result = await generateOutreachEmails(env, body.brand.trim(), requestedLimit);
+      const result = await generateOutreachEmails(env, body.brand.trim(), requestedLimit, getRequestId(request));
       await auditAdminAction(env, request, auth, "GENERATE_EMAIL", "outreach_email", null, {
         brand: body.brand.trim(),
         limit: requestedLimit,
@@ -2105,6 +2109,7 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
             attachmentLanguage: attachmentLangForCountry(draft.country),
             // Brand-bound service account (empty = auto-pick from the pool).
             gmailAccount: draft.gmail_account,
+            requestId: getRequestId(request),
           });
           if (r.ok) sent++;
           results.push({ id: draft.id, ok: r.ok, error: r.error, outcome: r.outcome });
@@ -2187,6 +2192,7 @@ async function handleOutreachApi(request: Request, env: AdminEnv, auth: AdminAut
         brandName: row.brand_name,
         attachmentLanguage: attachmentLangForCountry(row.country),
         gmailAccount: row.gmail_account,
+        requestId: getRequestId(request),
       });
       const quota = await getQuota(env);
       await auditAdminAction(env, request, auth, "SEND_EMAIL", "outreach_email", String(id), {
@@ -2341,7 +2347,7 @@ async function handleCampaignApi(request: Request, env: AdminEnv, auth: AdminAut
       if (action === "/generate" && request.method === "POST") {
         const body = await readJsonBody(request);
         const limit = parseBatchSize(body.limit, 10);
-        const result = await runCampaignGenerate(env, id, limit);
+        const result = await runCampaignGenerate(env, id, limit, {}, getRequestId(request));
         await auditAdminAction(env, request, auth, "GENERATE_EMAIL", "campaign", String(id), {
           via: "campaign-generate",
           limit,
@@ -2353,7 +2359,7 @@ async function handleCampaignApi(request: Request, env: AdminEnv, auth: AdminAut
       if (action === "/send" && request.method === "POST") {
         const body = await readJsonBody(request);
         const limit = parseBatchSize(body.limit, 10);
-        const result = await runCampaignSend(env, id, limit);
+        const result = await runCampaignSend(env, id, limit, {}, getRequestId(request));
         await auditAdminAction(env, request, auth, "SEND_EMAIL", "campaign", String(id), {
           via: "campaign-send",
           limit,

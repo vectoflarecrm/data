@@ -612,6 +612,7 @@ export async function runCampaignGenerate(
   campaignId: number,
   limit: number,
   deps: Partial<CampaignDeps> = {},
+  requestId: string | null = null,
 ): Promise<CampaignStepResult> {
   const { generate } = { ...DEFAULT_DEPS, ...deps };
   const campaign = await requireCampaign(env, campaignId);
@@ -644,6 +645,7 @@ export async function runCampaignGenerate(
         env,
         campaign.brand_name,
         pending.results.map((r) => r.customer_id),
+        requestId,
       );
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -746,6 +748,7 @@ export async function runCampaignSend(
   campaignId: number,
   limit: number,
   deps: Partial<CampaignDeps> = {},
+  requestId: string | null = null,
 ): Promise<CampaignStepResult> {
   const { send, quota: getQuotaNow } = { ...DEFAULT_DEPS, ...deps };
   const campaign = await requireCampaign(env, campaignId);
@@ -812,6 +815,7 @@ export async function runCampaignSend(
             brandName: campaign.brand_name,
             attachmentLanguage: attachmentLangForCountry(member.country),
             gmailAccount: settings?.gmail_account ?? null,
+            requestId,
           },
         );
         if (res.ok) {

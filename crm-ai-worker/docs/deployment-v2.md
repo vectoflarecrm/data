@@ -6,7 +6,7 @@ Security V2 spec §31/§32. This project has no staging environment, so this doc
 
 ```
 local tests            migration validation           preview/staging         smoke test            production
-(674 vitest tests,    (tsc --noEmit + wrangler      (none exists — the      (§32 below, with      (CI push of the
+(679 vitest tests,    (tsc --noEmit + wrangler      (none exists — the      (§32 below, with      (CI push of the
  tsc --noEmit,         deploy --dry-run proves the    dry-run build + CI      OUTREACH_DRY_RUN      reviewed branch;
  check-panel.mjs)      bundle builds and binds)       gate steps in the       on, then off)         CI runs schema.sql
                                                         workflow are the                              + column checks
@@ -15,7 +15,7 @@ local tests            migration validation           preview/staging         sm
 
 Concretely, before every deploy:
 
-1. **Local tests** — `npm test` (674 tests: unit/stage suites + 72 security acceptance + 59 concurrency + dry-run/health + post-V2 suites), `npm run typecheck`, `node scripts/check-panel.mjs`. All must be green.
+1. **Local tests** — `npm test` (679 tests: unit/stage suites + 72 security acceptance + 59 concurrency + dry-run/health + post-V2 suites), `npm run typecheck`, `node scripts/check-panel.mjs`. All must be green.
 2. **Build validation** — `npx wrangler deploy --dry-run --outdir dist-dryrun` with `WRANGLER_SEND_METRICS=false`. Proves the bundle compiles and binds. Delete `dist-dryrun/` afterwards.
 3. **Migration validation** — CI applies migrations idempotently and **verifies**: `schema.sql` runs with IF NOT EXISTS, then per-statement ALTER steps (duplicate-column tolerant), then `pragma_table_info` assertions that fail the deploy if any expected column is missing. A deploy cannot succeed with a half-migrated database. Forward-only per §29; every change is additive, so an old worker on a new schema keeps working (backward compatibility, §30 — business data is never touched).
 4. **Production** — push the reviewed branch; the workflow deploys. The worker is stateless; the only state is D1.
@@ -80,8 +80,9 @@ With the flag on, the send state machine runs end-to-end but the Gmail transport
 
 ## 5. Verification record
 
-- Pipeline gate as of this document: 674/674 tests (54 files), `tsc --noEmit` clean, dry-run build 532.38 KiB (gzip 131.14 KiB), 7 panels clean.
+- Pipeline gate as of this document: 679/679 tests (55 files), `tsc --noEmit` clean, dry-run build 532.92 KiB (gzip 131.24 KiB), 7 panels clean.
 - Smoke-mechanism tests: `tests/health.test.ts` (probe contract), `tests/outreach-dry-run.test.ts` (dry-run guard).
+- **request_id columns (post-V2 Stage 33)**: `outreach_emails` / `gmail_send_log` / `customer_imports` gain a nullable `request_id` via the CI idempotent ALTER block (`migrations/0018_business_request_ids.sql` is the change record; fresh installs get the columns straight from schema.sql). Old rows keep NULL — the column only populates from the first deploy onward. No smoke step: the column is exercised by the first generate/send/import.
 - **Durable Objects (post-V2 Stage 32)**: `wrangler.toml` declares the `RATE_LIMITER` binding + a one-time SQLite migration for `RateLimiterDO`. `wrangler deploy` applies the migration automatically on the first deploy carrying it; no D1 step and no operator action. The limiter is active from that deploy (true global sliding window). Rolling back to a pre-Stage-32 bundle is safe: old code simply ignores the binding.
 
 ## 6. Enabling WebAuthn 2FA (post-V2 Stage 29) — read before setting `WEBAUTHN_RP_ID`

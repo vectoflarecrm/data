@@ -83,7 +83,7 @@ async function makeEnv() {
     );
     CREATE TABLE customer_imports (
       import_id TEXT, file_name TEXT, row_number INTEGER, raw_json TEXT,
-      mapped_company_id TEXT, dedup_status TEXT
+      mapped_company_id TEXT, dedup_status TEXT, request_id TEXT
     );
   `);
   return {

@@ -424,6 +424,23 @@ jobs:
           indexes="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN ('idx_customers_domain','idx_api_configs_fingerprint','idx_contacts_contact_id','idx_contacts_seq','idx_contacts_company','idx_research_runs_customer')")"
           echo "integrity indexes present: $indexes"
 
+      - name: Migrate business request_id columns (post-V2 Stage 33)
+        # Traceability chain: outreach_emails / gmail_send_log /
+        # customer_imports each gain a request_id column holding the admin
+        # request's UUID (X-Request-ID, same id as that request's audit
+        # rows). Additive nullable columns — old code ignores them.
+        # Per-statement ALTER with duplicate-column tolerance, then verify.
+        run: |
+          npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE outreach_emails ADD COLUMN request_id TEXT" 2>&1 | grep -q 'duplicate column name' && echo "outreach_emails.request_id already exists" || true
+          npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE gmail_send_log ADD COLUMN request_id TEXT" 2>&1 | grep -q 'duplicate column name' && echo "gmail_send_log.request_id already exists" || true
+          npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE customer_imports ADD COLUMN request_id TEXT" 2>&1 | grep -q 'duplicate column name' && echo "customer_imports.request_id already exists" || true
+          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('outreach_emails') WHERE name = 'request_id'")"
+          echo "$info" | grep -q '"n": 1' || { echo 'Migration failed: outreach_emails.request_id missing'; exit 1; }
+          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('gmail_send_log') WHERE name = 'request_id'")"
+          echo "$info" | grep -q '"n": 1' || { echo 'Migration failed: gmail_send_log.request_id missing'; exit 1; }
+          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('customer_imports') WHERE name = 'request_id'")"
+          echo "$info" | grep -q '"n": 1' || { echo 'Migration failed: customer_imports.request_id missing'; exit 1; }
+
       - name: Typecheck
         run: npm run typecheck
 

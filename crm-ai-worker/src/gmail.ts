@@ -517,11 +517,11 @@ export async function getQuota(env: GmailEnv): Promise<QuotaInfo> {
   };
 }
 
-async function logSend(env: GmailEnv, emailId: number, to: string, status: string, detail: string | null, senderClientEmail: string | null): Promise<void> {
+async function logSend(env: GmailEnv, emailId: number, to: string, status: string, detail: string | null, senderClientEmail: string | null, requestId: string | null): Promise<void> {
   await ensureSendLogSenderColumn(env);
   await env.DB.prepare(
-    `INSERT INTO gmail_send_log (outreach_email_id, recipient, status, detail, sender_client_email) VALUES (?, ?, ?, ?, ?)`,
-  ).bind(emailId, to, status, detail?.slice(0, 500) ?? null, senderClientEmail).run();
+    `INSERT INTO gmail_send_log (outreach_email_id, recipient, status, detail, sender_client_email, request_id) VALUES (?, ?, ?, ?, ?, ?)`,
+  ).bind(emailId, to, status, detail?.slice(0, 500) ?? null, senderClientEmail, requestId).run();
 }
 
 /* Older deployments have a gmail_send_log without the per-account column. */
@@ -604,7 +604,11 @@ export async function sendOutreachEmail(
     /** Recipient's language code (e.g. "es") used to pick language-tagged catalogs. */
     attachmentLanguage?: string | null;
     /** Brand-bound service account (gmail_accounts.client_email); empty = auto-pick. */
-    gmailAccount?: string | null; },
+    gmailAccount?: string | null;
+    /** Post-V2 Stage 33: the admin request id (X-Request-ID) that triggered
+     * this send — lands on the gmail_send_log row, matching the request's
+     * SEND_EMAIL audit row. Null for non-request callers. */
+    requestId?: string | null; },
 ): Promise<SendResult> {
   if (!email.email_to) return { ok: false, error: "收件人为空" };
   if (!email.subject || !email.body) return { ok: false, error: "主题或正文为空" };
@@ -680,7 +684,7 @@ export async function sendOutreachEmail(
 
   if (!resp.ok) {
     const detail = (await resp.text()).replace(/\s+/g, " ").slice(0, 300);
-    await logSend(env, email.id, email.email_to, "failed", `HTTP ${resp.status}: ${detail}`, account.clientEmail);
+    await logSend(env, email.id, email.email_to, "failed", `HTTP ${resp.status}: ${detail}`, account.clientEmail, options?.requestId ?? null);
     await noteGmailAccountResult(env, account.clientEmail, false, `HTTP ${resp.status}: ${detail}`);
     // Definite rejection: the slot is freed immediately (§12 commit path).
     await releaseReservation(env, email.id);
@@ -695,7 +699,7 @@ export async function sendOutreachEmail(
     // 2xx but unreadable body: Gmail almost certainly accepted the message.
     throw new GmailTransportError("Gmail API 返回了无法解析的成功响应（送达状态未知）");
   }
-  await logSend(env, email.id, email.email_to, "sent", null, account.clientEmail);
+  await logSend(env, email.id, email.email_to, "sent", null, account.clientEmail, options?.requestId ?? null);
   await noteGmailAccountResult(env, account.clientEmail, true);
   await env.DB.prepare(
     `UPDATE outreach_emails SET status = 'sent', sent_at = CURRENT_TIMESTAMP WHERE id = ?`,

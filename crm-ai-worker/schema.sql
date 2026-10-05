@@ -133,6 +133,9 @@ CREATE TABLE IF NOT EXISTS outreach_emails (
   locked_by TEXT,
   last_error TEXT,
   gmail_message_id TEXT,
+  -- Post-V2 Stage 33: the admin request (X-Request-ID) that generated this
+  -- draft — shortens the traceability chain (audit row ↔ business row).
+  request_id TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (customer_id) REFERENCES customers(id)
 );
@@ -248,6 +251,9 @@ CREATE TABLE IF NOT EXISTS gmail_send_log (
   -- existed only in migrations/0003 for existing databases — a fresh
   -- schema.sql install lacked it and reserveQuota failed closed.
   sender_client_email TEXT,
+  -- Post-V2 Stage 33: the admin request (X-Request-ID) that triggered this
+  -- send attempt — same id as the SEND_EMAIL audit row for that request.
+  request_id TEXT,
   sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -312,6 +318,9 @@ CREATE TABLE IF NOT EXISTS customer_imports (
   raw_json TEXT NOT NULL CHECK (raw_json IS NULL OR json_valid(raw_json)),
   mapped_company_id TEXT,
   dedup_status TEXT NOT NULL DEFAULT 'pending' CHECK (dedup_status IN ('pending','matched','inserted','skipped')),
+  -- Post-V2 Stage 33: the admin request (X-Request-ID) that imported this
+  -- row — all rows of one import share it, same id as the IMPORT audit row.
+  request_id TEXT,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

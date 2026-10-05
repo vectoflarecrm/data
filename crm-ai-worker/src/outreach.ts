@@ -498,11 +498,13 @@ async function loadBrandForOutreach(env: AdminEnv, brandName: string): Promise<B
 
 /* Generate and persist one draft. Throws on AI/DB failure so both the
  * brand-keyword sweep and the targeted campaign path report per-customer
- * errors the same way. */
+ * errors the same way. requestId (Stage 33) lands on the row so the draft
+ * traces straight to the admin request (and its GENERATE_EMAIL audit row). */
 async function generateDraftForCustomer(
   env: AdminEnv,
   brand: BrandConfig,
   customer: OutreachCustomer,
+  requestId: string | null = null,
 ): Promise<number> {
   const prompt = buildOutreachPrompt(brand, customer);
   // Deterministic key per company: customer.id picks the start key so load
@@ -522,8 +524,8 @@ async function generateDraftForCustomer(
   const inserted = await env.DB.prepare(`
     INSERT INTO outreach_emails
       (customer_id, company_id, display_id, company_name, email_to,
-       product_category, brand_name, subject, body, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')
+       product_category, brand_name, subject, body, status, request_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)
   `)
     .bind(
       customer.id,
@@ -534,7 +536,8 @@ async function generateDraftForCustomer(
       brand.product_category,
       brand.brand_name,
       subject,
-      body
+      body,
+      requestId
     )
     .run();
 
@@ -546,7 +549,8 @@ async function generateDraftForCustomer(
 export async function generateOutreachEmails(
   env: AdminEnv,
   brandName: string,
-  limit: number = 10
+  limit: number = 10,
+  requestId: string | null = null,
 ): Promise<{ generated: number; errors: string[] }> {
   const brand = await loadBrandForOutreach(env, brandName);
 
@@ -586,7 +590,7 @@ export async function generateOutreachEmails(
 
   for (const customer of customers.results) {
     try {
-      await generateDraftForCustomer(env, brand, customer);
+      await generateDraftForCustomer(env, brand, customer, requestId);
       generated++;
     } catch (e) {
       errors.push(`${customer.display_id || customer.company_id}: ${e instanceof Error ? e.message : String(e)}`);
@@ -605,6 +609,7 @@ export async function generateOutreachForCustomerIds(
   env: AdminEnv,
   brandName: string,
   customerIds: number[],
+  requestId: string | null = null,
 ): Promise<{
   generated: number;
   already: Array<{ customer_id: number; email_id: number; status: string }>;
@@ -646,7 +651,7 @@ export async function generateOutreachForCustomerIds(
   const errors: Array<{ customer_id: number; message: string }> = [];
   for (const customer of customers.results) {
     try {
-      const emailId = await generateDraftForCustomer(env, brand, customer);
+      const emailId = await generateDraftForCustomer(env, brand, customer, requestId);
       drafts.push({ customer_id: customer.id, email_id: emailId });
     } catch (e) {
       errors.push({
