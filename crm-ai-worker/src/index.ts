@@ -13,10 +13,11 @@ import {
   pruneLoginAttempts,
   pruneResearchRuns,
   pruneSupersededEvidence,
+  pruneSupersededResearchSources,
   resolveDataRetentionDays,
 } from "./data-retention";
 import { cleanupExpiredChallenges } from "./auth/webauthn";
-import { startResearchRun, completeResearchRun, appendFieldEvidence, newProvenance, type AnalysisProvenance } from "./research-run";
+import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, newProvenance, type AnalysisProvenance } from "./research-run";
 
 export interface CustomerRow {
   id: number;
@@ -2069,8 +2070,9 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
         ? `${factsBlock}\n\n${cleanedSavedResearch()}`.slice(0, CLEAN_MAX_TOTAL_CHARS + 2_000)
         : cleanedSavedResearch();
     } else {
+      const verifiedSocialText = verifiedSocial.map((s) => `${s.platform}: ${s.url} (${s.verified ? "已验证" : "未验证"})`).join("\n");
       const socialInfo = verifiedSocial.length > 0
-        ? `\n\n=== 已验证社交媒体 ===\n${verifiedSocial.map((s) => `${s.platform}: ${s.url} (${s.verified ? "已验证" : "未验证"})`).join("\n")}`
+        ? `\n\n=== 已验证社交媒体 ===\n${verifiedSocialText}`
         : "";
       const researchContext = pageText
         ? `=== 主网站内容 ===\n${pageText}${socialInfo}${googleResults}${additionalText}`
@@ -2082,6 +2084,23 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
       await env.DB.prepare(
         `UPDATE customers SET full_research_text = ? WHERE id = ?`
       ).bind(trimmedResearch, customer.id).run();
+
+      // Phase 3 Stage 36: the same crawl is also registered per segment in
+      // research_sources (append + supersede, budget-capped to the same
+      // 50 000 chars) so raw history survives re-research instead of being
+      // overwritten with the blob. Dual-write during transition — the blob
+      // stays authoritative for the reuse path and panel until Stage 38.
+      // Fail-open: an auditability layer must never fail paid research.
+      await appendResearchSources(env, {
+        companyId: customer.company_id,
+        runId: researchRunId,
+        sources: [
+          { source_type: "website", source_url: normalizeDomain(customer.domain), raw_text: pageText },
+          { source_type: "social", raw_text: verifiedSocialText },
+          { source_type: "search", raw_text: googleResults },
+          { source_type: "additional", raw_text: additionalText },
+        ],
+      });
 
       // Clean the raw context BEFORE the AI call — dedupe repeated
       // menus/boilerplate across sources and trim to a token budget so
@@ -2332,8 +2351,9 @@ export default {
         const gmailSendLog = await pruneGmailSendLog(env, dataDays);
         const researchRuns = await pruneResearchRuns(env, dataDays);
         const evidenceSuperseded = await pruneSupersededEvidence(env, dataDays);
+        const researchSourcesSuperseded = await pruneSupersededResearchSources(env, dataDays);
         const customerImports = await pruneCustomerImports(env, dataDays);
-        const total = gmailSendLog + researchRuns + evidenceSuperseded + customerImports;
+        const total = gmailSendLog + researchRuns + evidenceSuperseded + researchSourcesSuperseded + customerImports;
         if (total > 0) {
           await writeAuditLog(env, null, {
             actorUserId: null,
@@ -2346,6 +2366,7 @@ export default {
               gmail_send_log: gmailSendLog,
               research_runs: researchRuns,
               evidence_superseded: evidenceSuperseded,
+              research_sources_superseded: researchSourcesSuperseded,
               customer_imports: customerImports,
             },
           });

@@ -1,8 +1,9 @@
 # Phase 3 — Research Engine: design
 
-Status: proposed (this document) → then staged implementation, one commit per
-stage, same rules as Security V2 (additive migrations, fail-open provenance,
-every stage green on the full suite before commit).
+Status: Stage 36 implemented (`docs/stages/stage-36-research-sources.md`);
+Stage 37 (research_facts) and Stage 38 (blob deprecation) pending. Same
+rules as Security V2 (additive migrations, fail-open provenance, every
+stage green on the full suite before commit).
 
 Source requirements: 建议.txt §十三 (P2 schema), §十四 (evidence upgrade),
 §二十 (Phase 3 — Research Engine), §二十一 (Phase 4 outlook), §二十二

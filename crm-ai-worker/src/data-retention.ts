@@ -14,6 +14,13 @@
  *                         modal (top 30 per company). Pruned SUPERSEDED-ONLY
  *                         (is_current = 0): the live chain of every field
  *                         survives forever, only expired history is cut.
+ *   - research_sources    raw crawl segments per run (Phase 3). Same
+ *                         superseded-only policy as evidence: the current
+ *                         snapshot of every company survives, expired raw
+ *                         history is cut. Runs themselves are pruned above;
+ *                         source rows keep their own customer_id /
+ *                         fetched_at so they stay meaningful without the
+ *                         run row.
  *   - customer_imports    the raw import layer (docx 建议三). Written on
  *                         every CSV import, read by nothing today; rows carry
  *                         the full raw_json so this is the heaviest table
@@ -128,6 +135,23 @@ export async function pruneSupersededEvidence(
   return pruneBefore(
     env,
     "DELETE FROM evidence WHERE is_current = 0 AND COALESCE(valid_until, collected_at) < ?",
+    cutoff,
+  );
+}
+
+/** Superseded research sources only (is_current = 0): the current raw
+ * snapshot of every company survives regardless of age — identical policy
+ * to the superseded half of evidence. Fallback timestamp mirrors evidence
+ * (valid_until, else the row's own fetched_at). */
+export async function pruneSupersededResearchSources(
+  env: { DB: D1Database },
+  days: number,
+  now: Date = new Date(),
+): Promise<number> {
+  const cutoff = toSqlUtc(new Date(now.getTime() - days * 86_400_000));
+  return pruneBefore(
+    env,
+    "DELETE FROM research_sources WHERE is_current = 0 AND COALESCE(valid_until, fetched_at) < ?",
     cutoff,
   );
 }

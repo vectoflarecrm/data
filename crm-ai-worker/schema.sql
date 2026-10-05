@@ -307,6 +307,26 @@ CREATE TABLE IF NOT EXISTS research_runs (
   error TEXT
 );
 
+-- Raw source registry (Phase 3, 建议 §十三/§十四): one row per raw crawl
+-- segment per research run ('website' / 'search' / 'additional' / 'social';
+-- legacy snapshots enter as 'backfill'). Append + supersede like evidence:
+-- a fresh run flips the previous set to is_current = 0, never deletes, so
+-- the raw pages behind every fact stay queryable per run.
+CREATE TABLE IF NOT EXISTS research_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  research_run_id TEXT,
+  customer_id TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  source_url TEXT,
+  raw_text TEXT,
+  content_hash TEXT,
+  parser_version TEXT,
+  fetched_at TEXT NOT NULL,
+  is_current INTEGER NOT NULL DEFAULT 1,
+  valid_from TEXT,
+  valid_until TEXT
+);
+
 -- Raw import layer (docx 建议三): original uploaded rows are immutable; the
 -- normalized/enriched customer rows reference back to them. Re-importing the
 -- same file never destroys original data.
@@ -598,6 +618,11 @@ CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company_id);
 
 -- Research-run history lookups (per-customer run list).
 CREATE INDEX IF NOT EXISTS idx_research_runs_customer ON research_runs(customer_id);
+
+-- Raw-source lookups: current set per customer (reuse path, panel) and the
+-- per-run history slice (superseded sets keep is_current = 0).
+CREATE INDEX IF NOT EXISTS idx_research_sources_customer ON research_sources(customer_id, is_current);
+CREATE INDEX IF NOT EXISTS idx_research_sources_run ON research_sources(research_run_id);
 
 -- The §18.1 UNIQUE indexes — customers(domain), api_configs(provider,
 -- key_fingerprint), contacts.contact_id and contacts(company_id, seq) — are

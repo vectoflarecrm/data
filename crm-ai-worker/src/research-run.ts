@@ -36,6 +36,11 @@ import { safeLog } from "./security/safe-log";
  * future parser change can distinguish which code produced which facts. */
 export const EVIDENCE_PARSER_VERSION = "evidence-v2";
 
+/** Version of the raw-source writer (research_sources rows). Distinct from
+ * the evidence writer so a raw snapshot is attributable to the code path
+ * that captured it. Legacy backfill rows use 'backfill-v1' instead. */
+export const SOURCES_PARSER_VERSION = "sources-v1";
+
 /** Which provider/model actually produced an analysis. Stamped by the
  * analyzeWithX callers in index.ts at their single success return point. */
 export interface AnalysisProvenance {
@@ -177,6 +182,84 @@ export async function appendFieldEvidence(env: ResearchRunEnv, params: AppendEvi
           sqlUtc(now),
           sqlUtc(now),
         ),
+      );
+    }
+    await env.DB.batch(stmts);
+  } catch (e) {
+    warnSkip(e);
+  }
+}
+
+/** Total raw text kept per research run, in characters. Mirrors the 50 000
+ * char cap the blob (customers.full_research_text) has always enforced, so
+ * per-run source history never stores more than the pipeline already saved. */
+export const RESEARCH_SOURCE_TOTAL_CAP = 50_000;
+
+/** One raw crawl segment for research_sources (Phase 3): the pipeline
+ * produces these in blob order — website, verified socials, search results,
+ * additional sources — so the budget split matches what the concatenated
+ * blob preserved. */
+export interface ResearchSourceEntry {
+  source_type: string;
+  source_url?: string | null;
+  raw_text: string;
+}
+
+/** Shared-budget cap: walks entries in order, slicing each into what remains
+ * of RESEARCH_SOURCE_TOTAL_CAP. Entries that end up with empty raw text and
+ * no URL (nothing to record) are dropped; an empty-text entry WITH a URL
+ * survives — it records "this run tried the site and got nothing". */
+export function capResearchSourcesToBudget(
+  entries: ResearchSourceEntry[],
+  cap: number = RESEARCH_SOURCE_TOTAL_CAP,
+): ResearchSourceEntry[] {
+  const out: ResearchSourceEntry[] = [];
+  let remaining = cap;
+  for (const e of entries) {
+    if (remaining <= 0 && !(e.raw_text === "" && e.source_url)) break;
+    const text = e.raw_text.slice(0, Math.max(0, remaining));
+    remaining -= text.length;
+    if (text === "" && !e.source_url) continue;
+    out.push({ source_type: e.source_type, source_url: e.source_url ?? null, raw_text: text });
+  }
+  return out;
+}
+
+export interface AppendSourcesParams {
+  companyId: string;
+  runId: string | null;
+  sources: ResearchSourceEntry[];
+  now?: Date;
+}
+
+/** Append one attempt's raw sources. The previous current set for the
+ * company is superseded (is_current = 0, valid_until = now) — never deleted
+ * — and the new rows land with content hashes, is_current = 1 and
+ * valid_from = now. One D1 batch: atomic supersede + append. Input is
+ * budget-capped first (writer-level enforcement: no caller can store more
+ * raw text per run than the blob cap). */
+export async function appendResearchSources(env: ResearchRunEnv, params: AppendSourcesParams): Promise<void> {
+  const { companyId, runId } = params;
+  const now = params.now ?? new Date();
+  const capped = capResearchSourcesToBudget(params.sources);
+  if (capped.length === 0) return;
+  try {
+    const stmts: D1PreparedStatement[] = [
+      env.DB.prepare(
+        `UPDATE research_sources SET is_current = 0, valid_until = ?
+         WHERE customer_id = ? AND is_current = 1`,
+      ).bind(sqlUtc(now), companyId),
+    ];
+    for (const s of capped) {
+      const contentHash = await sha256Hex16(s.raw_text);
+      stmts.push(
+        env.DB.prepare(
+          `INSERT INTO research_sources
+             (research_run_id, customer_id, source_type, source_url, raw_text,
+              content_hash, parser_version, fetched_at, is_current, valid_from)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+        ).bind(runId, companyId, s.source_type, s.source_url ?? null, s.raw_text,
+          contentHash, SOURCES_PARSER_VERSION, sqlUtc(now), sqlUtc(now)),
       );
     }
     await env.DB.batch(stmts);
