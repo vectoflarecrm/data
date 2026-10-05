@@ -166,7 +166,11 @@ generation, campaigns, research). It is **not scheduled** here: it gets its
 own design review with a concrete consumer-by-consumer cutover plan once
 the research engine lands. The incremental path the audit itself endorses
 (contacts, evidence, research_runs, outreach_emails — already split) plus
-research_sources/facts is the safe trajectory.
+research_sources/facts is the safe trajectory. *Update (post-Stage 38):
+the review has landed — `docs/phase3b-normalization-review.md` — with
+evidence-based verdicts per proposed split and one concrete slice
+(Stage 39, read-path slimming). Awaiting operator sign-off; no split
+implementation is scheduled before that.*
 
 **Phase 4 (outlook only).** With a uniform facts substrate, the pipeline
 审计 §二十一 sketches (entity resolution → company profile → persona →
