@@ -7,6 +7,14 @@ import { safeLog } from "./security/safe-log";
 import { writeAuditLog } from "./audit/audit-log";
 import { resolveAuditRetentionDays, pruneAuditLogs } from "./audit/audit-retention";
 import { pruneExpiredSessions } from "./auth/session-hygiene";
+import {
+  pruneCustomerImports,
+  pruneGmailSendLog,
+  pruneLoginAttempts,
+  pruneResearchRuns,
+  pruneSupersededEvidence,
+  resolveDataRetentionDays,
+} from "./data-retention";
 import { cleanupExpiredChallenges } from "./auth/webauthn";
 import { startResearchRun, completeResearchRun, appendFieldEvidence, newProvenance, type AnalysisProvenance } from "./research-run";
 
@@ -61,6 +69,11 @@ interface Env {
   // Post-V2 (audit retention): days an audit_logs row survives. Unset →
   // default 180; "0" disables pruning. See src/audit/audit-retention.ts.
   AUDIT_RETENTION_DAYS?: string;
+  // Post-V2 Stage 31 (data retention): horizon for gmail_send_log /
+  // research_runs / superseded evidence / customer_imports. Unset → default
+  // 180; "0" disables business-data pruning (the fixed 30-day
+  // admin_login_attempts sweep always runs). See src/data-retention.ts.
+  DATA_RETENTION_DAYS?: string;
   // Post-V2 Stage 29 (WebAuthn 2FA): RP ID unset ⇒ feature dormant. While
   // the bootstrap user holds an active credential, Bearer bootstrap is
   // disabled and login becomes two-step. See src/auth/webauthn.ts.
@@ -2293,6 +2306,49 @@ export default {
       }
     } catch (e) {
       safeLog("error", "[webauthn] challenge cleanup failed, continuing research tick", e instanceof Error ? e.message : String(e));
+    }
+    // Post-V2 Stage 31: business-data retention, same policy shape as
+    // AUDIT_RETENTION_DAYS (default 180, "0" = off, typo fails safe).
+    // Evidence is pruned superseded-only — the live chain of every field
+    // survives forever. Every non-empty prune writes its own DATA_PRUNE
+    // audit row, so silent mass deletion is impossible.
+    const dataDays = resolveDataRetentionDays(env);
+    if (dataDays !== null) {
+      try {
+        const gmailSendLog = await pruneGmailSendLog(env, dataDays);
+        const researchRuns = await pruneResearchRuns(env, dataDays);
+        const evidenceSuperseded = await pruneSupersededEvidence(env, dataDays);
+        const customerImports = await pruneCustomerImports(env, dataDays);
+        const total = gmailSendLog + researchRuns + evidenceSuperseded + customerImports;
+        if (total > 0) {
+          await writeAuditLog(env, null, {
+            actorUserId: null,
+            actorRole: "system",
+            action: "DATA_PRUNE",
+            resourceType: "data_retention",
+            resourceId: null,
+            metadata: {
+              retention_days: dataDays,
+              gmail_send_log: gmailSendLog,
+              research_runs: researchRuns,
+              evidence_superseded: evidenceSuperseded,
+              customer_imports: customerImports,
+            },
+          });
+        }
+      } catch (e) {
+        safeLog("error", "[data-retention] prune failed, continuing research tick", e instanceof Error ? e.message : String(e));
+      }
+    }
+    // Login-throttle buckets are pure bookkeeping (lock window is 900 s):
+    // a fixed 30-day sweep that runs even when DATA_RETENTION_DAYS="0".
+    try {
+      const attempts = await pruneLoginAttempts(env);
+      if (attempts > 0) {
+        safeLog("log", `[data-retention] pruned ${attempts} stale admin_login_attempts rows`);
+      }
+    } catch (e) {
+      safeLog("error", "[data-retention] login-attempt sweep failed, continuing research tick", e instanceof Error ? e.message : String(e));
     }
     // Claim-first design: rows are flipped to 'processing' before any slow work
     // starts, so an overlapping cron tick can never double-claim the same

@@ -36,6 +36,15 @@ database_id = "REPLACE_WITH_D1_DATABASE_ID"
 # [vars]
 # AUDIT_RETENTION_DAYS = "180"
 
+# Post-V2 Stage 31 (data retention): horizon for gmail_send_log /
+# research_runs / superseded evidence history / customer_imports (the raw
+# import layer — normalized customers always survive). Evidence is pruned
+# superseded-only, so the live chain of every field survives forever.
+# Unset → default 180 days; "0" disables business-data pruning (the fixed
+# 30-day admin_login_attempts sweep always runs). Non-empty prunes write a
+# DATA_PRUNE audit row with per-table counts.
+# DATA_RETENTION_DAYS = "180"
+
 # Post-V2 Stage 29 (WebAuthn 2FA). All three optional; while WEBAUTHN_RP_ID
 # is unset the feature sleeps: login stays single-factor (token → session),
 # register endpoints answer 503, and existing credential rows are ignored.

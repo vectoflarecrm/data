@@ -6,7 +6,7 @@ Security V2 spec §31/§32. This project has no staging environment, so this doc
 
 ```
 local tests            migration validation           preview/staging         smoke test            production
-(642 vitest tests,     (tsc --noEmit + wrangler       (none exists — the      (§32 below, with      (CI push of the
+(661 vitest tests,     (tsc --noEmit + wrangler       (none exists — the      (§32 below, with      (CI push of the
  tsc --noEmit,         deploy --dry-run proves the    dry-run build + CI      OUTREACH_DRY_RUN      reviewed branch;
  check-panel.mjs)      bundle builds and binds)       gate steps in the       on, then off)         CI runs schema.sql
                                                         workflow are the                              + column checks
@@ -15,7 +15,7 @@ local tests            migration validation           preview/staging         sm
 
 Concretely, before every deploy:
 
-1. **Local tests** — `npm test` (642 tests: unit/stage suites + 72 security acceptance + 59 concurrency + dry-run/health + post-V2 suites), `npm run typecheck`, `node scripts/check-panel.mjs`. All must be green.
+1. **Local tests** — `npm test` (661 tests: unit/stage suites + 72 security acceptance + 59 concurrency + dry-run/health + post-V2 suites), `npm run typecheck`, `node scripts/check-panel.mjs`. All must be green.
 2. **Build validation** — `npx wrangler deploy --dry-run --outdir dist-dryrun` with `WRANGLER_SEND_METRICS=false`. Proves the bundle compiles and binds. Delete `dist-dryrun/` afterwards.
 3. **Migration validation** — CI applies migrations idempotently and **verifies**: `schema.sql` runs with IF NOT EXISTS, then per-statement ALTER steps (duplicate-column tolerant), then `pragma_table_info` assertions that fail the deploy if any expected column is missing. A deploy cannot succeed with a half-migrated database. Forward-only per §29; every change is additive, so an old worker on a new schema keeps working (backward compatibility, §30 — business data is never touched).
 4. **Production** — push the reviewed branch; the workflow deploys. The worker is stateless; the only state is D1.
@@ -32,6 +32,7 @@ Concretely, before every deploy:
 | `OUTREACH_DRY_RUN` | var (optional) | **smoke tests only** — see §3. Remove after the smoke pass. |
 | `CREDENTIAL_ENC_KEY_PREVIOUS` | Wrangler secret (optional) | old master during a key rotation; decrypt fallback while set. Run the reseal sweep (docs/backup-recovery.md §4), then **remove it** — it is a transition state, not a permanent second key |
 | `AUDIT_RETENTION_DAYS` | var (optional) | audit_logs horizon: unset → 180 days, `"0"` → keep forever. Pruned by the 5-min cron; every non-empty prune writes an AUDIT_PRUNE row (see `/admin/audit`) |
+| `DATA_RETENTION_DAYS` | var (optional) | business-data horizon (gmail_send_log / research_runs / superseded evidence / customer_imports): unset → 180 days, `"0"` → keep everything. Evidence is pruned superseded-only — live chains survive forever; the fixed 30-day admin_login_attempts sweep always runs. Non-empty prunes write a DATA_PRUNE audit row |
 | `WEBAUTHN_RP_ID` | var (optional) | WebAuthn 2FA RP ID (bare domain). Unset → 2FA dormant. See §6 before setting it. |
 | `WEBAUTHN_RP_NAME` | var (optional) | RP display name (defaults to `WEBAUTHN_RP_ID`) |
 | `WEBAUTHN_ORIGINS` | var (optional) | comma-separated caller-origin allowlist (defaults to `https://<WEBAUTHN_RP_ID>`) |
@@ -79,7 +80,7 @@ With the flag on, the send state machine runs end-to-end but the Gmail transport
 
 ## 5. Verification record
 
-- Pipeline gate as of this document: 642/642 tests (52 files), `tsc --noEmit` clean, dry-run build 526.27 KiB (gzip 130.02 KiB), 7 panels clean.
+- Pipeline gate as of this document: 661/661 tests (53 files), `tsc --noEmit` clean, dry-run build 530.25 KiB (gzip 130.59 KiB), 7 panels clean.
 - Smoke-mechanism tests: `tests/health.test.ts` (probe contract), `tests/outreach-dry-run.test.ts` (dry-run guard).
 
 ## 6. Enabling WebAuthn 2FA (post-V2 Stage 29) — read before setting `WEBAUTHN_RP_ID`
