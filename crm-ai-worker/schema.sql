@@ -442,6 +442,52 @@ CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry ON admin_sessions(expires_a
 -- so disabled users and future RBAC roles have a stable subject.
 INSERT OR IGNORE INTO admin_users (id, username, role) VALUES ('u_admin', 'admin', 'super_admin');
 
+-- Post-V2 Stage 29: WebAuthn (FIDO2/passkey) second factor.
+--
+-- 2FA is active for a user iff they hold >= 1 credential with
+-- revoked_at IS NULL. While the bootstrap super_admin (u_admin) has one,
+-- the Bearer master-token path is disabled. Recovery codes are the
+-- break-glass path (SHA-256 hashed, single use, shown once).
+CREATE TABLE IF NOT EXISTS webauthn_credentials (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  public_key_jwk TEXT NOT NULL,
+  alg INTEGER NOT NULL,
+  sign_count INTEGER NOT NULL DEFAULT 0,
+  transports TEXT,
+  name TEXT,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at TEXT,
+  FOREIGN KEY (user_id) REFERENCES admin_users (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user ON webauthn_credentials(user_id);
+
+CREATE TABLE IF NOT EXISTS webauthn_challenges (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  purpose TEXT NOT NULL CHECK (purpose IN ('register', 'assert')),
+  challenge TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES admin_users (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expiry ON webauthn_challenges(expires_at);
+
+CREATE TABLE IF NOT EXISTS webauthn_recovery_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  code_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  used_at TEXT,
+  FOREIGN KEY (user_id) REFERENCES admin_users (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_webauthn_recovery_user ON webauthn_recovery_codes(user_id);
+
+
 -- Security V2 Stage 9 (spec §10): 重要操作审计日志。
 --
 -- 每个重要操作（§10.1 列表 + 中央授权门的 ACCESS_DENIED）写一行：操作者、动作、

@@ -66,7 +66,8 @@ Stage-by-stage detail lives in `docs/stages/stage-01` … `stage-26`; the runnin
 - **Post-V2 Stage 26 (key rotation)**: `CREDENTIAL_ENC_KEY_PREVIOUS` decrypt fallback + idempotent `POST /admin/api/keys/reseal` and `POST /admin/api/gmail/reseal` sweeps (credentials.write) that re-encrypt every row onto the current master with the Stage 4 verification gate — rotation is now a documented 5-step procedure instead of panel re-entry (`docs/backup-recovery.md` §4).
 - **Post-V2 Stage 27 (session inventory + admin-wide revocation)**: `GET /admin/api/auth/sessions` (cross-user listing, `is_current`, no token material), `POST /admin/api/auth/sessions/revoke` (any user's session) and `POST /admin/api/auth/revoke-all` (spares the session caller's own row) — all super_admin only with the gate's ACCESS_DENIED audit shape; `/admin/sessions` panel; cron vacuums sessions expired more than a fixed 7-day inspection grace ago (`src/auth/session-hygiene.ts`, own fail-open envelope).
 - **Post-V2 Stage 28 (transport hygiene)**: `callGeminiOutreach` now carries the API key in the `x-goog-api-key` header and URL-encodes the model name (parity with the analysis call site) — no fetch error path can ship the key into logs via the request URL.
-- **Post-V2 verification**: 594/594 tests (50 files: 403 pre-existing + 72 security + 59 concurrency + 9 smoke + 19 retention + 14 rotation + 16 session-inventory + 2 transport (added within the same files as applicable)), `tsc` exit 0, dry-run 467.21 KiB / gzip 116.66 KiB, 6 panels clean.
+- **Post-V2 Stage 29 (WebAuthn 2FA)**: opt-in two-step admin login — `WEBAUTHN_RP_ID` + a registered security key/passkey make login token → assert challenge → session, with 10 one-time SHA-256-stored recovery codes as break-glass; strict no-dependency WebAuthn verifier (CBOR/authenticator-data/COSE-ES256+RS256, P1363/DER dual-format signatures, clone-counter rule), single-use TTL-300s challenge rows with cron vacuum, seven `/admin/api/auth/*` endpoints sharing the login throttle and audit vocabulary, `/admin/security` self-service panel, and — while the bootstrap operator holds an active credential — the Bearer master-token path is closed (a header-swappable second factor would be decoration). Migration `0017_webauthn.sql`; rollout + lockout runbook in `docs/deployment-v2.md` §6 and `docs/backup-recovery.md` §4.
+- **Post-V2 verification**: 642/642 tests (52 files: 403 pre-existing + 72 security + 59 concurrency + 9 smoke + 19 retention + 14 rotation + 16 session-inventory + 2 transport + 20 webauthn-unit + 28 webauthn-flow), `tsc` exit 0, dry-run 520.55 KiB / gzip 127.65 KiB, 7 panels clean.
 
 ## Database Migrations
 
@@ -86,6 +87,7 @@ Forward-only, additive, per spec §29; `schema.sql` is kept in lockstep for fres
 | `0014_rate_limit_windows.sql` | 16 | global fixed-window counters |
 | `0015_contacts_and_integrity_indexes.sql` | 17 | contacts table + integrity indexes |
 | `0016_gmail_send_log_sender.sql` | 23 | drift fix: `sender_client_email` on fresh installs |
+| `0017_webauthn.sql` | 29 | `webauthn_credentials`, `webauthn_challenges`, `webauthn_recovery_codes` (2FA) |
 
 CI column steps: customers profile columns, api_configs credential columns, outreach_emails send-state columns, gmail_send_log sender column — each with post-step verification that fails the deploy if a column is missing.
 
@@ -95,6 +97,7 @@ CI column steps: customers profile columns, api_configs credential columns, outr
 - Browser auth = `admin_sessions`: random 256-bit token, stored **hashed** (SHA-256), delivered in an `HttpOnly; SameSite=Strict; Secure` cookie, **1-hour expiry** checked on every request, revocable (`revoked_at`, logout).
 - Login throttling: 5 failures → 15-minute lock per identifier (hashed CF-Connecting-IP or username), 30 global failures/15 min → full lockout; failures audited as `LOGIN_FAILED`.
 - Session rows record `ip_hash`/`user_agent_hash` for anomaly review without storing raw PII.
+- **Post-V2 Stage 29 (opt-in 2FA)**: while `WEBAUTHN_RP_ID` is set and the operator holds ≥ 1 active credential, login is two-step (token → WebAuthn assertion or one-time recovery code → session) and the Bearer bootstrap path is closed — fail-closed on credential-lookup errors, `safeLog`-only (no audit rows) so automation cannot flood `audit_logs`. Removing the last credential re-opens Bearer. Details: `docs/stages/stage-29-webauthn.md`.
 
 ## Authorization
 
@@ -142,8 +145,8 @@ Three layers: (1) per-isolate sliding window (`LocalRateLimiter`, the cheap loca
 
 ## Tests
 
-- **Total**: 543 tests, 46 files, all passing (`npm test` → `vitest run`).
-- Composition: 403 pre-existing + stage suites (Stages 2-20, each stage's unit/integration file), 72 security acceptance (`tests/security/`, Stage 22), 59 concurrency (`tests/concurrency/`, Stage 23), 9 smoke mechanism (`tests/health.test.ts` 4, `tests/outreach-dry-run.test.ts` 5).
+- **Total**: 642 tests, 52 files, all passing (`npm test` → `vitest run`).
+- Composition: 403 pre-existing + stage suites (Stages 2-20, each stage's unit/integration file), 72 security acceptance (`tests/security/`, Stage 22), 59 concurrency (`tests/concurrency/`, Stage 23), 9 smoke mechanism (`tests/health.test.ts` 4, `tests/outreach-dry-run.test.ts` 5), plus post-V2 suites: 19 retention, 14 rotation, 16 session-inventory, 2 transport, 20 WebAuthn unit + 28 WebAuthn flow (real P-256 signatures verified end to end).
 - Suites deliberately overlap: stage suites prove each layer's unit behavior, the security suite proves the layered combination through the real `handleAdminRequest` entry, the concurrency suite proves the single-statement atomicity the layers rely on under 10/50/100-task storms.
 - The suites bite: Stage 22 found a real RBAC gating bug and a real SSRF bypass; Stage 23 found a real schema drift. All three were fixed with regression pins the same day they were found.
 
@@ -181,7 +184,8 @@ Accepted and documented, none unmitigated:
 - ~~Audit retention/prune job + panel view over audit_logs~~ — done in post-V2 Stage 25 (`AUDIT_RETENTION_DAYS` cron prune, `/admin/api/audit-logs`, `/admin/audit`).
 - ~~Automated `CREDENTIAL_ENC_KEY` rotation (re-encryption sweep) instead of panel re-entry~~ — done in post-V2 Stage 26 (`CREDENTIAL_ENC_KEY_PREVIOUS` + reseal sweeps).
 - FK-adding table rebuilds for existing databases.
-- 2FA (WebAuthn) for admin accounts; ~~session inventory/admin-wide revocation UI~~ — done in post-V2 Stage 27 (`/admin/api/auth/sessions` + `/admin/sessions`, super_admin only).
+- ~~2FA (WebAuthn) for admin accounts~~ — done in post-V2 Stage 29 (opt-in two-step login + recovery codes + Bearer closure; `docs/stages/stage-29-webauthn.md`). Cloudflare Access as an alternative zero-trust perimeter remains an open option for environments that prefer managed identity.
+- ~~Session inventory/admin-wide revocation UI~~ — done in post-V2 Stage 27 (`/admin/api/auth/sessions` + `/admin/sessions`, super_admin only).
 - Per-row `request_id` on D1 business tables to shorten the traceability chain.
 
 ## Deployment Instructions

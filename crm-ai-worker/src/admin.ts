@@ -60,6 +60,18 @@ import { safeLog } from "./security/safe-log";
 import { setRequestId, getRequestId } from "./security/request-context";
 import { readCsvImportBody, parseCsvBounded, CsvLimitError } from "./security/csv-limits";
 import { writeAuditLog, AuditMetadata } from "./audit/audit-log";
+import {
+  WebAuthnError,
+  rpConfig,
+  issueChallenge,
+  consumeChallenge,
+  countActiveCredentials,
+  listCredentialDescriptors,
+  verifyRegistrationResponse,
+  verifyAssertionResponse,
+  generateRecoveryCodes,
+  sha256HexOf,
+} from "./auth/webauthn";
 
 export interface AdminEnv extends GmailEnv {
   DB: D1Database;
@@ -143,6 +155,12 @@ export interface AdminEnv extends GmailEnv {
   NVIDIA_RPM?: string;
   AMD_RPM?: string;
   OPENROUTER_RPM?: string;
+  // Post-V2 Stage 29 (WebAuthn 2FA): RP ID unset ⇒ the feature is dormant.
+  // While the bootstrap user holds an active credential, the Bearer
+  // master-token path is closed (see authenticate()).
+  WEBAUTHN_RP_ID?: string;
+  WEBAUTHN_RP_NAME?: string;
+  WEBAUTHN_ORIGINS?: string;
 }
 
 interface AdminCustomer {
@@ -484,6 +502,81 @@ async function countAllActiveSessions(env: AdminEnv): Promise<number> {
   return row?.n ?? 0;
 }
 
+/* ── WebAuthn 2FA (post-V2 Stage 29) ─────────────────────────────────────
+ * 2FA is active for a user iff they hold >= 1 active credential row and
+ * WEBAUTHN_RP_ID is configured. Login then becomes two-step: master token
+ * → assert challenge (202 / MFA page), authenticator or recovery code →
+ * session. The Bearer master-token path is closed while the bootstrap user
+ * has an active credential (see authenticate()). */
+
+/** Enabled admin_users row by id — the session-minting subject for MFA flows. */
+async function loadEnabledUser(env: AdminEnv, userId: string): Promise<AdminUserRow | null> {
+  const row = await env.DB.prepare(
+    `SELECT id, username, role, enabled FROM admin_users WHERE id = ?`,
+  ).bind(userId).first<AdminUserRow>();
+  return row && row.enabled ? row : null;
+}
+
+interface MfaChallengePayload {
+  flow_id: string;
+  public_key: {
+    challenge: string;
+    rpId: string;
+    timeout: number;
+    userVerification: string;
+    allowCredentials: Array<{ type: string; id: string; transports?: string[] }>;
+  };
+}
+
+/** Issue the login assert challenge when the user's second factor is active.
+ * null ⇒ 2FA does not apply, the caller mints the session directly. */
+async function issueLoginMfaChallenge(env: AdminEnv, user: AdminUserRow): Promise<MfaChallengePayload | null> {
+  const rp = rpConfig(env);
+  if (!rp) return null;
+  if ((await countActiveCredentials(env, user.id)) === 0) return null;
+  const { flowId, challenge } = await issueChallenge(env, user.id, "assert");
+  const descriptors = await listCredentialDescriptors(env, user.id);
+  return {
+    flow_id: flowId,
+    public_key: {
+      challenge,
+      rpId: rp.rpId,
+      timeout: 120_000,
+      userVerification: "preferred",
+      allowCredentials: descriptors.map((d) => ({
+        type: "public-key",
+        id: d.id,
+        ...(d.transports ? { transports: d.transports.split(",").filter(Boolean) } : {}),
+      })),
+    },
+  };
+}
+
+/** Shared MFA completion: clear the caller's throttle record, rotate the
+ * cookie session, mint a fresh session, audit the LOGIN, return JSON with
+ * the Set-Cookie header. */
+async function completeMfaLogin(
+  env: AdminEnv,
+  request: Request,
+  user: AdminUserRow,
+  via: "mfa" | "recovery",
+  metadata: AuditMetadata,
+): Promise<Response> {
+  await clearLoginFailures(env, throttleKey("ip", loginIdent(request)));
+  const oldToken = readCookie(request, SESSION_COOKIE_NAME);
+  if (oldToken) await revokeSessionByHash(env, await sha256Hex(oldToken));
+  const session = await createAdminSession(env, request, user);
+  await auditAdminAction(env, request, { user }, "LOGIN", "admin_session", null, { via, ...metadata });
+  const res = jsonResponse({
+    user_id: user.id,
+    username: user.username,
+    role: user.role,
+    expires_at: session.expiresAt,
+  });
+  res.headers.set("Set-Cookie", sessionCookieHeader(request, session.token, SESSION_TTL_SECONDS));
+  return res;
+}
+
 /**
  * Single authentication entry point for every admin route.
  *
@@ -501,6 +594,23 @@ async function authenticate(request: Request, env: AdminEnv): Promise<AdminAuthC
     if (!authorization.startsWith("Bearer ")) return null;
     const candidate = authorization.slice("Bearer ".length);
     if (!candidate || !(await constantTimeSecretMatch(candidate, env.ADMIN_PANEL_TOKEN))) return null;
+    // Post-V2 Stage 29: while the bootstrap user holds an active WebAuthn
+    // credential the Bearer master-token path is CLOSED — a second factor
+    // that can be skipped by switching the token into an Authorization
+    // header would be decoration. safeLog only, never an audit row: a
+    // hammering automation client must not be able to flood audit_logs.
+    if (rpConfig(env) !== null) {
+      try {
+        if ((await countActiveCredentials(env, BOOTSTRAP_USER_ID)) > 0) {
+          safeLog("warn", "[admin:auth] Bearer bootstrap rejected: WebAuthn 2FA is active for the bootstrap user");
+          return null;
+        }
+      } catch {
+        // Fail closed: unreadable credential state ⇒ no Bearer access.
+        safeLog("error", "[admin:auth] Bearer bootstrap rejected: credential lookup failed");
+        return null;
+      }
+    }
     return {
       user: { id: BOOTSTRAP_USER_ID, username: BOOTSTRAP_USERNAME, role: "super_admin", enabled: 1 },
       sessionId: "",
@@ -2489,6 +2599,12 @@ async function routeAdminRequest(
     await clearLoginFailures(env, throttleKey("ip", ident));
     // Mint a server-side session; the master token never becomes the cookie.
     const user = await ensureBootstrapUser(env);
+    // Post-V2 Stage 29: the token alone is not enough when the operator has
+    // a WebAuthn credential — hand the browser the assert challenge page
+    // instead of a session. Nothing is revoked yet; rotation happens at
+    // successful assert, same as a normal login.
+    const mfa = await issueLoginMfaChallenge(env, user);
+    if (mfa) return htmlResponse(mfaChallengePage(mfa));
     // Session rotation: a valid session presented at login is revoked so a
     // re-login always leaves exactly one live token for this browser.
     const oldToken = readCookie(request, SESSION_COOKIE_NAME);
@@ -2556,6 +2672,10 @@ async function routeAdminRequest(
     }
     await clearLoginFailures(env, throttleKey("ip", ident));
     const user = await ensureBootstrapUser(env);
+    // Post-V2 Stage 29: 202 + the assert challenge when a WebAuthn
+    // credential is on file — the session is minted by /mfa/assert only.
+    const mfa = await issueLoginMfaChallenge(env, user);
+    if (mfa) return jsonResponse({ status: "mfa_required", ...mfa }, 202);
     const oldToken = readCookie(request, SESSION_COOKIE_NAME);
     if (oldToken) await revokeSessionByHash(env, await sha256Hex(oldToken));
     const session = await createAdminSession(env, request, user);
@@ -2719,6 +2839,350 @@ async function routeAdminRequest(
     return jsonResponse({ ok: true, revoked, remaining });
   }
 
+  /* ── WebAuthn 2FA (post-V2 Stage 29) ──
+   * POST /admin/api/auth/mfa/assert
+   *        {flow_id, credential_id, client_data_json, authenticator_data,
+   *         signature} → session cookie (JSON)
+   * POST /admin/api/auth/mfa/recovery
+   *        {flow_id, code} → session cookie (JSON)
+   * POST /admin/api/auth/webauthn/register/options {name?}
+   *        → creation challenge (session required)
+   * POST /admin/api/auth/webauthn/register/verify
+   *        {flow_id, client_data_json, attestation_object, transports?, name?}
+   *        → credential + one-time recovery codes on first enrollment
+   * GET  /admin/api/auth/webauthn/credentials[?user_id=]
+   *        → own credential list (super_admin may pass ?user_id=)
+   * DELETE /admin/api/auth/webauthn/credentials/{id}[?user_id=]
+   *        → revoke (self; super_admin may target another user)
+   * POST /admin/api/auth/webauthn/recovery/regenerate
+   *        → replace the recovery-code set (self)
+   * All of these are /admin/api/auth/* lifecycle routes — the rbac gate maps
+   * that prefix to no permission, so role checks (where needed) live here. */
+  if (url.pathname === "/admin/api/auth/mfa/assert" && request.method === "POST") {
+    const rp = rpConfig(env);
+    if (!rp) return jsonResponse({ detail: "WebAuthn 未配置（缺少 WEBAUTHN_RP_ID）" }, 503);
+    const ident = loginIdent(request);
+    const blocked = await loginBlocked(env, ident);
+    if (blocked) {
+      const res = jsonResponse({ detail: "尝试过于频繁，请稍后再试" }, 429);
+      res.headers.set("Retry-After", String(blocked.retryAfterSeconds));
+      return res;
+    }
+    let body: { flow_id?: unknown; credential_id?: unknown; client_data_json?: unknown; authenticator_data?: unknown; signature?: unknown };
+    try {
+      body = await request.json() as typeof body;
+    } catch {
+      return jsonResponse({ detail: "Invalid JSON body" }, 400);
+    }
+    if (typeof body.flow_id !== "string" || typeof body.credential_id !== "string" ||
+        typeof body.client_data_json !== "string" || typeof body.authenticator_data !== "string" ||
+        typeof body.signature !== "string") {
+      return jsonResponse({ detail: "缺少验证参数" }, 400);
+    }
+    const failMfa = async (reason: string, status: number): Promise<Response> => {
+      await recordLoginFailure(env, "ip", throttleKey("ip", ident));
+      await recordLoginFailure(env, "global", LOGIN_GLOBAL_KEY);
+      await auditAdminAction(env, request, null, "LOGIN_FAILED", "admin_session", null, { via: "mfa", reason });
+      return jsonResponse({ detail: "验证失败" }, status);
+    };
+    let consumed: { userId: string; challenge: string };
+    try {
+      consumed = await consumeChallenge(env, body.flow_id, "assert");
+    } catch (e) {
+      if (e instanceof WebAuthnError) {
+        const status = e.reason === "flow_expired" ? 410 : 401;
+        return failMfa(e.reason, status);
+      }
+      throw e;
+    }
+    try {
+      const result = await verifyAssertionResponse(rp, env, {
+        userId: consumed.userId,
+        credentialId: body.credential_id,
+        expectedChallenge: consumed.challenge,
+        clientDataJson: body.client_data_json,
+        authenticatorData: body.authenticator_data,
+        signature: body.signature,
+      });
+      const user = await loadEnabledUser(env, consumed.userId);
+      if (!user) return failMfa("user_disabled", 401);
+      await env.DB.prepare(
+        `UPDATE webauthn_credentials SET sign_count = ?, last_used_at = ? WHERE id = ?`,
+      ).bind(result.newSignCount, sqlUtc(), result.credentialId).run();
+      return await completeMfaLogin(env, request, user, "mfa", { credential_id: result.credentialId });
+    } catch (e) {
+      if (e instanceof WebAuthnError) return failMfa(e.reason, 401);
+      throw e;
+    }
+  }
+
+  if (url.pathname === "/admin/api/auth/mfa/recovery" && request.method === "POST") {
+    const rp = rpConfig(env);
+    if (!rp) return jsonResponse({ detail: "WebAuthn 未配置（缺少 WEBAUTHN_RP_ID）" }, 503);
+    const ident = loginIdent(request);
+    const blocked = await loginBlocked(env, ident);
+    if (blocked) {
+      const res = jsonResponse({ detail: "尝试过于频繁，请稍后再试" }, 429);
+      res.headers.set("Retry-After", String(blocked.retryAfterSeconds));
+      return res;
+    }
+    let body: { flow_id?: unknown; code?: unknown };
+    try {
+      body = await request.json() as typeof body;
+    } catch {
+      return jsonResponse({ detail: "Invalid JSON body" }, 400);
+    }
+    if (typeof body.flow_id !== "string" || typeof body.code !== "string" || !body.code.trim()) {
+      return jsonResponse({ detail: "缺少恢复码" }, 400);
+    }
+    const failRecovery = async (reason: string, status: number): Promise<Response> => {
+      await recordLoginFailure(env, "ip", throttleKey("ip", ident));
+      await recordLoginFailure(env, "global", LOGIN_GLOBAL_KEY);
+      await auditAdminAction(env, request, null, "LOGIN_FAILED", "admin_session", null, { via: "recovery", reason });
+      return jsonResponse({ detail: "恢复码无效或已使用" }, status);
+    };
+    let consumed: { userId: string; challenge: string };
+    try {
+      consumed = await consumeChallenge(env, body.flow_id, "assert");
+    } catch (e) {
+      if (e instanceof WebAuthnError) {
+        return failRecovery(e.reason, e.reason === "flow_expired" ? 410 : 401);
+      }
+      throw e;
+    }
+    const user = await loadEnabledUser(env, consumed.userId);
+    if (!user) return failRecovery("user_disabled", 401);
+    const codes = await env.DB.prepare(
+      `SELECT id, code_hash FROM webauthn_recovery_codes WHERE user_id = ? AND used_at IS NULL`,
+    ).bind(user.id).all<{ id: number; code_hash: string }>();
+    let matched: { id: number; code_hash: string } | null = null;
+    const presented = (await sha256HexOf(body.code.trim().toLowerCase()));
+    for (const row of codes.results ?? []) {
+      if (await constantTimeSecretMatch(presented, row.code_hash)) {
+        matched = row;
+        break;
+      }
+    }
+    if (!matched) return failRecovery("recovery_code_invalid", 401);
+    // Conditional update decides the winner if the same code races two flows.
+    const used = await env.DB.prepare(
+      `UPDATE webauthn_recovery_codes SET used_at = ? WHERE id = ? AND used_at IS NULL`,
+    ).bind(sqlUtc(), matched.id).run();
+    if (Number(used.meta.changes ?? 0) !== 1) return failRecovery("recovery_code_invalid", 401);
+    return await completeMfaLogin(env, request, user, "recovery", { recovery_code_id: matched.id });
+  }
+
+  if (url.pathname === "/admin/api/auth/webauthn/register/options" && request.method === "POST") {
+    const auth = await authenticate(request, env);
+    if (!auth) return authFailure(request);
+    const rp = rpConfig(env);
+    if (!rp) return jsonResponse({ detail: "WebAuthn 未配置：请先设置 WEBAUTHN_RP_ID" }, 503);
+    let name: string | null = null;
+    try {
+      const body = await request.json() as { name?: unknown };
+      if (typeof body.name === "string" && body.name.trim()) {
+        name = body.name.trim().slice(0, 60);
+      }
+    } catch { /* no body / no name — both fine */ }
+    const { flowId, challenge } = await issueChallenge(env, auth.user.id, "register");
+    const exclude = await listCredentialDescriptors(env, auth.user.id);
+    return jsonResponse({
+      status: "ok",
+      flow_id: flowId,
+      public_key: {
+        rp: { id: rp.rpId, name: rp.rpName },
+        user: { id: auth.user.id, name: auth.user.username, displayName: auth.user.username },
+        challenge,
+        pubKeyCredParams: [
+          { type: "public-key", alg: -7 },
+          { type: "public-key", alg: -257 },
+        ],
+        timeout: 120_000,
+        attestation: "none",
+        excludeCredentials: exclude.map((d) => ({
+          type: "public-key" as const,
+          id: d.id,
+          ...(d.transports ? { transports: d.transports.split(",").filter(Boolean) } : {}),
+        })),
+        authenticatorSelection: { residentKey: "preferred", userVerification: "preferred" },
+      },
+    });
+  }
+
+  if (url.pathname === "/admin/api/auth/webauthn/register/verify" && request.method === "POST") {
+    const auth = await authenticate(request, env);
+    if (!auth) return authFailure(request);
+    const rp = rpConfig(env);
+    if (!rp) return jsonResponse({ detail: "WebAuthn 未配置：请先设置 WEBAUTHN_RP_ID" }, 503);
+    let body: { flow_id?: unknown; client_data_json?: unknown; attestation_object?: unknown; transports?: unknown; name?: unknown };
+    try {
+      body = await request.json() as typeof body;
+    } catch {
+      return jsonResponse({ detail: "Invalid JSON body" }, 400);
+    }
+    if (typeof body.flow_id !== "string" || typeof body.client_data_json !== "string" ||
+        typeof body.attestation_object !== "string") {
+      return jsonResponse({ detail: "缺少注册参数" }, 400);
+    }
+    let consumed: { userId: string; challenge: string };
+    try {
+      consumed = await consumeChallenge(env, body.flow_id, "register");
+    } catch (e) {
+      if (e instanceof WebAuthnError) {
+        return jsonResponse({ detail: "注册流程无效或已过期，请重新发起" }, e.reason === "flow_expired" ? 410 : 400);
+      }
+      throw e;
+    }
+    if (consumed.userId !== auth.user.id) {
+      await auditAdminAction(env, request, auth, "ACCESS_DENIED", "webauthn_credential", null, {
+        reason: "flow_user_mismatch",
+        path: url.pathname,
+      });
+      return jsonResponse({ detail: "无权完成他人的注册流程" }, 403);
+    }
+    const transports = Array.isArray(body.transports)
+      ? body.transports.filter((t): t is string => typeof t === "string")
+      : [];
+    let registration: Awaited<ReturnType<typeof verifyRegistrationResponse>>;
+    try {
+      registration = await verifyRegistrationResponse(rp, env, {
+        userId: consumed.userId,
+        expectedChallenge: consumed.challenge,
+        clientDataJson: body.client_data_json,
+        attestationObject: body.attestation_object,
+        transports,
+      });
+    } catch (e) {
+      if (e instanceof WebAuthnError) {
+        safeLog("warn", "[admin:webauthn] registration rejected", e.reason);
+        return jsonResponse({ detail: "注册验证失败", reason: e.reason }, 400);
+      }
+      throw e;
+    }
+    const name = typeof body.name === "string" && body.name.trim() ? body.name.trim().slice(0, 60) : null;
+    await env.DB.prepare(
+      `INSERT INTO webauthn_credentials (id, user_id, public_key_jwk, alg, sign_count, transports, name, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      registration.credentialId, auth.user.id, JSON.stringify(registration.jwk), registration.alg,
+      registration.signCount, registration.transports.join(",") || null, name, sqlUtc(),
+    ).run();
+    // Recovery codes are minted ONCE — when this is the user's first active
+    // credential and no unused codes exist. Regenerating later is an
+    // explicit, audited action.
+    const activeCount = await countActiveCredentials(env, auth.user.id);
+    const unusedCodes = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM webauthn_recovery_codes WHERE user_id = ? AND used_at IS NULL`,
+    ).bind(auth.user.id).first<{ n: number }>();
+    let recoveryCodes: string[] | null = null;
+    if (activeCount === 1 && (unusedCodes?.n ?? 0) === 0) {
+      recoveryCodes = generateRecoveryCodes();
+      const inserts = await Promise.all(recoveryCodes.map(async (code) =>
+        env.DB.prepare(
+          `INSERT INTO webauthn_recovery_codes (user_id, code_hash, created_at) VALUES (?, ?, ?)`,
+        ).bind(auth.user.id, await sha256HexOf(code), sqlUtc()),
+      ));
+      await env.DB.batch(inserts);
+    }
+    await auditAdminAction(env, request, auth, "WEBAUTHN_REGISTER", "webauthn_credential", registration.credentialId, {
+      alg: registration.alg,
+      transports: registration.transports.join(",") || null,
+      first_credential: activeCount === 1,
+    });
+    return jsonResponse({
+      ok: true,
+      credential_id: registration.credentialId,
+      recovery_codes: recoveryCodes,
+      two_factor_active: true,
+    });
+  }
+
+  if (url.pathname === "/admin/api/auth/webauthn/credentials" && request.method === "GET") {
+    const auth = await authenticate(request, env);
+    if (!auth) return authFailure(request);
+    const requestedUser = url.searchParams.get("user_id");
+    let targetUser = auth.user.id;
+    if (requestedUser && requestedUser !== auth.user.id) {
+      if (auth.user.role !== "super_admin") {
+        await auditAdminAction(env, request, auth, "ACCESS_DENIED", "webauthn_credential", null, {
+          reason: "forbidden",
+          requires: "super_admin",
+          path: url.pathname,
+        });
+        return jsonResponse({ detail: "无权执行此操作（仅 super_admin）" }, 403);
+      }
+      targetUser = requestedUser;
+    }
+    const rows = await env.DB.prepare(
+      `SELECT id, name, transports, created_at, last_used_at, sign_count
+       FROM webauthn_credentials WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at`,
+    ).bind(targetUser).all<{
+      id: string; name: string | null; transports: string | null;
+      created_at: string; last_used_at: string | null; sign_count: number;
+    }>();
+    const unusedCodes = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM webauthn_recovery_codes WHERE user_id = ? AND used_at IS NULL`,
+    ).bind(targetUser).first<{ n: number }>();
+    return jsonResponse({
+      credentials: rows.results ?? [],
+      recovery_codes_remaining: unusedCodes?.n ?? 0,
+      two_factor_active: (rows.results ?? []).length > 0,
+    });
+  }
+
+  if (url.pathname.startsWith("/admin/api/auth/webauthn/credentials/") && request.method === "DELETE") {
+    const auth = await authenticate(request, env);
+    if (!auth) return authFailure(request);
+    const credentialId = decodeURIComponent(url.pathname.slice("/admin/api/auth/webauthn/credentials/".length));
+    if (!credentialId || !/^[\w-]{10,300}$/.test(credentialId)) {
+      return jsonResponse({ detail: "凭据 ID 无效" }, 400);
+    }
+    const requestedUser = url.searchParams.get("user_id");
+    let targetUser = auth.user.id;
+    if (requestedUser && requestedUser !== auth.user.id) {
+      if (auth.user.role !== "super_admin") {
+        await auditAdminAction(env, request, auth, "ACCESS_DENIED", "webauthn_credential", null, {
+          reason: "forbidden",
+          requires: "super_admin",
+          path: url.pathname,
+        });
+        return jsonResponse({ detail: "无权执行此操作（仅 super_admin）" }, 403);
+      }
+      targetUser = requestedUser;
+    }
+    const info = await env.DB.prepare(
+      `UPDATE webauthn_credentials SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL`,
+    ).bind(sqlUtc(), credentialId, targetUser).run();
+    if (Number(info.meta.changes ?? 0) !== 1) return jsonResponse({ detail: "凭据不存在" }, 404);
+    const remaining = await countActiveCredentials(env, targetUser);
+    await auditAdminAction(env, request, auth, "WEBAUTHN_REVOKE", "webauthn_credential", credentialId, {
+      target_user_id: targetUser,
+      was_last_credential: remaining === 0,
+    });
+    return jsonResponse({ ok: true, revoked: 1, two_factor_active: remaining > 0 });
+  }
+
+  if (url.pathname === "/admin/api/auth/webauthn/recovery/regenerate" && request.method === "POST") {
+    const auth = await authenticate(request, env);
+    if (!auth) return authFailure(request);
+    const rp = rpConfig(env);
+    if (!rp) return jsonResponse({ detail: "WebAuthn 未配置：请先设置 WEBAUTHN_RP_ID" }, 503);
+    // Replace the WHOLE set (used and unused): regenerating after a leak
+    // must invalidate everything previously printed.
+    await env.DB.prepare(`DELETE FROM webauthn_recovery_codes WHERE user_id = ?`).bind(auth.user.id).run();
+    const codes = generateRecoveryCodes();
+    const inserts = await Promise.all(codes.map(async (code) =>
+      env.DB.prepare(
+        `INSERT INTO webauthn_recovery_codes (user_id, code_hash, created_at) VALUES (?, ?, ?)`,
+      ).bind(auth.user.id, await sha256HexOf(code), sqlUtc()),
+    ));
+    await env.DB.batch(inserts);
+    await auditAdminAction(env, request, auth, "WEBAUTHN_RECOVERY_REGEN", "webauthn_credential", null, {
+      count: codes.length,
+    });
+    return jsonResponse({ ok: true, recovery_codes: codes });
+  }
+
   if (url.pathname === "/admin/outreach") {
     if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
     return (await authenticate(request, env))
@@ -2752,6 +3216,15 @@ async function routeAdminRequest(
       return jsonResponse({ detail: "无权执行此操作（仅 super_admin）" }, 403);
     }
     return htmlResponse(SESSIONS_PANEL_HTML);
+  }
+
+  // Post-V2 Stage 29: WebAuthn credential self-service — every authenticated
+  // user manages their own authenticators and recovery codes here.
+  if (url.pathname === "/admin/security") {
+    if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
+    return (await authenticate(request, env))
+      ? htmlResponse(SECURITY_PANEL_HTML)
+      : htmlResponse(ADMIN_LOGIN_HTML);
   }
 
   /* ── Central authorization gate (Security V2 Stage 2) ──
@@ -2840,7 +3313,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 .toolbar .cp-dd input[type=checkbox]{min-width:0;width:auto;padding:0;margin:0}
 .persona-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin-bottom:10px}.persona-card h4{margin:0 0 8px;font-size:14px;color:#1e293b}.persona-card ul{margin:0;padding-left:18px;font-size:13px;color:#475569}.solution-card{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px;margin-bottom:10px}.solution-card h4{margin:0 0 6px;font-size:14px;color:#1e40af}.solution-card p{margin:0;font-size:13px;color:#1e3a5f}.section-title{font-size:15px;font-weight:600;color:#123b68;margin:18px 0 10px;padding-bottom:6px;border-bottom:2px solid #123b68}
 @media(max-width:700px){.top{align-items:flex-start;flex-direction:column}table{display:block;overflow-x:auto;white-space:nowrap}.field-row{flex-direction:column}.field-label{width:100%;min-width:0;border-right:none;border-bottom:1px solid #e2e8f0}.modal-body{padding:16px}}
-</style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div style="display:flex;gap:12px;align-items:center"><a href="/admin/outreach" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">📧 开发信管理</a><a href="/admin/keys" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
+</style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div style="display:flex;gap:12px;align-items:center"><a href="/admin/security" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">🛡️ 安全设置</a><a href="/admin/outreach" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">📧 开发信管理</a><a href="/admin/keys" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
 <section class="panel"><h2>📥 客户数据导入（Seed CSV）</h2><p style="font-size:13px;color:#475569;margin:6px 0">粘贴 CSV（需表头，支持列：company_name, country, domain/website, email, product）。原始数据永久保存在 customer_imports（不可变原始层）；域名或公司名匹配的行自动去重跳过，新公司以 pending 状态进入研究队列。</p><div class="toolbar"><input id="importFileName" placeholder="文件名备注（可选）" style="max-width:220px"><button class="button" id="importBtn">导入并去重入队</button></div><textarea id="importCsv" rows="6" placeholder="company_name,country,website,email,product\nABC Sports,USA,,buyer@abcsports.com,SUP\nOcean Pro,Germany,oceanpro.de,,RIB"></textarea><div id="importMsg" class="notice hidden"></div></section>
 <section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p style="font-size:13px;color:#475569;margin:6px 0">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围，再点「重新入队」让管道二次研究高价值客户。筛选项为下拉勾选，右侧数字是该条件当前命中的客户数（勾选「有邮箱」后只计有邮箱的）。</p><div class="toolbar"><span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span><span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span><span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span><select id="pfMinScore" style="min-width:130px"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="50">最低分 ≥50</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select><label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button></div><div id="pfResult" class="notice hidden"></div></section>
 <section class="panel"><h2>客户列表</h2><div id="scoreCard" class="hidden" style="margin-bottom:12px"></div><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>评分</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
@@ -4074,13 +4547,250 @@ function load(){
   api('/admin/api/auth/sessions').then(function(body){render(body.sessions||[])})
   .catch(function(e){toast(e.message,true)});
 }
-document.getElementById('refresh').onclick=load;
-document.getElementById('revokeAll').onclick=function(){
-  if(!confirm('确定吊销除当前会话外的全部活跃会话？此操作立即生效。'))return;
-  api('/admin/api/auth/revoke-all',{method:'POST'}).then(function(body){toast('已吊销 '+body.revoked+' 个会话');load()})
+ document.getElementById('refresh').onclick=load;
+ document.getElementById('revokeAll').onclick=function(){
+   if(!confirm('确定吊销除当前会话外的全部活跃会话？此操作立即生效。'))return;
+   api('/admin/api/auth/revoke-all',{method:'POST'}).then(function(body){toast('已吊销 '+body.revoked+' 个会话');load()})
+   .catch(function(e){toast(e.message,true)});
+ };
+ load();
+ })();
+ </script></body></html>`;
+
+/* ── WebAuthn 2FA pages (post-V2 Stage 29) ─────────────────────────────── */
+
+/** The browser-facing MFA step, rendered when the master token checked out
+ * but a WebAuthn credential is on file. The challenge payload rides in a
+ * JSON data block (<script type="application/json"> — never executed, so
+ * the CSP nonce set does not apply to it); the executable script drives
+ * navigator.credentials.get() and offers the recovery-code form as the
+ * fallback when no authenticator is available. */
+function mfaChallengePage(mfa: MfaChallengePayload): string {
+  // "<" is escaped in the JSON so a hostile value can never break out of the
+  // data block; the payload itself is server-generated (UUID + base64url).
+  const data = JSON.stringify(mfa).replace(/</g, "\\u003c");
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>两步验证 - D1 CRM</title><style>
+body{font-family:system-ui,sans-serif;background:#eef4fa;display:grid;place-items:center;min-height:100vh;margin:0}
+.card{background:#fff;padding:28px;border-radius:14px;box-shadow:0 8px 30px #123b6820;width:min(460px,calc(100% - 40px))}
+h1{margin-top:0;color:#123b68;font-size:20px}label{display:block;font-weight:600;margin:16px 0 6px}
+input{box-sizing:border-box;width:100%;padding:12px;border:1px solid #cbd5e1;border-radius:8px;font:inherit}
+button{margin-top:14px;background:#1677d2;color:#fff;border:0;border-radius:8px;padding:12px 18px;cursor:pointer;font:inherit}
+button.secondary{background:#475569}
+.error{color:#b91c1c;min-height:20px;margin-top:10px;font-size:14px}
+details{margin-top:18px}summary{cursor:pointer;color:#475569;font-size:14px}
+.hint{font-size:12px;color:#7a8291;margin-top:8px}
+</style></head>
+<body><main class="card">
+<h1>🔐 两步验证</h1>
+<p style="font-size:14px;color:#334155">该账户已启用双因素认证。请使用安全密钥或通行密钥完成验证。</p>
+<button id="authnBtn" type="button">使用安全密钥验证</button>
+<div id="msg" class="error"></div>
+<details><summary>无法使用安全密钥？使用恢复码</summary>
+<label for="code">恢复码</label>
+<input id="code" placeholder="xxxx-xxxx-xxxx-xxxx" autocomplete="off">
+<button id="recoveryBtn" type="button" class="secondary">验证恢复码</button>
+<p class="hint">每个恢复码只能使用一次。全部用完后请登录面板重新生成。</p>
+</details>
+</main>
+<script type="application/json" id="mfaData">${data}</script>
+<script>
+(function(){
+'use strict';
+var mfa=JSON.parse(document.getElementById('mfaData').textContent);
+var msg=document.getElementById('msg');
+function b64uToU8(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';var bin=atob(s);var u=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u}
+function u8ToB64u(u){var s='';for(var i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);return btoa(s).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'')}
+function post(path,body){return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json().then(function(j){return {status:r.status,body:j}})})}
+document.getElementById('authnBtn').onclick=function(){
+  msg.textContent='';
+  var pk=mfa.public_key;
+  var options={challenge:b64uToU8(pk.challenge),rpId:pk.rpId,timeout:pk.timeout,userVerification:pk.userVerification,allowCredentials:(pk.allowCredentials||[]).map(function(c){return {type:'public-key',id:b64uToU8(c.id),transports:c.transports}})};
+  navigator.credentials.get({publicKey:options}).then(function(cred){
+    var r=cred.response;
+    return post('/admin/api/auth/mfa/assert',{
+      flow_id:mfa.flow_id,
+      credential_id:u8ToB64u(new Uint8Array(cred.rawId)),
+      client_data_json:u8ToB64u(new Uint8Array(r.clientDataJSON)),
+      authenticator_data:u8ToB64u(new Uint8Array(r.authenticatorData)),
+      signature:u8ToB64u(new Uint8Array(r.signature))
+    });
+  }).then(function(res){
+    if(res.status===200){location.href='/admin';return}
+    msg.textContent=(res.body&&res.body.detail)||'验证失败，请重试';
+  }).catch(function(e){
+    if(e&&e.name==='NotAllowedError'){msg.textContent='操作已取消或无可用安全密钥 — 可改用下方恢复码';return}
+    msg.textContent='验证失败：'+(e&&e.message?e.message:'未知错误');
+  });
+};
+document.getElementById('recoveryBtn').onclick=function(){
+  msg.textContent='';
+  var code=document.getElementById('code').value;
+  if(!code.trim()){msg.textContent='请输入恢复码';return}
+  post('/admin/api/auth/mfa/recovery',{flow_id:mfa.flow_id,code:code}).then(function(res){
+    if(res.status===200){location.href='/admin';return}
+    msg.textContent=(res.body&&res.body.detail)||'恢复码无效';
+  }).catch(function(e){msg.textContent='验证失败：'+(e&&e.message?e.message:'未知错误')});
+};
+})();
+</script></body></html>`;
+}
+
+const SECURITY_PANEL_HTML = `<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>安全设置 - CRM</title><style>
+body{font-family:system-ui,sans-serif;margin:0;background:#f3f5f9;color:#1f2430}
+.top{background:#1f2430;color:#fff;padding:14px 24px;display:flex;justify-content:space-between;align-items:center}
+.top h1{font-size:18px;margin:0}
+.top a{color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 14px;border-radius:8px;font-weight:600;font-size:14px}
+.wrap{max-width:1000px;margin:24px auto;padding:0 16px}
+.card{background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:20px;margin-bottom:20px}
+h2{font-size:16px;margin:0 0 12px}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.btn{border:0;border-radius:6px;padding:7px 14px;cursor:pointer;font-size:13px;font-weight:600;background:#3f9d63;color:#fff}
+.btn.del{background:#fde8e8;color:#b23b3b}
+.btn.gray{background:#8b93a3}
+input{font:inherit;padding:7px 10px;border:1px solid #cbd5e1;border-radius:6px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:#f0f2f7;padding:8px;text-align:left;font-size:12px;color:#5a6270}
+td{padding:8px;border-bottom:1px solid #eef1f6;vertical-align:top}
+.mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+.badge{display:inline-block;border-radius:10px;padding:2px 10px;font-size:12px;font-weight:600;background:#dcfce7;color:#166534}
+.badge.off{background:#e2e8f0;color:#475569}
+#toast{position:fixed;top:18px;right:18px;background:#1f2430;color:#fff;padding:10px 16px;border-radius:8px;font-size:14px;display:none;max-width:420px;z-index:9}
+#toast.err{background:#b23b3b}
+.hint{font-size:12px;color:#7a8291;margin-top:6px}
+#codeArea{width:100%;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace;font-size:13px;padding:10px;border:1px solid #cbd5e1;border-radius:6px;margin-top:10px;display:none}
+.warn{background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:10px 12px;font-size:13px;color:#92400e;margin-top:10px;display:none}
+</style></head><body>
+<header class="top"><h1>🛡️ 安全设置</h1><a href="/admin">← 返回客户管理</a></header>
+<div class="wrap">
+<div class="card">
+  <h2>双因素认证（WebAuthn / 通行密钥） <span id="statusBadge" class="badge off">未启用</span></h2>
+  <div class="bar">
+    <input id="credName" placeholder="名称备注（如 YubiKey 5C）" style="min-width:220px">
+    <button class="btn" id="addBtn">添加安全密钥</button>
+    <button class="btn gray" id="refresh">刷新</button>
+  </div>
+  <table><thead><tr><th>名称</th><th>凭据 ID</th><th>添加时间 (UTC)</th><th>最近使用</th><th>传输方式</th><th></th></tr></thead>
+  <tbody id="rows"><tr><td colspan="6">加载中…</td></tr></tbody></table>
+  <p class="hint">启用后：登录需要「管理 Token + 安全密钥」两步验证；同时 <b>Bearer Token 直接调用 API 的方式将被禁用</b>（否则第二因子形同虚设）。移除最后一个凭据即恢复单因子登录。</p>
+  <p class="hint">未配置 WEBAUTHN_RP_ID 时此功能处于休眠状态，添加按钮会返回 503。</p>
+</div>
+<div class="card">
+  <h2>恢复码</h2>
+  <p style="font-size:13px;margin:0 0 10px">安全密钥丢失时用于应急登录。每个恢复码仅可使用一次，当前可用：<b id="codesCount">—</b></p>
+  <div class="bar"><button class="btn gray" id="regenBtn">重新生成恢复码</button><button class="btn gray" id="copyBtn" style="display:none">复制</button></div>
+  <div id="codeWarn" class="warn">⚠️ 恢复码只在此时显示一次。请立即复制并离线妥善保管（密码管理器 / 打印件）。</div>
+  <textarea id="codeArea" rows="6" readonly></textarea>
+  <div id="codeMsg" class="hint"></div>
+</div>
+</div>
+<div id="toast"></div>
+<script>
+(function(){
+'use strict';
+function esc(v){return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
+function toast(msg,isErr){var t=document.getElementById('toast');t.textContent=msg;t.className=isErr?'err':'';t.style.display='block';setTimeout(function(){t.style.display='none'},3200)}
+function api(path,init){return fetch(path,Object.assign({credentials:'same-origin'},init||{})).then(function(r){return r.json().then(function(body){if(!r.ok)throw new Error(body.detail||('HTTP '+r.status));return body})})}
+function b64uToU8(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';var bin=atob(s);var u=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u}
+function u8ToB64u(u){var s='';for(var i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);return btoa(s).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'')}
+function showCodes(codes){
+  document.getElementById('codeArea').value=codes.join('\\n');
+  document.getElementById('codeArea').style.display='block';
+  document.getElementById('codeWarn').style.display='block';
+  document.getElementById('copyBtn').style.display='inline-block';
+  document.getElementById('codeMsg').textContent='';
+}
+function load(){
+  api('/admin/api/auth/webauthn/credentials').then(function(body){
+    var rows=body.credentials||[];
+    var badge=document.getElementById('statusBadge');
+    badge.textContent=body.two_factor_active?'已启用':'未启用';
+    badge.className='badge'+(body.two_factor_active?'':' off');
+    document.getElementById('codesCount').textContent=String(body.recovery_codes_remaining);
+    var tb=document.getElementById('rows');
+    if(!rows.length){tb.innerHTML='<tr><td colspan="6">尚未添加安全密钥</td></tr>';return}
+    var html='';
+    for(var i=0;i<rows.length;i++){
+      var c=rows[i];
+      html+='<tr><td>'+esc(c.name||'（未命名）')+'</td>'
+        +'<td class="mono">'+esc(c.id.length>20?c.id.slice(0,20)+'…':c.id)+'</td>'
+        +'<td class="mono">'+esc(c.created_at)+'</td>'
+        +'<td class="mono">'+esc(c.last_used_at||'—')+'</td>'
+        +'<td>'+esc(c.transports||'—')+'</td>'
+        +'<td><button class="btn del" data-cid="'+esc(c.id)+'">移除</button></td></tr>';
+    }
+    tb.innerHTML=html;
+    Array.prototype.forEach.call(tb.querySelectorAll('button[data-cid]'),function(b){
+      b.onclick=function(){
+        if(!confirm('确定移除该安全密钥？移除最后一个凭据将关闭双因素认证并恢复 Bearer 登录。'))return;
+        api('/admin/api/auth/webauthn/credentials/'+encodeURIComponent(b.getAttribute('data-cid')),{method:'DELETE'})
+        .then(function(body){toast(body.two_factor_active?'已移除':'已移除 — 双因素已关闭');load()})
+        .catch(function(e){toast(e.message,true)});
+      };
+    });
+  })
   .catch(function(e){toast(e.message,true)});
+}
+document.getElementById('refresh').onclick=load;
+document.getElementById('addBtn').onclick=function(){
+  var name=document.getElementById('credName').value;
+  api('/admin/api/auth/webauthn/register/options',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})})
+  .then(function(body){
+    var pk=body.public_key;
+    var options={
+      rp:pk.rp,
+      user:{id:new TextEncoder().encode(pk.user.id),name:pk.user.name,displayName:pk.user.displayName},
+      challenge:b64uToU8(pk.challenge),
+      pubKeyCredParams:pk.pubKeyCredParams,
+      timeout:pk.timeout,
+      attestation:pk.attestation,
+      excludeCredentials:(pk.excludeCredentials||[]).map(function(c){return {type:'public-key',id:b64uToU8(c.id),transports:c.transports}}),
+      authenticatorSelection:pk.authenticatorSelection
+    };
+    return navigator.credentials.create({publicKey:options}).then(function(cred){
+      var r=cred.response;
+      var transports=(r.getTransports&&r.getTransports())||[];
+      return api('/admin/api/auth/webauthn/register/verify',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          flow_id:body.flow_id,
+          client_data_json:u8ToB64u(new Uint8Array(r.clientDataJSON)),
+          attestation_object:u8ToB64u(new Uint8Array(r.attestationObject)),
+          transports:transports,
+          name:name
+        })
+      });
+    });
+  })
+  .then(function(body){
+    toast('安全密钥已添加');
+    if(body.recovery_codes)showCodes(body.recovery_codes);
+    document.getElementById('credName').value='';
+    load();
+  })
+  .catch(function(e){toast((e&&e.message)||'注册失败',true)});
+};
+document.getElementById('regenBtn').onclick=function(){
+  if(!confirm('重新生成将作废现有全部恢复码（含未使用的）。确定继续？'))return;
+  api('/admin/api/auth/webauthn/recovery/regenerate',{method:'POST'})
+  .then(function(body){showCodes(body.recovery_codes);load()})
+  .catch(function(e){toast(e.message,true)});
+};
+document.getElementById('copyBtn').onclick=function(){
+  var text=document.getElementById('codeArea').value;
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(function(){toast('已复制')},function(){toast('复制失败，请手动选择',true)});
+  }else{
+    document.getElementById('codeArea').select();
+    document.execCommand('copy');
+    toast('已复制');
+  }
 };
 load();
 })();
 </script></body></html>`;
+
 

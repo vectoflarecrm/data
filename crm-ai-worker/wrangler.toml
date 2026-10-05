@@ -35,3 +35,23 @@ database_id = "REPLACE_WITH_D1_DATABASE_ID"
 # Unset → default 180 days; "0" disables pruning entirely.
 # [vars]
 # AUDIT_RETENTION_DAYS = "180"
+
+# Post-V2 Stage 29 (WebAuthn 2FA). All three optional; while WEBAUTHN_RP_ID
+# is unset the feature sleeps: login stays single-factor (token → session),
+# register endpoints answer 503, and existing credential rows are ignored.
+# Once set AND the bootstrap operator has registered a security key/passkey:
+#   - login becomes two-step (token → assert challenge → session);
+#   - the Bearer master-token API path is CLOSED (a second factor that can
+#     be skipped by moving the token into an Authorization header would be
+#     decoration) — scripts must switch to cookie sessions or remove the
+#     last credential to re-open Bearer.
+# WEBAUTHN_RP_ID: the domain end-users see, e.g. "crm.example.com" (no
+#   scheme, no port). A worker.dev host works for testing.
+# WEBAUTHN_RP_NAME: display name (defaults to RP_ID).
+# WEBAUTHN_ORIGINS: comma-separated allowlist of caller origins. Defaults to
+#   https://<RP_ID>; add extra origins (e.g. a custom domain AND the
+#   workers.dev route) as "https://crm.example.com,https://crm.example.workers.dev".
+# [vars]
+# WEBAUTHN_RP_ID = "crm.example.com"
+# WEBAUTHN_RP_NAME = "CRM Admin"
+# WEBAUTHN_ORIGINS = "https://crm.example.com"

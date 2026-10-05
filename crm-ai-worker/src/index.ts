@@ -7,6 +7,7 @@ import { safeLog } from "./security/safe-log";
 import { writeAuditLog } from "./audit/audit-log";
 import { resolveAuditRetentionDays, pruneAuditLogs } from "./audit/audit-retention";
 import { pruneExpiredSessions } from "./auth/session-hygiene";
+import { cleanupExpiredChallenges } from "./auth/webauthn";
 import { startResearchRun, completeResearchRun, appendFieldEvidence, newProvenance, type AnalysisProvenance } from "./research-run";
 
 export interface CustomerRow {
@@ -60,6 +61,12 @@ interface Env {
   // Post-V2 (audit retention): days an audit_logs row survives. Unset →
   // default 180; "0" disables pruning. See src/audit/audit-retention.ts.
   AUDIT_RETENTION_DAYS?: string;
+  // Post-V2 Stage 29 (WebAuthn 2FA): RP ID unset ⇒ feature dormant. While
+  // the bootstrap user holds an active credential, Bearer bootstrap is
+  // disabled and login becomes two-step. See src/auth/webauthn.ts.
+  WEBAUTHN_RP_ID?: string;
+  WEBAUTHN_RP_NAME?: string;
+  WEBAUTHN_ORIGINS?: string;
   [key: string]: unknown;
 }
 
@@ -2276,6 +2283,16 @@ export default {
       }
     } catch (e) {
       safeLog("error", "[session-hygiene] prune failed, continuing research tick", e instanceof Error ? e.message : String(e));
+    }
+    // Post-V2 Stage 29: abandoned/expired WebAuthn flows are single-use by
+    // design; the cron vacuums whatever the client never completed.
+    try {
+      const prunedFlows = await cleanupExpiredChallenges(env);
+      if (prunedFlows > 0) {
+        safeLog("log", `[webauthn] pruned ${prunedFlows} expired challenge flows`);
+      }
+    } catch (e) {
+      safeLog("error", "[webauthn] challenge cleanup failed, continuing research tick", e instanceof Error ? e.message : String(e));
     }
     // Claim-first design: rows are flipped to 'processing' before any slow work
     // starts, so an overlapping cron tick can never double-claim the same
