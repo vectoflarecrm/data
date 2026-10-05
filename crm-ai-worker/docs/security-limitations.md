@@ -53,10 +53,14 @@ The RPM limiter is per-isolate. A distributed limiter behind a
 `RateLimiter` abstraction is scheduled as Stage 16; until then, bursts
 across isolates can exceed configured RPM toward providers.
 
-## 4. `style-src-attr 'unsafe-inline'` in the admin CSP — Stage 5
+## 4. ~~`style-src-attr 'unsafe-inline'` in the admin CSP — Stage 5~~ Resolved in Stage 30
 
-Panel HTML uses `style=""` attributes extensively; attributes cannot carry a
-nonce. CSS injection cannot execute script, and every dynamic `innerHTML`
-sink in the panels is escaped, so the accepted residual risk is defacement
-of the panel by an already-authenticated operator. Full removal requires a
-class-based restyle.
+Stage 5 accepted this escape hatch: panel HTML used `style=""` attributes
+extensively and attributes cannot carry a nonce. Stage 30 removed it — all
+static inline styles were converted to utility classes (injected at the end of
+each panel's `<style>` block so class specificity preserves the previous
+override order), dynamic widths/colors became variant classes plus CSSOM
+assignments (`el.style.width`, unrestricted by CSP), and the single remaining
+inline `onclick=""` (already dead under the nonce-based `script-src`) was
+replaced with an event-delegation listener. The admin CSP is now fully
+nonce-based with no `'unsafe-inline'` anywhere.

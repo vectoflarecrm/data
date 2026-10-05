@@ -25,18 +25,18 @@ const STATIC_SECURITY_HEADERS: ReadonlyArray<readonly [string, string]> = [
  * <script>/<style> tag to carry `nonce="…"`, so script-src and style-src
  * need neither 'unsafe-inline' nor 'unsafe-eval'.
  *
- * Known tech debt (tracked in docs/security-v2-baseline.md):
- *   - style-src-attr 'unsafe-inline': the panels use style="" attributes
- *     extensively and attributes cannot carry a nonce. CSS injection cannot
- *     execute script, and stage 5 also escapes every dynamic sink, so the
- *     residual risk is defacement only.
+ * Stage 30 removed style-src-attr 'unsafe-inline': the admin panels no
+ * longer emit any style="" attribute (static styles moved to classes,
+ * dynamic widths are applied via CSSOM el.style.width, which CSP does not
+ * restrict). Inline event handlers were never allowed (script-src has no
+ * 'unsafe-inline'), and the last onclick="" remnant was converted to an
+ * event delegation listener in stage 30 as well.
  */
 export function htmlCsp(nonce: string): string {
   return [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}'`,
     `style-src 'self' 'nonce-${nonce}'`,
-    "style-src-attr 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "connect-src 'self'",
     "font-src 'self'",

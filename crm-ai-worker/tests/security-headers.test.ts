@@ -213,16 +213,17 @@ describe("stage 5: nonce-based CSP for panel HTML", () => {
     expect(n1).not.toBe(n2);
   });
 
-  it("keeps unsafe-eval out and confines unsafe-inline to style attributes", async () => {
+  it("keeps unsafe-eval and unsafe-inline out entirely", async () => {
     const { env } = await makeEnv();
     const res = await handleAdminRequest(get("/admin"), env);
     const csp = res.headers.get("Content-Security-Policy") || "";
     expect(csp).not.toContain("unsafe-eval");
-    // script-src / style-src must be nonce-based …
+    // Stage 30: panels carry no style="" attributes any more, so the whole
+    // policy is nonce-based — 'unsafe-inline' must not appear anywhere.
+    expect(csp).not.toContain("unsafe-inline");
+    expect(csp).not.toContain("style-src-attr");
     expect(csp).toMatch(/script-src 'self' 'nonce-/);
     expect(csp).toMatch(/style-src 'self' 'nonce-/);
-    // … while style="" attributes are the one documented escape hatch.
-    expect(csp).toContain("style-src-attr 'unsafe-inline'");
     expect(csp).toContain("object-src 'none'");
     expect(csp).toContain("base-uri 'self'");
     expect(csp).toContain("form-action 'self'");

@@ -166,7 +166,7 @@ Stage 24 gate, all green: `npm test` 543/543 (46 files); `npm run typecheck` exi
 
 Accepted and documented, none unmitigated:
 
-1. **`style-src-attr 'unsafe-inline'`** in CSP — panels use `style=""` attributes (attributes cannot carry a nonce); CSS injection cannot execute script and Stage 5 escaped every dynamic innerHTML sink. A class-based restyle removes it (deferred).
+1. ~~**`style-src-attr 'unsafe-inline'`** in CSP~~ — resolved post-V2 (Stage 30): every static `style=""` became a utility class (injected at the end of each panel's `<style>` block so the class cascade preserves the previous inline-override order), dynamic widths/colors became variant classes + CSSOM `el.style.width` assignments, and the last inline `onclick=""` (already dead under nonce-based `script-src`) became an event-delegation listener. The admin CSP carries no `'unsafe-inline'` anywhere.
 2. **Fail-open by design** on audit, evidence and rate-limiter D1 writes (availability over bookkeeping), and on the campaign lock when its table is missing (per-email idempotency remains the hard guarantee). Each fail-open is an explicit, tested policy — a silent one would be a bug.
 3. **Fixed-window rate limiter** can admit up to 2× the cap across a window boundary; documented in `src/rate-limiter.ts`, caught in practice by the reactive `api_key_health` cooldown.
 4. **No FK enforcement on existing tables** (SQLite cannot add FKs without a table rebuild); orphan prevention is structural (documented in stage-17).
@@ -180,7 +180,7 @@ Accepted and documented, none unmitigated:
 ## Deferred Improvements
 
 - Durable-Objects-based rate limiter — drop-in via the `RateLimiter` interface (the abstraction exists for exactly this).
-- Class-based panel restyle → drop `style-src-attr 'unsafe-inline'`.
+- ~~Class-based panel restyle → drop `style-src-attr 'unsafe-inline'`~~ — done in post-V2 Stage 30 (`scripts/style-to-class.mjs` conversion, per-panel injected utility CSS, CSSOM for dynamic widths; `docs/stages/stage-30-panel-style-classes.md`).
 - ~~Audit retention/prune job + panel view over audit_logs~~ — done in post-V2 Stage 25 (`AUDIT_RETENTION_DAYS` cron prune, `/admin/api/audit-logs`, `/admin/audit`).
 - ~~Automated `CREDENTIAL_ENC_KEY` rotation (re-encryption sweep) instead of panel re-entry~~ — done in post-V2 Stage 26 (`CREDENTIAL_ENC_KEY_PREVIOUS` + reseal sweeps).
 - FK-adding table rebuilds for existing databases.

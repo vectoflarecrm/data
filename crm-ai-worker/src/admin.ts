@@ -306,8 +306,8 @@ function htmlResponse(body: string, status = 200): Response {
   // <script>/<style> tag, so the panels pass script-src/style-src
   // 'nonce-…' without 'unsafe-inline' or 'unsafe-eval'. All tags in the
   // panel templates are plain (<script>/<style> with no attributes), which
-  // the exact-string replaceAll relies on. Residual tech debt —
-  // style-src-attr — is documented in src/security-headers.ts.
+  // the exact-string replaceAll relies on. Since stage 30 the panels carry
+  // no style="" attributes either — see docs/stages/stage-30-panel-style-classes.md.
   const nonce = crypto.randomUUID();
   const hardened = body
     .replaceAll("<script>", `<script nonce="${nonce}">`)
@@ -3313,31 +3313,82 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 .toolbar .cp-dd input[type=checkbox]{min-width:0;width:auto;padding:0;margin:0}
 .persona-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin-bottom:10px}.persona-card h4{margin:0 0 8px;font-size:14px;color:#1e293b}.persona-card ul{margin:0;padding-left:18px;font-size:13px;color:#475569}.solution-card{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px;margin-bottom:10px}.solution-card h4{margin:0 0 6px;font-size:14px;color:#1e40af}.solution-card p{margin:0;font-size:13px;color:#1e3a5f}.section-title{font-size:15px;font-weight:600;color:#123b68;margin:18px 0 10px;padding-bottom:6px;border-bottom:2px solid #123b68}
 @media(max-width:700px){.top{align-items:flex-start;flex-direction:column}table{display:block;overflow-x:auto;white-space:nowrap}.field-row{flex-direction:column}.field-label{width:100%;min-width:0;border-right:none;border-bottom:1px solid #e2e8f0}.modal-body{padding:16px}}
-</style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div style="display:flex;gap:12px;align-items:center"><a href="/admin/security" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">🛡️ 安全设置</a><a href="/admin/outreach" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">📧 开发信管理</a><a href="/admin/keys" style="color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
-<section class="panel"><h2>📥 客户数据导入（Seed CSV）</h2><p style="font-size:13px;color:#475569;margin:6px 0">粘贴 CSV（需表头，支持列：company_name, country, domain/website, email, product）。原始数据永久保存在 customer_imports（不可变原始层）；域名或公司名匹配的行自动去重跳过，新公司以 pending 状态进入研究队列。</p><div class="toolbar"><input id="importFileName" placeholder="文件名备注（可选）" style="max-width:220px"><button class="button" id="importBtn">导入并去重入队</button></div><textarea id="importCsv" rows="6" placeholder="company_name,country,website,email,product\nABC Sports,USA,,buyer@abcsports.com,SUP\nOcean Pro,Germany,oceanpro.de,,RIB"></textarea><div id="importMsg" class="notice hidden"></div></section>
-<section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p style="font-size:13px;color:#475569;margin:6px 0">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围，再点「重新入队」让管道二次研究高价值客户。筛选项为下拉勾选，右侧数字是该条件当前命中的客户数（勾选「有邮箱」后只计有邮箱的）。</p><div class="toolbar"><span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span><span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span><span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span><select id="pfMinScore" style="min-width:130px"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="50">最低分 ≥50</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select><label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button></div><div id="pfResult" class="notice hidden"></div></section>
-<section class="panel"><h2>客户列表</h2><div id="scoreCard" class="hidden" style="margin-bottom:12px"></div><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>评分</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
+
+/* stage30 auto: inline style -> class */
+.s-fs13{font-size:13px}
+.s-faint{color:#94a3b8}
+.s-mw130{min-width:130px}
+.s-note{font-size:13px;color:#475569;margin:6px 0}
+.s-chiprow{font-size:13px;display:flex;align-items:center;gap:4px}
+.s-faint2{color:#9ca3af}
+.s-dfx-g12-aic{display:flex;gap:12px;align-items:center}
+.s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600{color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600}
+.s-xw220{max-width:220px}
+.s-mb12{margin-bottom:12px}
+.s-mra{margin-right:auto}
+.s-fx1-mw110{flex:1;min-width:110px}
+.s-fs11-c64748b-mb2{font-size:11px;color:#64748b;margin-bottom:2px}
+.s-bge2e8f0-br4-h8-ovh{background:#e2e8f0;border-radius:4px;height:8px;overflow:hidden}
+.s-fs12-fw700-mt2{font-size:12px;font-weight:700;margin-top:2px}
+.s-fs10-c94a3b8-fw400{font-size:10px;color:#94a3b8;font-weight:400}
+.s-dfx-g14-fxww-bgf8fafc-bd1 ol e2e8f0-br8-p10 14{display:flex;gap:14px;flex-wrap:wrap;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px}
+.s-fx0 0 a-dfx-aic-fs12-c475569{flex:0 0 auto;display:flex;align-items:center;font-size:12px;color:#475569}
+.s-c16a34a-fw700{color:#16a34a;font-weight:700}
+.s-cd97706-fw700{color:#d97706;font-weight:700}
+.s-mb4{margin-bottom:4px}
+.s-wspw-fs12{white-space:pre-wrap;font-size:12px}
+.s-wspw-lh16{white-space:pre-wrap;line-height:1.6}
+.s-c94a3b8-p12{color:#94a3b8;padding:12px}
+.s-bdl3 ol 1677d2{border-left:3px solid #1677d2}
+.s-dfx-jcb-aic-mb8{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.s-m0{margin:0}
+.s-dgrid-gridtemplatecolumns1fr 1fr-g4 16-fs13{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:13px}
+.s-gc11{grid-column:1/-1}
+.s-dfx-fxww-g8{display:flex;flex-wrap:wrap;gap:8px}
+.s-bgf8fafc-bd1 ol e2e8f0-br8-p10 14-dfx-aic-g8{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:8px}
+.s-fs18{font-size:18px}
+.s-fw600-fs13{font-weight:600;font-size:13px}
+.s-fs12-c1677d2-wbba{font-size:12px;color:#1677d2;word-break:break-all}
+.s-dfx-fxdcol-g8{display:flex;flex-direction:column;gap:8px}
+.s-bgf8fafc-bd1 ol e2e8f0-br8-p10 12{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px}
+.s-dfx-jcb-g8-mb4{display:flex;justify-content:space-between;gap:8px;margin-bottom:4px}
+.s-fs12-c374151-mb3{font-size:12px;color:#374151;margin-bottom:3px}
+.s-fs12-c6b7280-fstit-mb3{font-size:12px;color:#6b7280;font-style:italic;margin-bottom:3px}
+.s-fs11-c1677d2-wbba{font-size:11px;color:#1677d2;word-break:break-all}
+.s-cd97706{color:#d97706}
+.s-bgf8fafc{background:#f8fafc}
+.s-dfx-jcb-aic{display:flex;justify-content:space-between;align-items:center}
+/* stage30: dynamic-variant classes (score bar / verified / evidence) */
+.score-fill{height:100%}
+.sf-hi{background:#16a34a}.sf-good{background:#65a30d}.sf-mid{background:#d97706}.sf-low{background:#9ca3af}.sf-none{background:#cbd5e1}
+.sv-ok{font-size:11px;color:#059669;font-weight:600}.sv-bad{font-size:11px;color:#dc2626;font-weight:600}
+.ev-hi{font-size:11px;color:#059669;font-weight:700}.ev-mid{font-size:11px;color:#d97706;font-weight:700}.ev-lo{font-size:11px;color:#9ca3af;font-weight:700}
+</style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div class="s-dfx-g12-aic"><a href="/admin/security" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">🛡️ 安全设置</a><a href="/admin/outreach" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">📧 开发信管理</a><a href="/admin/keys" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
+<section class="panel"><h2>📥 客户数据导入（Seed CSV）</h2><p class="s-note">粘贴 CSV（需表头，支持列：company_name, country, domain/website, email, product）。原始数据永久保存在 customer_imports（不可变原始层）；域名或公司名匹配的行自动去重跳过，新公司以 pending 状态进入研究队列。</p><div class="toolbar"><input id="importFileName" placeholder="文件名备注（可选）" class="s-xw220"><button class="button" id="importBtn">导入并去重入队</button></div><textarea id="importCsv" rows="6" placeholder="company_name,country,website,email,product\nABC Sports,USA,,buyer@abcsports.com,SUP\nOcean Pro,Germany,oceanpro.de,,RIB"></textarea><div id="importMsg" class="notice hidden"></div></section>
+<section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p class="s-note">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围，再点「重新入队」让管道二次研究高价值客户。筛选项为下拉勾选，右侧数字是该条件当前命中的客户数（勾选「有邮箱」后只计有邮箱的）。</p><div class="toolbar"><span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span><span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span><span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span><select id="pfMinScore" class="s-mw130"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="50">最低分 ≥50</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select><label class="s-chiprow"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button></div><div id="pfResult" class="notice hidden"></div></section>
+<section class="panel"><h2>客户列表</h2><div id="scoreCard" class="hidden s-mb12" ></div><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>评分</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
 </main>
-<div class="modal-overlay" id="modal"><div class="modal"><div class="modal-header"><h2 id="modalTitle">客户详情</h2><button class="button secondary small" id="closeModal">✕ 关闭</button></div><div class="modal-body" id="modalBody"></div><div class="modal-footer"><span id="modalMsg" class="notice hidden" style="margin-right:auto"></span><button class="button danger small" id="requeueBtn">设为 pending 重新处理</button><button class="button" id="submitBtn">提交修改</button></div></div></div>
+<div class="modal-overlay" id="modal"><div class="modal"><div class="modal-header"><h2 id="modalTitle">客户详情</h2><button class="button secondary small" id="closeModal">✕ 关闭</button></div><div class="modal-body" id="modalBody"></div><div class="modal-footer"><span id="modalMsg" class="notice hidden s-mra" ></span><button class="button danger small" id="requeueBtn">设为 pending 重新处理</button><button class="button" id="submitBtn">提交修改</button></div></div></div>
 <script>
 (function(){
   var state={offset:0,limit:50,total:0,selected:null,dirty:{}};
   var $=function(id){return document.getElementById(id)};
   var esc=function(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})};
   var api=function(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin';throw new Error('登录已过期')}var ct=r.headers.get('content-type')||'';if(ct.indexOf('json')===-1&&ct.indexOf('text/plain')===-1){return r.text().then(function(t){throw new Error('服务器返回非JSON响应 (HTTP '+r.status+'): '+t.slice(0,100))})}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败 ('+r.status+')');return d})})};
-  var showMsg=function(id,t,g){var e=$(id);e.textContent=t;e.className='notice '+(g?'success':'error');e.classList.remove('hidden')};
+  var showMsg=function(id,t,g){var e=$(id);e.textContent=t;e.classList.remove('hidden');e.classList.toggle('success',!!g);e.classList.toggle('error',!g)};
   var badge=function(s){return'<span class="badge badge-'+esc(s)+'">'+esc(s)+'</span>'};
   // Lead-score distribution bar chart (SQL buckets, no per-row cost).
-  var renderScoreCard=function(h){var $c=$('scoreCard');if(!h||!h.total){$c.classList.add('hidden');return}$c.classList.remove('hidden');var bar=function(n,t,color){var pct=h.total?Math.round(n/h.total*100):0;return '<div style="flex:1;min-width:110px"><div style="font-size:11px;color:#64748b;margin-bottom:2px">'+t+'</div><div style="background:#e2e8f0;border-radius:4px;height:8px;overflow:hidden"><div style="width:'+pct+'%;height:100%;background:'+color+'"></div></div><div style="font-size:12px;font-weight:700;margin-top:2px">'+n+' <span style="font-size:10px;color:#94a3b8;font-weight:400">('+pct+'%)</span></div></div>'};$c.innerHTML='<div style="display:flex;gap:14px;flex-wrap:wrap;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px">'
-    +bar(h.s80,'≥80 高优先','#16a34a')
-    +bar(h.s60,'60-79 优质','#65a30d')
-    +bar(h.s40,'40-59 一般','#d97706')
-    +bar(h.s0,'<40 低分','#9ca3af')
-    +bar(h.unscored,'未评分','#cbd5e1')
-    +'<div style="flex:0 0 auto;display:flex;align-items:center;font-size:12px;color:#475569">已完成 <b>'+h.total+'</b> 家</div>'+'</div>'};
+  var renderScoreCard=function(h){var $c=$('scoreCard');if(!h||!h.total){$c.classList.add('hidden');return}$c.classList.remove('hidden');var bar=function(n,t,colorCls){var pct=h.total?Math.round(n/h.total*100):0;return '<div class="s-fx1-mw110"><div class="s-fs11-c64748b-mb2">'+t+'</div><div class="s-bge2e8f0-br4-h8-ovh"><div class="score-fill '+colorCls+'" data-w="'+pct+'"></div></div><div class="s-fs12-fw700-mt2">'+n+' <span class="s-fs10-c94a3b8-fw400">('+pct+'%)</span></div></div>'};$c.innerHTML='<div class="s-dfx-g14-fxww-bgf8fafc-bd1 ol e2e8f0-br8-p10 14">'
+    +bar(h.s80,'≥80 高优先','sf-hi')
+    +bar(h.s60,'60-79 优质','sf-good')
+    +bar(h.s40,'40-59 一般','sf-mid')
+    +bar(h.s0,'<40 低分','sf-low')
+    +bar(h.unscored,'未评分','sf-none')
+    +'<div class="s-fx0 0 a-dfx-aic-fs12-c475569">已完成 <b>'+h.total+'</b> 家</div>'+'</div>';$c.querySelectorAll('.score-fill').forEach(function(el){el.style.width=el.getAttribute('data-w')+'%'})};
   var loadScoreCard=function(){api('/admin/api/customers/lead-score-histogram').then(renderScoreCard).catch(function(){})};
   loadScoreCard();
-  var load=function(){var p=new URLSearchParams({q:$('search').value,status:$('status').value,limit:String(state.limit),offset:String(state.offset)});api('/admin/api/customers?'+p.toString()).then(function(d){state.total=d.total;$('summary').textContent='共 '+d.total+' 条';$('rows').innerHTML=d.items.map(function(c){var did=c.display_id||'N/A';var score=c.lead_score;var scoreHtml=(score===null||score===undefined)?'—':(score>=70?'<span style="color:#16a34a;font-weight:700">'+score+'</span>':score>=40?'<span style="color:#d97706;font-weight:700">'+score+'</span>':'<span style="color:#9ca3af">'+score+'</span>');return'<tr><td>'+esc(did)+'</td><td>'+esc(c.company_name||'-')+'</td><td><a href="'+esc(c.domain)+'" target="_blank">'+esc((c.domain||'').slice(0,35))+'</a></td><td>'+badge(c.status)+'</td><td>'+scoreHtml+'</td><td>'+esc((c.customer_segment||'-').slice(0,35))+'</td><td>'+esc((c.country||'-'))+'</td><td>'+esc((c.email||c.cellphone||'-').slice(0,25))+'</td><td><button class="button" onclick="window.openDetail('+c.id+')">查看详情</button></td></tr>'}).join('')||'<tr><td colspan="9">暂无数据</td></tr>';$('pageInfo').textContent=(state.total?state.offset+1:0)+'-'+Math.min(state.offset+state.limit,state.total)+' / '+state.total;$('prev').disabled=state.offset===0;$('next').disabled=state.offset+state.limit>=state.total}).catch(function(e){showMsg('listMessage',e.message,false)})};
+  var load=function(){var p=new URLSearchParams({q:$('search').value,status:$('status').value,limit:String(state.limit),offset:String(state.offset)});api('/admin/api/customers?'+p.toString()).then(function(d){state.total=d.total;$('summary').textContent='共 '+d.total+' 条';$('rows').innerHTML=d.items.map(function(c){var did=c.display_id||'N/A';var score=c.lead_score;var scoreHtml=(score===null||score===undefined)?'—':(score>=70?'<span class="s-c16a34a-fw700">'+score+'</span>':score>=40?'<span class="s-cd97706-fw700">'+score+'</span>':'<span class="s-faint2">'+score+'</span>');return'<tr><td>'+esc(did)+'</td><td>'+esc(c.company_name||'-')+'</td><td><a href="'+esc(c.domain)+'" target="_blank">'+esc((c.domain||'').slice(0,35))+'</a></td><td>'+badge(c.status)+'</td><td>'+scoreHtml+'</td><td>'+esc((c.customer_segment||'-').slice(0,35))+'</td><td>'+esc((c.country||'-'))+'</td><td>'+esc((c.email||c.cellphone||'-').slice(0,25))+'</td><td><button class="button" data-open="'+c.id+'">查看详情</button></td></tr>'}).join('')||'<tr><td colspan="9">暂无数据</td></tr>';$('pageInfo').textContent=(state.total?state.offset+1:0)+'-'+Math.min(state.offset+state.limit,state.total)+' / '+state.total;$('prev').disabled=state.offset===0;$('next').disabled=state.offset+state.limit>=state.total}).catch(function(e){showMsg('listMessage',e.message,false)})};
+  $('rows').addEventListener('click',function(ev){var t=ev.target.closest('[data-open]');if(t){window.openDetail(parseInt(t.getAttribute('data-open'),10))}});
   // Seed CSV import (docx ① Data Import)
   var doImport=function(){var csv=$('importCsv').value;if(!csv.trim()){showMsg('importMsg','请先粘贴 CSV 内容',false);return}$('importBtn').disabled=true;$('importBtn').textContent='导入中…';api('/admin/api/customers/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({csv:csv,file_name:$('importFileName').value||null})}).then(function(d){showMsg('importMsg','✅ 导入完成：新增 '+d.inserted+' 家（进入研究队列），匹配已有 '+d.matched+' 家（跳过），无效行 '+d.skipped+'。导入批次：'+d.import_id,true);$('importCsv').value='';load()}).catch(function(e){showMsg('importMsg',e.message,false)}).finally(function(){$('importBtn').disabled=false;$('importBtn').textContent='导入并去重入队'})};
   $('importBtn').onclick=doImport;
@@ -3457,14 +3508,14 @@ const ADMIN_PANEL_HTML = `<!doctype html>
       else if(f.key==='linkedin_url'&&val){h+='<a href="'+esc(val)+'" target="_blank">'+esc(val)+'</a>'}
       else if(f.key==='is_manufacturer'||f.key==='is_importer'||f.key==='is_distributor'||f.key==='is_wholesaler'||f.key==='is_retailer'||f.key==='is_ecommerce'||f.key==='is_rental'||f.key==='is_oem'){h+=(val==1||val==='1'?'✅ 是':'❌ 否')}
       else if(f.key==='social_accounts'&&val){var sa=null;try{sa=JSON.parse(val)}catch(e){}
-        if(sa&&sa.length>0){sa.forEach(function(a){h+='<div style="margin-bottom:4px">🔗 '+esc(a.platform||'')+': '+(a.username?'@'+esc(a.username):'')+(a.url?' <a href="'+esc(a.url)+'" target="_blank">'+esc(a.url)+'</a>':'')+'</div>'})}else{h+='<em style="color:#94a3b8">暂无社交账号</em>'}}
+        if(sa&&sa.length>0){sa.forEach(function(a){h+='<div class="s-mb4">🔗 '+esc(a.platform||'')+': '+(a.username?'@'+esc(a.username):'')+(a.url?' <a href="'+esc(a.url)+'" target="_blank">'+esc(a.url)+'</a>':'')+'</div>'})}else{h+='<em class="s-faint">暂无社交账号</em>'}}
       else if(f.key==='personas_and_solutions'&&val){var parsed=null;try{parsed=JSON.parse(val)}catch(e){}
         if(parsed){var pl=parsed.personas||[];var sl=parsed.solutions||[];
           if(pl.length>0){h+='<div class="section-title">👤 客户画像</div>';pl.forEach(function(p){h+='<div class="persona-card"><h4>'+esc(p.name||'未知角色')+'</h4><ul>';(p.needs||[]).forEach(function(n){h+='<li>'+esc(n)+'</li>'});h+='</ul></div>'})}
           if(sl.length>0){h+='<div class="section-title">💡 解决方案</div>';sl.forEach(function(s){h+='<div class="solution-card"><h4>'+esc(s.name||'')+'</h4><p>'+esc(s.value||'')+'</p></div>'})}
-          if(pl.length===0&&sl.length===0){h+='<em style="color:#94a3b8">暂无数据</em>'}}else{h+='<pre style="white-space:pre-wrap;font-size:12px">'+esc(val)+'</pre>'}}
-      else if(f.key==='remarks'){h+='<div style="white-space:pre-wrap;line-height:1.6">'+(esc(val)||'<em style="color:#94a3b8">暂无备注</em>')+'</div>'}
-      else{h+=esc(val)||'<em style="color:#94a3b8">-</em>'}
+          if(pl.length===0&&sl.length===0){h+='<em class="s-faint">暂无数据</em>'}}else{h+='<pre class="s-wspw-fs12">'+esc(val)+'</pre>'}}
+      else if(f.key==='remarks'){h+='<div class="s-wspw-lh16">'+(esc(val)||'<em class="s-faint">暂无备注</em>')+'</div>'}
+      else{h+=esc(val)||'<em class="s-faint">-</em>'}
       h+='</div>';
       if(!isReadonly){h+='<div class="field-input" id="fi_'+f.key+'">';
         if(f.type==='select'){h+='<select id="inp_'+f.key+'">';f.options.forEach(function(o){h+='<option value="'+esc(o)+'"'+(val===o?' selected':'')+'>'+esc(o)+'</option>'});h+='</select>'}
@@ -3474,18 +3525,18 @@ const ADMIN_PANEL_HTML = `<!doctype html>
         h+='<button class="button secondary small edit-btn" data-key="'+f.key+'">修改</button>'}
       h+='</div></div>'});
     return h};
-  var renderContacts=function(contacts){if(!contacts||contacts.length===0)return'<div style="color:#94a3b8;padding:12px">暂无联系人数据</div>';var h='<div class="section-title">👥 联系人列表 ('+contacts.length+'人)</div>';contacts.forEach(function(ct,idx){h+='<div class="persona-card" style="border-left:3px solid #1677d2">';h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';h+='<h4 style="margin:0">'+esc(ct.contact_id||'')+' — '+esc((ct.first_name||'')+' '+(ct.last_name||''))+'</h4>';h+='<span class="badge">#'+esc(String(ct.seq))+'</span></div>';
-      h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:13px">';
+  var renderContacts=function(contacts){if(!contacts||contacts.length===0)return'<div class="s-c94a3b8-p12">暂无联系人数据</div>';var h='<div class="section-title">👥 联系人列表 ('+contacts.length+'人)</div>';contacts.forEach(function(ct,idx){h+='<div class="persona-card s-bdl3 ol 1677d2" >';h+='<div class="s-dfx-jcb-aic-mb8">';h+='<h4 class="s-m0">'+esc(ct.contact_id||'')+' — '+esc((ct.first_name||'')+' '+(ct.last_name||''))+'</h4>';h+='<span class="badge">#'+esc(String(ct.seq))+'</span></div>';
+      h+='<div class="s-dgrid-gridtemplatecolumns1fr 1fr-g4 16-fs13">';
       var pairs=[['职位',ct.title],['全名',ct.full_name],['部门',ct.department],['邮箱',ct.email],['手机',ct.cellphone],['电话',ct.tel],['WhatsApp',ct.whatsapp],['LinkedIn',ct.linkedin_url]];
       pairs.forEach(function(p){if(p[1])h+='<div><strong>'+esc(p[0])+':</strong> '+esc(p[1])+'</div>'});
-      if(ct.social_accounts){try{var sa=JSON.parse(ct.social_accounts);if(sa.length>0){h+='<div style="grid-column:1/-1"><strong>社交账号:</strong> ';sa.forEach(function(a){h+=esc(a.platform)+': '+(a.username?'@'+esc(a.username):'')+' '});h+='</div>'}}catch(e){}}
+      if(ct.social_accounts){try{var sa=JSON.parse(ct.social_accounts);if(sa.length>0){h+='<div class="s-gc11"><strong>社交账号:</strong> ';sa.forEach(function(a){h+=esc(a.platform)+': '+(a.username?'@'+esc(a.username):'')+' '});h+='</div>'}}catch(e){}}
       h+='</div></div>'});return h};
-  var renderVerifiedSocial=function(sv){if(!sv)return'';var social=null;try{social=JSON.parse(sv)}catch(e){}if(!social||!social.length)return'';var h='<div class="section-title">📱 已验证社交媒体</div><div style="display:flex;flex-wrap:wrap;gap:8px">';social.forEach(function(s){var icon=s.platform==='LinkedIn'?'🔗':s.platform==='Facebook'?'📘':s.platform==='Instagram'?'📷':s.platform==='Twitter'?'🐦':s.platform==='YouTube'?'📺':s.platform==='TikTok'?'🎵':'🌐';var statusColor=s.verified?'#059669':'#dc2626';var statusText=s.verified?'已验证':'未验证';h+='<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:8px"><span style="font-size:18px">'+icon+'</span><div><div style="font-weight:600;font-size:13px">'+esc(s.platform)+'</div><a href="'+esc(s.url)+'" target="_blank" style="font-size:12px;color:#1677d2;word-break:break-all">'+esc(s.url)+'</a></div><span style="font-size:11px;color:'+statusColor+';font-weight:600">'+statusText+'</span></div>'});h+='</div>';return h};
-  var renderEvidence=function(ev){if(!ev||!ev.length)return'';var h='<div class="section-title">🔍 证据链（AI 判断的来源依据）</div><div style="display:flex;flex-direction:column;gap:8px">';ev.forEach(function(e){var pct=e.confidence!=null?Math.round(e.confidence*100)+'%':'—';var cColor=e.confidence>=0.8?'#059669':e.confidence>=0.5?'#d97706':'#9ca3af';h+='<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px">'
-    +'<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px"><strong style="font-size:13px">'+esc(e.field_name)+'</strong><span style="font-size:11px;color:'+cColor+';font-weight:700">置信度 '+pct+'</span></div>'
-    +(e.field_value?'<div style="font-size:12px;color:#374151;margin-bottom:3px"><b>判定:</b> '+esc(e.field_value)+'</div>':'')
-    +(e.evidence_text?'<div style="font-size:12px;color:#6b7280;font-style:italic;margin-bottom:3px">“'+esc(e.evidence_text)+'”</div>':'')
-    +(e.source_url?'<a href="'+esc(e.source_url)+'" target="_blank" style="font-size:11px;color:#1677d2;word-break:break-all">'+esc(e.source_url.slice(0,90))+'</a>':'')
+  var renderVerifiedSocial=function(sv){if(!sv)return'';var social=null;try{social=JSON.parse(sv)}catch(e){}if(!social||!social.length)return'';var h='<div class="section-title">📱 已验证社交媒体</div><div class="s-dfx-fxww-g8">';social.forEach(function(s){var icon=s.platform==='LinkedIn'?'🔗':s.platform==='Facebook'?'📘':s.platform==='Instagram'?'📷':s.platform==='Twitter'?'🐦':s.platform==='YouTube'?'📺':s.platform==='TikTok'?'🎵':'🌐';var statusCls=s.verified?'sv-ok':'sv-bad';var statusText=s.verified?'已验证':'未验证';h+='<div class="s-bgf8fafc-bd1 ol e2e8f0-br8-p10 14-dfx-aic-g8"><span class="s-fs18">'+icon+'</span><div><div class="s-fw600-fs13">'+esc(s.platform)+'</div><a href="'+esc(s.url)+'" target="_blank" class="s-fs12-c1677d2-wbba">'+esc(s.url)+'</a></div><span class="'+statusCls+'">'+statusText+'</span></div>'});h+='</div>';return h};
+  var renderEvidence=function(ev){if(!ev||!ev.length)return'';var h='<div class="section-title">🔍 证据链（AI 判断的来源依据）</div><div class="s-dfx-fxdcol-g8">';ev.forEach(function(e){var pct=e.confidence!=null?Math.round(e.confidence*100)+'%':'—';var cCls=e.confidence>=0.8?'ev-hi':e.confidence>=0.5?'ev-mid':'ev-lo';h+='<div class="s-bgf8fafc-bd1 ol e2e8f0-br8-p10 12">'
+    +'<div class="s-dfx-jcb-g8-mb4"><strong class="s-fs13">'+esc(e.field_name)+'</strong><span class="'+cCls+'">置信度 '+pct+'</span></div>'
+    +(e.field_value?'<div class="s-fs12-c374151-mb3"><b>判定:</b> '+esc(e.field_value)+'</div>':'')
+    +(e.evidence_text?'<div class="s-fs12-c6b7280-fstit-mb3">“'+esc(e.evidence_text)+'”</div>':'')
+    +(e.source_url?'<a href="'+esc(e.source_url)+'" target="_blank" class="s-fs11-c1677d2-wbba">'+esc(e.source_url.slice(0,90))+'</a>':'')
     +'</div>'});h+='</div>';return h};
   window.openDetail=function(id){api('/admin/api/customers/'+id).then(function(c){state.selected=id;state.dirty={};$('modalTitle').textContent='客户详情 — '+esc(c.company_name||c.domain||'');var body=buildModal(c);body+=renderEvidence(c.evidence);body+=renderVerifiedSocial(c.social_accounts_verified);body+='<div class="section-title">👥 联系人列表</div>';body+='<div id="contactsArea"></div>';$('modalBody').innerHTML=body;var ca=document.getElementById('contactsArea');if(ca)ca.innerHTML=renderContacts(c.contacts);$('modalMsg').classList.add('hidden');$('modal').classList.add('active');document.body.style.overflow='hidden';
       document.querySelectorAll('.edit-btn').forEach(function(btn){btn.onclick=function(){var key=btn.getAttribute('data-key');var row=btn.closest('.field-row');row.classList.add('editing');state.dirty[key]=true;var inp=document.getElementById('inp_'+key);if(inp&&inp.focus)inp.focus()}})}).catch(function(e){showMsg('listMessage',e.message,false)})};
@@ -3532,94 +3583,189 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 .cp-dd-search{width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;margin-bottom:4px}
 .cp-dd-note{font-size:11px;color:#b45309;padding:2px 8px 4px}
 @media(max-width:700px){.top{flex-direction:column}.stats{grid-template-columns:1fr 1fr}.email-header{flex-direction:column;align-items:flex-start;gap:6px}}
+
+/* stage30 auto: inline style -> class */
+.s-hidden{display:none}
+.s-seclabel{font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px}
+.s-fs13{font-size:13px}
+.s-red-loud{color:red}
+.s-hint12{font-size:12px;color:#6b7280}
+.s-input-lg{padding:10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit}
+.s-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.s-mt8{margin-top:8px}
+.s-gray{color:#6b7280}
+.s-mt10{margin-top:10px}
+.s-input-flex{flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px}
+.s-between{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center}
+.s-input150{padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:150px}
+.s-input{padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px}
+.s-chiprow{font-size:13px;display:flex;align-items:center;gap:4px}
+.s-gray0{color:#6b7280;margin:0}
+.s-intro{font-size:13px;color:#475569;margin:0 0 10px}
+.s-red13{color:#dc2626;font-size:13px}
+.s-dfx-g12-aic{display:flex;gap:12px;align-items:center}
+.s-m0{margin:0}
+.s-fw600-fs13{font-weight:600;font-size:13px}
+.s-dfx-g10-aic{display:flex;gap:10px;align-items:center}
+.s-cfff-tdn-fw600{color:#fff;text-decoration:none;font-weight:600}
+.s-bgrgba2552552552-cfff{background:rgba(255,255,255,.2);color:#fff}
+.s-m0 0 10-fs13-c334155{margin:0 0 10px;font-size:13px;color:#334155}
+.s-curptr-fw600{cursor:pointer;font-weight:600}
+.s-m8 0 0 18-lh18{margin:8px 0 0 18px;line-height:1.8}
+.s-m6 0 0-c6b7280{margin:6px 0 0;color:#6b7280}
+.s-p8-bd1 ol cbd5e1-br6-fs13-fx1-mw240-ffmono{padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;flex:1;min-width:240px;font-family:monospace}
+.s-w100-p8-bd1 ol cbd5e1-br6-fs12-ffmono{width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;font-family:monospace}
+.s-mt8-dfx-g8-aic{margin-top:8px;display:flex;gap:8px;align-items:center}
+.s-mt8-fs13{margin-top:8px;font-size:13px}
+.s-dfx-g12-aic-fxww-mt12{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px}
+.s-p10-bd1 ol cbd5e1-br8-finh-mw200{padding:10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit;min-width:200px}
+.s-mt12{margin-top:12px}
+.s-dfx-g8-fxww-aic-mb10{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.s-p8-bd1 ol cbd5e1-br6-fs13-mw180{padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;min-width:180px}
+.s-p8-bd1 ol cbd5e1-br6-fs13-mw190{padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;min-width:190px}
+.s-p8-bd1 ol cbd5e1-br6-fs13-w110{padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:110px}
+.s-dfx-g8-aic-fxww{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.s-dfx-g8-aic-mt8-fxww{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
+.s-p8-bd1 ol cbd5e1-br6-fs13-fx1-mw220{padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;flex:1;min-width:220px}
+.s-xh230-ova-mt6{max-height:230px;overflow:auto;margin-top:6px}
+.s-dfx-g8-fxww-aic-mt12-paddingtop12-bdt1 ol e5e7eb{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px;padding-top:12px;border-top:1px solid #e5e7eb}
+.s-p8-bd1 ol cbd5e1-br6-fs13-w220{padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:220px}
+.s-w1-h24-bge5e7eb{width:1px;height:24px;background:#e5e7eb}
+.s-p8-bd1 ol cbd5e1-br6-fs13-w200{padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:200px}
+.s-mt22{margin-top:22px}
+.s-dfx-g8-aic-mb10-fxww{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.s-fs13-c475569{font-size:13px;color:#475569}
+.s-dfx-g10-aic-fxww-mb14{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.s-fs13-c475569-mla{font-size:13px;color:#475569;margin-left:auto}
+.s-dfx-jcb-aic-mt14{display:flex;justify-content:space-between;align-items:center;margin-top:14px}
+.s-fs11-c0f766e-bgccfbf1-br10-p1 8{font-size:11px;color:#0f766e;background:#ccfbf1;border-radius:10px;padding:1px 8px}
+.s-fs11-c92400e-bgfef3c7-br10-p1 8{font-size:11px;color:#92400e;background:#fef3c7;border-radius:10px;padding:1px 8px}
+.s-cd97706{color:#d97706}
+.s-c059669{color:#059669}
+.s-cdc2626{color:#dc2626}
+.s-fs12-cb91c1c-mt4-wbba{font-size:12px;color:#b91c1c;margin-top:4px;word-break:break-all}
+.s-p14{padding:14px}
+.s-fs14{font-size:14px}
+.s-ffmono-fs12-c475569{font-family:monospace;font-size:12px;color:#475569}
+.s-dfx-g6-aic{display:flex;gap:6px;align-items:center}
+.s-fs12-c475569{font-size:12px;color:#475569}
+.s-fw600-fs13-c475569{font-weight:600;font-size:13px;color:#475569}
+.s-dfx-g8-mt4{display:flex;gap:8px;margin-top:4px}
+.s-w100-mt4-p6 8-bd1 ol cbd5e1-br6-fs13{width:100%;margin-top:4px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px}
+.s-w100-mh70-mt4-p8-bd1 ol cbd5e1-br6-fs13-ffmono{width:100%;min-height:70px;margin-top:4px;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-family:monospace}
+.s-mt4-fs13-c334155{margin-top:4px;font-size:13px;color:#334155}
+.s-dfx-g8-mt6-aic-fxww{display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap}
+.s-p6 8-bd1 ol cbd5e1-br6-fs13{padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px}
+.s-w100-mt4-p6 8-bd1 ol cbd5e1-br6-fs13-ffmono{width:100%;margin-top:4px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-family:monospace}
+.s-mt10-tar{margin-top:10px;text-align:right}
+.s-dfx-jcb-aic-p4 0{display:flex;justify-content:space-between;align-items:center;padding:4px 0}
+.s-fs11-c0f766e-bgccfbf1-br10-p1 8-ml4{font-size:11px;color:#0f766e;background:#ccfbf1;border-radius:10px;padding:1px 8px;margin-left:4px}
+.s-c6b7280-tac-p20{color:#6b7280;text-align:center;padding:20px}
+.s-bgf0fdfa-bd1 ol 99f6e4-br10-p14{background:#f0fdfa;border:1px solid #99f6e4;border-radius:10px;padding:14px}
+.s-fs15-fw700-c0f766e{font-size:15px;font-weight:700;color:#0f766e}
+.s-fs13-c475569-mt4{font-size:13px;color:#475569;margin-top:4px}
+.s-fs12-c6b7280-mt6{font-size:12px;color:#6b7280;margin-top:6px}
+.s-w36{width:36px}
+.s-tac{text-align:center}
+.s-bgdbeafe-c1e40af{background:#dbeafe;color:#1e40af}
+.s-fs12-cb91c1c-mt6{font-size:12px;color:#b91c1c;margin-top:6px}
+.s-fs15{font-size:15px}
+.s-m2 0{margin:2px 0}
+.s-dfx-g6-aic-fxww{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.s-cdc2626-m0{color:#dc2626;margin:0}
+.s-bgf8fafc{background:#f8fafc}
+.s-dfx-jcb-aic{display:flex;justify-content:space-between;align-items:center}
+/* stage30: dynamic-variant classes (campaign bar / members / disabled) */
+.mo-fail{font-size:12px;color:#dc2626}.mo-ok{font-size:12px;color:#6b7280}
+.cg-off{opacity:.45}
 </style></head><body>
-<header class="top"><h1>📧 开发信管理</h1><div style="display:flex;gap:10px;align-items:center"><a href="/admin" style="color:#fff;text-decoration:none;font-weight:600">← 返回客户管理</a><form method="post" action="/admin/logout"><button class="btn btn-sm" style="background:rgba(255,255,255,.2);color:#fff" type="submit">退出</button></form></div></header>
+<header class="top"><h1>📧 开发信管理</h1><div class="s-dfx-g10-aic"><a href="/admin" class="s-cfff-tdn-fw600">← 返回客户管理</a><form method="post" action="/admin/logout"><button class="btn btn-sm s-bgrgba2552552552-cfff"  type="submit">退出</button></form></div></header>
 <main class="wrap">
 <div class="tabs"><div class="tab active" data-tab="settings">⚙️ 品牌设置</div><div class="tab" data-tab="gmail">📮 发信账号</div><div class="tab" data-tab="generate">🤖 生成开发信</div><div class="tab" data-tab="campaign">🎯 定向群发</div><div class="tab" data-tab="emails">📬 开发信列表</div></div>
 <div id="tab-settings" class="tab-content">
 <div class="section-title">品牌配置</div><div id="brandsArea"></div>
 </div>
-<div id="tab-gmail" class="tab-content" style="display:none">
+<div id="tab-gmail" class="tab-content s-hidden" >
 <div class="section-title">📮 Gmail 发信账号池</div>
-<div class="panel"><p style="font-size:13px;color:#475569;margin:0 0 10px">添加多个发信账号组成账号池，每封邮件自动选择剩余配额最多的健康账号；品牌可单独绑定账号。被 Google 拒绝的账号自动冷却 6 小时。每日总配额 = 各账号配额之和。</p>
-<details style="margin:0 0 10px;font-size:13px;color:#334155"><summary style="cursor:pointer;font-weight:600">🟢 如何获取 OAuth 令牌（refresh_token）？点开看步骤</summary>
-<ol style="margin:8px 0 0 18px;line-height:1.8">
+<div class="panel"><p class="s-intro">添加多个发信账号组成账号池，每封邮件自动选择剩余配额最多的健康账号；品牌可单独绑定账号。被 Google 拒绝的账号自动冷却 6 小时。每日总配额 = 各账号配额之和。</p>
+<details class="s-m0 0 10-fs13-c334155"><summary class="s-curptr-fw600">🟢 如何获取 OAuth 令牌（refresh_token）？点开看步骤</summary>
+<ol class="s-m8 0 0 18-lh18">
 <li>Google Cloud Console → 启用 <b>Gmail API</b>；OAuth 同意屏幕选 <b>内部</b>，范围加 <code>gmail.send</code>；</li>
 <li>凭据 → 创建 <b>OAuth 客户端 ID</b>，类型选 <b>桌面应用</b>，记下客户端 ID/密钥；</li>
 <li>把客户端 ID 配到 Worker：<code>npx wrangler secret put GMAIL_OAUTH_CLIENT_ID</code>（密钥同理 <code>GMAIL_OAUTH_CLIENT_SECRET</code>）；</li>
 <li>本地运行 <code>python3 scripts/get-gmail-refresh-token.py --client-id …</code>，浏览器登录发件邮箱并授权，得到 refresh_token；</li>
 <li>在本页凭据类型选 <b>OAuth 令牌</b>，粘贴邮箱 + refresh_token → 添加 → 点 🔌 测试。</li>
 </ol>
-<p style="margin:6px 0 0;color:#6b7280">完整说明见仓库 <code>crm-ai-worker/docs/gmail-account-setup.md</code>。服务账号需全域委托；OAuth 令牌不需要，适合少量固定发件邮箱。</p></details>
-<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><select id="gaType" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"><option value="oauth_refresh">OAuth 令牌（推荐，无需服务账号密钥）</option><option value="service_account">服务账号（需全域委托）</option></select><input id="gaLabel" placeholder="备注（如：主账号）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:150px"><input id="gaEmail" class="ga-email-input" placeholder="发件邮箱 helen@isupfactory.com" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;flex:1;min-width:240px;font-family:monospace"><input id="gaLimit" type="number" min="1" placeholder="每日配额（默认 400）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:150px"></div>
-<div style="margin-top:8px"><textarea id="gaKey" rows="3" placeholder="粘贴 refresh_token（一长串无空格字符）" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;font-family:monospace"></textarea></div>
-<div style="margin-top:8px;display:flex;gap:8px;align-items:center"><button class="btn btn-primary" id="gaAdd">➕ 添加账号</button><span style="font-size:12px;color:#6b7280">凭据 AES-GCM 加密后存入 D1，永不回显</span></div>
-<div id="gaMsg" style="margin-top:8px;font-size:13px"></div></div>
+<p class="s-m6 0 0-c6b7280">完整说明见仓库 <code>crm-ai-worker/docs/gmail-account-setup.md</code>。服务账号需全域委托；OAuth 令牌不需要，适合少量固定发件邮箱。</p></details>
+<div class="s-row"><select id="gaType" class="s-input"><option value="oauth_refresh">OAuth 令牌（推荐，无需服务账号密钥）</option><option value="service_account">服务账号（需全域委托）</option></select><input id="gaLabel" placeholder="备注（如：主账号）" class="s-input150"><input id="gaEmail" class="ga-email-input s-p8-bd1 ol cbd5e1-br6-fs13-fx1-mw240-ffmono" placeholder="发件邮箱 helen@isupfactory.com" ><input id="gaLimit" type="number" min="1" placeholder="每日配额（默认 400）" class="s-input150"></div>
+<div class="s-mt8"><textarea id="gaKey" rows="3" placeholder="粘贴 refresh_token（一长串无空格字符）" class="s-w100-p8-bd1 ol cbd5e1-br6-fs12-ffmono"></textarea></div>
+<div class="s-mt8-dfx-g8-aic"><button class="btn btn-primary" id="gaAdd">➕ 添加账号</button><span class="s-hint12">凭据 AES-GCM 加密后存入 D1，永不回显</span></div>
+<div id="gaMsg" class="s-mt8-fs13"></div></div>
 <div id="gaList"></div>
 </div>
-<div id="tab-generate" class="tab-content" style="display:none">
+<div id="tab-generate" class="tab-content s-hidden" >
 <div class="section-title">生成开发信</div>
 <div class="panel"><p>选择品牌，AI将根据数据库中匹配的客户信息自动生成个性化开发信。</p>
-<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px">
-<select id="genBrand" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit;min-width:200px"></select>
-<select id="genLimit" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit"><option value="5">5封</option><option value="10" selected>10封</option><option value="20">20封</option><option value="50">50封</option></select>
+<div class="s-dfx-g12-aic-fxww-mt12">
+<select id="genBrand" class="s-p10-bd1 ol cbd5e1-br8-finh-mw200"></select>
+<select id="genLimit" class="s-input-lg"><option value="5">5封</option><option value="10" selected>10封</option><option value="20">20封</option><option value="50">50封</option></select>
 <button class="btn btn-primary" id="genBtn">🚀 开始生成</button>
-</div><div id="genMsg" style="margin-top:12px"></div></div>
+</div><div id="genMsg" class="s-mt12"></div></div>
 </div>
-<div id="tab-campaign" class="tab-content" style="display:none">
+<div id="tab-campaign" class="tab-content s-hidden" >
 <div class="section-title">🎯 定向群发（按客户群体群发）</div>
 <div class="panel">
-<p style="font-size:13px;color:#475569;margin:0 0 10px">用与「客户管理 → 海选过滤器」相同的条件圈出一群客户，保存为可复用客群，创建群发任务后可<b>分批生成开发信、分批发送</b>。每批都记进度，关掉页面随时续发。</p>
-<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
-<select id="cgBrand" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;min-width:180px"></select>
-<select id="cgGroup" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;min-width:190px"><option value="">— 不使用已保存客群 —</option></select>
+<p class="s-intro">用与「客户管理 → 海选过滤器」相同的条件圈出一群客户，保存为可复用客群，创建群发任务后可<b>分批生成开发信、分批发送</b>。每批都记进度，关掉页面随时续发。</p>
+<div class="s-dfx-g8-fxww-aic-mb10">
+<select id="cgBrand" class="s-p8-bd1 ol cbd5e1-br6-fs13-mw180"></select>
+<select id="cgGroup" class="s-p8-bd1 ol cbd5e1-br6-fs13-mw190"><option value="">— 不使用已保存客群 —</option></select>
 <button class="btn btn-sm btn-secondary" id="cgLoadGroup">载入客群条件</button>
-<button class="btn btn-sm btn-secondary" id="cgDeleteGroup" style="display:none">删除该客群</button>
+<button class="btn btn-sm btn-secondary s-hidden" id="cgDeleteGroup" >删除该客群</button>
 </div>
-<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+<div class="s-row">
 <span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span>
 <span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span>
 <span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span>
 <span class="cp-dd" id="ddKeywords"><button type="button" class="cp-dd-btn" data-dd="keywords">🔎 关键词<span class="cp-dd-sum" id="ddSumKeywords"></span> ▾</button><div class="cp-dd-panel" id="ddPanelKeywords"></div></span>
-<select id="cgMinScore" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:110px"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select>
-<label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="cgExcludeSent" checked> 排除本品牌已发送</label>
+<select id="cgMinScore" class="s-p8-bd1 ol cbd5e1-br6-fs13-w110"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select>
+<label class="s-chiprow"><input type="checkbox" id="cgExcludeSent" checked> 排除本品牌已发送</label>
 <button class="btn btn-primary btn-sm" id="cgPreview">🔍 统计客群</button>
 </div>
 <p class="cp-hint">只统计已完成研究（<code>status=completed</code>）且<b>有邮箱</b>的客户——没有研究档案无法生成个性化开发信，没有邮箱无法发送。手工勾选的客户会与其余条件取交集。下拉筛选项右侧的数字是该条件当前命中的<b>可发信</b>客户数（未扣除本品牌已发送）。关键词取自客户名称与描述中的高频业务词，最多可选 5 个。</p>
-<div id="cgPickedWrap" style="margin-top:8px">
-<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span style="font-size:13px">手工勾选：</span><span id="cgPicked" class="cp-chip"></span><button class="btn btn-sm btn-secondary" id="cgClearPicked">清空</button></div>
-<div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap"><input id="cgPickSearch" placeholder="搜索公司名/网址/国家以勾选客户" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;flex:1;min-width:220px"><button class="btn btn-sm btn-secondary" id="cgPickSearchBtn">🔎 搜索并勾选</button></div>
-<div id="cgPickResults" style="max-height:230px;overflow:auto;margin-top:6px"></div>
+<div id="cgPickedWrap" class="s-mt8">
+<div class="s-dfx-g8-aic-fxww"><span class="s-fs13">手工勾选：</span><span id="cgPicked" class="cp-chip"></span><button class="btn btn-sm btn-secondary" id="cgClearPicked">清空</button></div>
+<div class="s-dfx-g8-aic-mt8-fxww"><input id="cgPickSearch" placeholder="搜索公司名/网址/国家以勾选客户" class="s-p8-bd1 ol cbd5e1-br6-fs13-fx1-mw220"><button class="btn btn-sm btn-secondary" id="cgPickSearchBtn">🔎 搜索并勾选</button></div>
+<div id="cgPickResults" class="s-xh230-ova-mt6"></div>
 </div>
-<div id="cgPreviewBox" style="margin-top:10px"></div>
-<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px;padding-top:12px;border-top:1px solid #e5e7eb">
-<input id="cgGroupName" placeholder="客群名称（保存后可复用）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:220px">
+<div id="cgPreviewBox" class="s-mt10"></div>
+<div class="s-dfx-g8-fxww-aic-mt12-paddingtop12-bdt1 ol e5e7eb">
+<input id="cgGroupName" placeholder="客群名称（保存后可复用）" class="s-p8-bd1 ol cbd5e1-br6-fs13-w220">
 <button class="btn btn-sm btn-secondary" id="cgSaveGroup">💾 保存为客群</button>
-<span style="width:1px;height:24px;background:#e5e7eb"></span>
-<input id="cgName" placeholder="群发任务名称（可选）" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;width:200px">
+<span class="s-w1-h24-bge5e7eb"></span>
+<input id="cgName" placeholder="群发任务名称（可选）" class="s-p8-bd1 ol cbd5e1-br6-fs13-w200">
 <button class="btn btn-primary btn-sm" id="cgCreate">🚀 创建群发任务</button>
 </div>
-<div id="cgMsg" style="margin-top:10px"></div>
+<div id="cgMsg" class="s-mt10"></div>
 </div>
-<div class="section-title" style="margin-top:22px">群发任务</div>
-<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
-<label style="font-size:13px">每批数量</label>
-<select id="cgBatch" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"><option value="5">5 封</option><option value="10" selected>10 封</option><option value="20">20 封</option><option value="30">30 封</option><option value="50">50 封</option></select>
+<div class="section-title s-mt22" >群发任务</div>
+<div class="s-dfx-g8-aic-mb10-fxww">
+<label class="s-fs13">每批数量</label>
+<select id="cgBatch" class="s-input"><option value="5">5 封</option><option value="10" selected>10 封</option><option value="20">20 封</option><option value="30">30 封</option><option value="50">50 封</option></select>
 <button class="btn btn-sm btn-secondary" id="cgRefresh">刷新</button>
-<span id="cgQuota" style="font-size:13px;color:#475569"></span>
+<span id="cgQuota" class="s-fs13-c475569"></span>
 </div>
 <div id="cgList"></div>
 </div>
-<div id="tab-emails" class="tab-content" style="display:none">
+<div id="tab-emails" class="tab-content s-hidden" >
 <div class="stats" id="statsArea"></div>
-<div class="panel"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
-<select id="filterBrand" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit"><option value="">全部品牌</option><option value="iSupfactory">iSupfactory (SUPs)</option><option value="Aquafarer">Aquafarer (Inflatable)</option><option value="Neptunor">Neptunor (RIB)</option></select>
-<select id="filterStatus" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit"><option value="">全部状态</option><option value="draft">草稿</option><option value="sent">已发送</option></select>
+<div class="panel"><div class="s-dfx-g10-aic-fxww-mb14">
+<select id="filterBrand" class="s-input-lg"><option value="">全部品牌</option><option value="iSupfactory">iSupfactory (SUPs)</option><option value="Aquafarer">Aquafarer (Inflatable)</option><option value="Neptunor">Neptunor (RIB)</option></select>
+<select id="filterStatus" class="s-input-lg"><option value="">全部状态</option><option value="draft">草稿</option><option value="sent">已发送</option></select>
 <button class="btn btn-secondary btn-sm" id="refreshEmails">刷新</button>
-<span id="quotaInfo" style="font-size:13px;color:#475569;margin-left:auto">📧 Gmail 配额加载中…</span>
+<span id="quotaInfo" class="s-fs13-c475569-mla">📧 Gmail 配额加载中…</span>
 <button class="btn btn-primary btn-sm" id="sendBatchBtn">📤 批量发送草稿</button>
 </div><div id="emailsArea"></div>
-<div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px"><button class="btn btn-secondary btn-sm" id="emailPrev">上一页</button><span id="emailPageInfo"></span><button class="btn btn-secondary btn-sm" id="emailNext">下一页</button></div>
+<div class="s-dfx-jcb-aic-mt14"><button class="btn btn-secondary btn-sm" id="emailPrev">上一页</button><span id="emailPageInfo"></span><button class="btn btn-secondary btn-sm" id="emailNext">下一页</button></div>
 </div>
 </div>
 </main>
@@ -3647,18 +3793,18 @@ document.getElementById('gaType').onchange=function(){
 function loadGmailAccounts(){
   api('/admin/api/gmail/accounts').then(function(d){
     var list=document.getElementById('gaList');
-    if(!d.accounts.length){list.innerHTML='<div class="panel"><p style="color:#6b7280;margin:0">暂无账号。未添加时使用服务器 Secrets 中的 GMAIL_SERVICE_ACCOUNT_* 配置。</p></div>';return}
+    if(!d.accounts.length){list.innerHTML='<div class="panel"><p class="s-gray0">暂无账号。未添加时使用服务器 Secrets 中的 GMAIL_SERVICE_ACCOUNT_* 配置。</p></div>';return}
     list.innerHTML=d.accounts.map(function(a){
       var isOa=a.credential_type==='oauth_refresh';
-      var typeBadge=isOa?'<span style="font-size:11px;color:#0f766e;background:#ccfbf1;border-radius:10px;padding:1px 8px">OAuth 令牌</span>':'<span style="font-size:11px;color:#92400e;background:#fef3c7;border-radius:10px;padding:1px 8px">服务账号</span>';
-      var status=a.enabled?(a.cooldown_until?'<span style="color:#d97706">❄️ 冷却中（至 '+esc(a.cooldown_until)+'）</span>':'<span style="color:#059669">✅ 正常</span>'):'<span style="color:#dc2626">⛔ 已停用</span>';
-      var err=a.last_error?'<div style="font-size:12px;color:#b91c1c;margin-top:4px;word-break:break-all">最近错误：'+esc(a.last_error)+'</div>':'';
-      return '<div class="panel" style="padding:14px"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center"><div><b style="font-size:14px">'+esc(a.label||'（无备注）')+'</b> '+typeBadge+' <span style="font-family:monospace;font-size:12px;color:#475569">'+esc(a.client_email)+'</span></div><div style="display:flex;gap:6px;align-items:center">'+status+' <span style="font-size:12px;color:#475569">今日 '+a.sent_today+'/'+(a.daily_limit||'默认')+'</span> <button class="btn btn-sm btn-secondary ga-test" data-id="'+a.id+'">🔌 测试</button> <button class="btn btn-sm '+(a.enabled?'btn-danger':'btn-primary')+' ga-toggle" data-id="'+a.id+'" data-enabled="'+(a.enabled?1:0)+'">'+(a.enabled?'停用':'启用')+'</button> <button class="btn btn-sm btn-danger ga-del" data-id="'+a.id+'">删除</button></div></div>'+err+'</div>';
+      var typeBadge=isOa?'<span class="s-fs11-c0f766e-bgccfbf1-br10-p1 8">OAuth 令牌</span>':'<span class="s-fs11-c92400e-bgfef3c7-br10-p1 8">服务账号</span>';
+      var status=a.enabled?(a.cooldown_until?'<span class="s-cd97706">❄️ 冷却中（至 '+esc(a.cooldown_until)+'）</span>':'<span class="s-c059669">✅ 正常</span>'):'<span class="s-cdc2626">⛔ 已停用</span>';
+      var err=a.last_error?'<div class="s-fs12-cb91c1c-mt4-wbba">最近错误：'+esc(a.last_error)+'</div>':'';
+      return '<div class="panel s-p14" ><div class="s-between"><div><b class="s-fs14">'+esc(a.label||'（无备注）')+'</b> '+typeBadge+' <span class="s-ffmono-fs12-c475569">'+esc(a.client_email)+'</span></div><div class="s-dfx-g6-aic">'+status+' <span class="s-fs12-c475569">今日 '+a.sent_today+'/'+(a.daily_limit||'默认')+'</span> <button class="btn btn-sm btn-secondary ga-test" data-id="'+a.id+'">🔌 测试</button> <button class="btn btn-sm '+(a.enabled?'btn-danger':'btn-primary')+' ga-toggle" data-id="'+a.id+'" data-enabled="'+(a.enabled?1:0)+'">'+(a.enabled?'停用':'启用')+'</button> <button class="btn btn-sm btn-danger ga-del" data-id="'+a.id+'">删除</button></div></div>'+err+'</div>';
     }).join('');
     list.querySelectorAll('.ga-test').forEach(function(b){b.onclick=function(){b.disabled=true;b.textContent='⏳…';api('/admin/api/gmail/accounts/'+b.dataset.id+'/test',{method:'POST'}).then(function(r){showToast(r.detail,r.ok);loadGmailAccounts()}).catch(function(e){showToast(e.message,false);b.disabled=false;b.textContent='🔌 测试'})}});
     list.querySelectorAll('.ga-toggle').forEach(function(b){b.onclick=function(){var enable=b.dataset.enabled==='0';api('/admin/api/gmail/accounts/'+b.dataset.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enable})}).then(function(){showToast(enable?'已启用':'已停用',true);loadGmailAccounts()}).catch(function(e){showToast(e.message,false)})}});
     list.querySelectorAll('.ga-del').forEach(function(b){b.onclick=function(){if(!confirm('确定删除该发信账号？'))return;api('/admin/api/gmail/accounts/'+b.dataset.id,{method:'DELETE'}).then(function(){showToast('已删除',true);loadGmailAccounts()}).catch(function(e){showToast(e.message,false)})}});
-  }).catch(function(e){document.getElementById('gaList').innerHTML='<div class="panel"><p style="color:red">'+esc(e.message)+'</p></div>'});
+  }).catch(function(e){document.getElementById('gaList').innerHTML='<div class="panel"><p class="s-red-loud">'+esc(e.message)+'</p></div>'});
 }
 document.getElementById('gaAdd').onclick=function(){
   var type=document.getElementById('gaType').value;
@@ -3680,12 +3826,12 @@ function loadBrands(){
     var h='';
     d.settings.forEach(function(b){
       h+='<div class="brand-card"><div class="brand-header"><div><span class="brand-name">'+esc(b.brand_name)+'</span> <span class="brand-category">'+esc(b.product_category)+'</span></div><label class="toggle"><input type="checkbox" '+(b.enabled?'checked':'')+' data-brand="'+esc(b.brand_name)+'" class="enable-toggle"><span class="slider"></span></label></div>'+
-        '<label style="font-weight:600;font-size:13px;color:#475569">发件身份（From 邮箱 / 显示名）</label><div style="display:flex;gap:8px;margin-top:4px"><input class="sender-email" data-brand="'+esc(b.brand_name)+'" placeholder="sender@yourdomain.com" value="'+esc(b.sender_email||'')+'" style="flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"><input class="sender-name" data-brand="'+esc(b.brand_name)+'" placeholder="Toby | iSupfactory Team" value="'+esc(b.sender_name||'')+'" style="flex:1;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"></div>'+
-        '<label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">公司名义（邮件正文署名的公司主体，留空则用品牌名）</label><input class="company-entity" data-brand="'+esc(b.brand_name)+'" placeholder="SUP DIVISION OF QINGDAO VATRAD GROUP CO., LTD" value="'+esc(b.company_entity||'')+'" style="width:100%;margin-top:4px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px">'+
-        '<label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件签名（原样附加在正文末尾）</label><textarea class="signature-textarea" data-brand="'+esc(b.brand_name)+'" style="width:100%;min-height:70px;margin-top:4px;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-family:monospace">'+esc(b.signature||'')+'</textarea>'+
-        '<label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">邮件附件（最多 5 个，每个 ≤1.4MB；按收件人语言自动附带对应画册）</label><div class="att-list" data-brand="'+esc(b.brand_name)+'" style="margin-top:4px;font-size:13px;color:#334155">加载中…</div><div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap"><input type="file" class="att-file" data-brand="'+esc(b.brand_name)+'" style="font-size:13px"><select class="att-lang" data-brand="'+esc(b.brand_name)+'" style="padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px"><option value="all">🌐 通用（所有客户）</option><option value="es">🇪🇸 西班牙语</option><option value="en">🇬🇧 英语</option><option value="de">🇩🇪 德语</option><option value="fr">🇫🇷 法语</option><option value="pt">🇵🇹 葡萄牙语</option><option value="it">🇮🇹 意大利语</option><option value="nl">🇳🇱 荷兰语</option><option value="ru">🇷🇺 俄语</option><option value="pl">🇵🇱 波兰语</option><option value="ar">🇸🇦 阿拉伯语</option><option value="ja">🇯🇵 日语</option><option value="ko">🇰🇷 韩语</option></select><button class="btn btn-sm btn-primary att-upload" data-brand="'+esc(b.brand_name)+'">⬆ 上传附件</button></div>'+
-        '<label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">绑定发信账号（📮 发信账号池中的账号，留空=自动分配）</label><input class="gmail-account" data-brand="'+esc(b.brand_name)+'" placeholder="留空自动分配，或填账号池中的邮箱（服务账号或 OAuth 发件邮箱）" value="'+esc(b.gmail_account||'')+'" style="width:100%;margin-top:4px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-family:monospace">'+
-        '<label style="font-weight:600;font-size:13px;color:#475569;display:block;margin-top:10px">公司简介</label><textarea class="intro-textarea" data-brand="'+esc(b.brand_name)+'">'+esc(b.company_intro)+'</textarea><div style="margin-top:10px;text-align:right"><button class="btn btn-primary btn-sm save-brand" data-brand="'+esc(b.brand_name)+'">💾 保存配置</button></div></div>';
+        '<label class="s-fw600-fs13-c475569">发件身份（From 邮箱 / 显示名）</label><div class="s-dfx-g8-mt4"><input class="sender-email s-input-flex" data-brand="'+esc(b.brand_name)+'" placeholder="sender@yourdomain.com" value="'+esc(b.sender_email||'')+'" ><input class="sender-name s-input-flex" data-brand="'+esc(b.brand_name)+'" placeholder="Toby | iSupfactory Team" value="'+esc(b.sender_name||'')+'" ></div>'+
+        '<label class="s-seclabel">公司名义（邮件正文署名的公司主体，留空则用品牌名）</label><input class="company-entity s-w100-mt4-p6 8-bd1 ol cbd5e1-br6-fs13" data-brand="'+esc(b.brand_name)+'" placeholder="SUP DIVISION OF QINGDAO VATRAD GROUP CO., LTD" value="'+esc(b.company_entity||'')+'" >'+
+        '<label class="s-seclabel">邮件签名（原样附加在正文末尾）</label><textarea class="signature-textarea s-w100-mh70-mt4-p8-bd1 ol cbd5e1-br6-fs13-ffmono" data-brand="'+esc(b.brand_name)+'" >'+esc(b.signature||'')+'</textarea>'+
+        '<label class="s-seclabel">邮件附件（最多 5 个，每个 ≤1.4MB；按收件人语言自动附带对应画册）</label><div class="att-list s-mt4-fs13-c334155" data-brand="'+esc(b.brand_name)+'" >加载中…</div><div class="s-dfx-g8-mt6-aic-fxww"><input type="file" class="att-file s-fs13" data-brand="'+esc(b.brand_name)+'" ><select class="att-lang s-p6 8-bd1 ol cbd5e1-br6-fs13" data-brand="'+esc(b.brand_name)+'" ><option value="all">🌐 通用（所有客户）</option><option value="es">🇪🇸 西班牙语</option><option value="en">🇬🇧 英语</option><option value="de">🇩🇪 德语</option><option value="fr">🇫🇷 法语</option><option value="pt">🇵🇹 葡萄牙语</option><option value="it">🇮🇹 意大利语</option><option value="nl">🇳🇱 荷兰语</option><option value="ru">🇷🇺 俄语</option><option value="pl">🇵🇱 波兰语</option><option value="ar">🇸🇦 阿拉伯语</option><option value="ja">🇯🇵 日语</option><option value="ko">🇰🇷 韩语</option></select><button class="btn btn-sm btn-primary att-upload" data-brand="'+esc(b.brand_name)+'">⬆ 上传附件</button></div>'+
+        '<label class="s-seclabel">绑定发信账号（📮 发信账号池中的账号，留空=自动分配）</label><input class="gmail-account s-w100-mt4-p6 8-bd1 ol cbd5e1-br6-fs13-ffmono" data-brand="'+esc(b.brand_name)+'" placeholder="留空自动分配，或填账号池中的邮箱（服务账号或 OAuth 发件邮箱）" value="'+esc(b.gmail_account||'')+'" >'+
+        '<label class="s-seclabel">公司简介</label><textarea class="intro-textarea" data-brand="'+esc(b.brand_name)+'">'+esc(b.company_intro)+'</textarea><div class="s-mt10-tar"><button class="btn btn-primary btn-sm save-brand" data-brand="'+esc(b.brand_name)+'">💾 保存配置</button></div></div>';
     });
     document.getElementById('brandsArea').innerHTML=h||'<p>暂无品牌配置</p>';
     document.querySelectorAll('.brand-card').forEach(function(card){
@@ -3737,12 +3883,12 @@ function loadBrands(){
       };
     });
   }).catch(function(e){
-    document.getElementById('brandsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>';
+    document.getElementById('brandsArea').innerHTML='<p class="s-red-loud">'+esc(e.message)+'</p>';
   });
 }
 
 var LANG_LABELS={all:'🌐 通用',es:'🇪🇸 西班牙语',en:'🇬🇧 英语',de:'🇩🇪 德语',fr:'🇫🇷 法语',pt:'🇵🇹 葡萄牙语',it:'🇮🇹 意大利语',nl:'🇳🇱 荷兰语',ru:'🇷🇺 俄语',pl:'🇵🇱 波兰语',ar:'🇸🇦 阿拉伯语',ja:'🇯🇵 日语',ko:'🇰🇷 韩语'};
-function loadAttachments(brand){var box=document.querySelector('.att-list[data-brand="'+brand+'"]');if(!box)return;api('/admin/api/outreach/attachments?brand='+encodeURIComponent(brand)).then(function(d){if(!d.attachments.length){box.innerHTML='<span style="color:#6b7280">暂无附件</span>';return}box.innerHTML=d.attachments.map(function(a){var langLabel=LANG_LABELS[a.language]||(a.language?'🌐 '+esc(a.language):'🌐 通用');return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0"><span>📄 '+esc(a.filename)+' ('+Math.round(a.size_bytes/1024)+' KB) <span style="font-size:11px;color:#0f766e;background:#ccfbf1;border-radius:10px;padding:1px 8px;margin-left:4px">'+langLabel+'</span></span><button class="btn btn-sm btn-danger att-del" data-id="'+a.id+'" data-brand="'+esc(brand)+'">删除</button></div>'}).join('');box.querySelectorAll('.att-del').forEach(function(btn){btn.onclick=function(){api('/admin/api/outreach/attachments/'+btn.dataset.id,{method:'DELETE'}).then(function(){showToast('附件已删除',true);loadAttachments(btn.dataset.brand)}).catch(function(e){showToast(e.message,false)})}})}).catch(function(){box.innerHTML='<span style="color:#6b7280">附件加载失败</span>'})}
+function loadAttachments(brand){var box=document.querySelector('.att-list[data-brand="'+brand+'"]');if(!box)return;api('/admin/api/outreach/attachments?brand='+encodeURIComponent(brand)).then(function(d){if(!d.attachments.length){box.innerHTML='<span class="s-gray">暂无附件</span>';return}box.innerHTML=d.attachments.map(function(a){var langLabel=LANG_LABELS[a.language]||(a.language?'🌐 '+esc(a.language):'🌐 通用');return '<div class="s-dfx-jcb-aic-p4 0"><span>📄 '+esc(a.filename)+' ('+Math.round(a.size_bytes/1024)+' KB) <span class="s-fs11-c0f766e-bgccfbf1-br10-p1 8-ml4">'+langLabel+'</span></span><button class="btn btn-sm btn-danger att-del" data-id="'+a.id+'" data-brand="'+esc(brand)+'">删除</button></div>'}).join('');box.querySelectorAll('.att-del').forEach(function(btn){btn.onclick=function(){api('/admin/api/outreach/attachments/'+btn.dataset.id,{method:'DELETE'}).then(function(){showToast('附件已删除',true);loadAttachments(btn.dataset.brand)}).catch(function(e){showToast(e.message,false)})}})}).catch(function(){box.innerHTML='<span class="s-gray">附件加载失败</span>'})}
 
 // Generate
 api('/admin/api/outreach/settings').then(function(d){var sel=document.getElementById('genBrand');sel.innerHTML='';d.settings.forEach(function(b){if(b.enabled){var opt=document.createElement('option');opt.value=b.brand_name;opt.textContent=b.brand_name+' ('+b.product_category+')';sel.appendChild(opt)}});if(!sel.options.length){sel.innerHTML='<option value="">-- 请先启用品牌 --</option>'}});
@@ -3765,7 +3911,7 @@ function loadEmails(){
     d.items.forEach(function(e){
       h+='<div class="email-card"><div class="email-header"><span class="email-subject">'+esc(e.subject||'(无主题)')+'</span><div><span class="badge badge-'+esc(e.status)+'">'+(e.status==='sent'?'已发送':'草稿')+'</span> <button class="btn btn-sm btn-danger del-email" data-id="'+e.id+'">删除</button>'+(e.status==='draft'?' <button class="btn btn-sm btn-primary send-one" data-id="'+e.id+'">📧 发送</button>':'')+'</div></div><div class="email-meta">'+esc(e.brand_name||'')+' → '+esc(e.company_name||'')+' ('+esc(e.display_id||'')+') | 收件人: '+esc(e.email_to||'未知')+' | '+esc(e.created_at||'')+'</div><div class="email-body">'+esc(e.body||'')+'</div></div>';
     });
-    if(!d.items.length)h='<p style="color:#6b7280;text-align:center;padding:20px">暂无开发信</p>';
+    if(!d.items.length)h='<p class="s-c6b7280-tac-p20">暂无开发信</p>';
     emailState.total=d.total;
     document.getElementById('emailsArea').innerHTML=h;
     document.getElementById('emailPageInfo').textContent=(d.total?emailState.offset+1:0)+'-'+Math.min(emailState.offset+emailState.limit,d.total)+' / '+d.total;
@@ -3793,7 +3939,7 @@ function loadEmails(){
       };
     });
   }).catch(function(e){
-    document.getElementById('emailsArea').innerHTML='<p style="color:red">'+esc(e.message)+'</p>';
+    document.getElementById('emailsArea').innerHTML='<p class="s-red-loud">'+esc(e.message)+'</p>';
   });
 }
 document.getElementById('refreshEmails').onclick=function(){emailState.offset=0;loadEmails()};
@@ -3972,14 +4118,14 @@ document.getElementById('cgPreview').onclick=function(){
       var box=document.getElementById('cgPreviewBox');
       var countries=(d.by_country||[]).map(function(c){return esc(c.country||'（未知国家）')+' ×'+c.n}).join('　');
       var rows=(d.sample||[]).map(function(c){return '<tr><td>'+esc(c.display_id||c.id)+'</td><td>'+esc(c.company_name||'-')+'</td><td>'+esc(c.country||'-')+'</td><td>'+(c.lead_score==null?'—':c.lead_score)+'</td><td>'+esc((c.customer_segment||'-').slice(0,26))+'</td><td>'+esc((c.email||'-').slice(0,30))+'</td><td>'+(c.has_draft?'📄 已有草稿':'待生成')+'</td></tr>'}).join('');
-      box.innerHTML='<div style="background:#f0fdfa;border:1px solid #99f6e4;border-radius:10px;padding:14px">'
-        +'<div style="font-size:15px;font-weight:700;color:#0f766e">匹配 '+d.matching+' 家客户</div>'
-        +'<div style="font-size:13px;color:#475569;margin-top:4px">其中 <b>'+d.already+'</b> 家该品牌已有开发信（直接沿用，不再花 AI 费用），<b>'+d.pending+'</b> 家需要生成</div>'
-        +(countries?'<div style="font-size:12px;color:#6b7280;margin-top:6px">国家分布：'+countries+'</div>':'')
+      box.innerHTML='<div class="s-bgf0fdfa-bd1 ol 99f6e4-br10-p14">'
+        +'<div class="s-fs15-fw700-c0f766e">匹配 '+d.matching+' 家客户</div>'
+        +'<div class="s-fs13-c475569-mt4">其中 <b>'+d.already+'</b> 家该品牌已有开发信（直接沿用，不再花 AI 费用），<b>'+d.pending+'</b> 家需要生成</div>'
+        +(countries?'<div class="s-fs12-c6b7280-mt6">国家分布：'+countries+'</div>':'')
         +(rows?'<table class="cp-table"><thead><tr><th>客户ID</th><th>公司</th><th>国家</th><th>评分</th><th>细分</th><th>邮箱</th><th>开发信</th></tr></thead><tbody>'+rows+'</tbody></table><div class="cp-hint">仅预览前 20 家（按评分优先）</div>':'')
         +'</div>';
     })
-    .catch(function(e){document.getElementById('cgPreviewBox').innerHTML='<div style="color:#dc2626;font-size:13px">❌ '+esc(e.message)+'</div>'})
+    .catch(function(e){document.getElementById('cgPreviewBox').innerHTML='<div class="s-red13">❌ '+esc(e.message)+'</div>'})
     .finally(function(){btn.disabled=false;btn.textContent='🔍 统计客群'});
 };
 /* 手工勾选客户：reuses the customer list API so the picker searches the same
@@ -3991,10 +4137,10 @@ document.getElementById('cgPickSearchBtn').onclick=function(){
   api('/admin/api/customers?'+p.toString()).then(function(d){
     var box=document.getElementById('cgPickResults');
     if(!d.items.length){box.innerHTML='<div class="cp-hint">没有匹配的客户</div>';return}
-    box.innerHTML='<table class="cp-table"><thead><tr><th style="width:36px">选</th><th>客户ID</th><th>公司</th><th>国家</th><th>邮箱</th></tr></thead><tbody>'
+    box.innerHTML='<table class="cp-table"><thead><tr><th class="s-w36">选</th><th>客户ID</th><th>公司</th><th>国家</th><th>邮箱</th></tr></thead><tbody>'
       +d.items.map(function(c){
         var on=cgPickedIds.indexOf(c.id)>=0;
-        return '<tr><td style="text-align:center"><input type="checkbox" data-id="'+c.id+'"'+(on?' checked':'')+'></td><td>'+esc(c.display_id||c.id)+'</td><td>'+esc(c.company_name||'-')+'</td><td>'+esc(c.country||'-')+'</td><td>'+esc((c.email||'（无邮箱）').slice(0,32))+'</td></tr>';
+        return '<tr><td class="s-tac"><input type="checkbox" data-id="'+c.id+'"'+(on?' checked':'')+'></td><td>'+esc(c.display_id||c.id)+'</td><td>'+esc(c.company_name||'-')+'</td><td>'+esc(c.country||'-')+'</td><td>'+esc((c.email||'（无邮箱）').slice(0,32))+'</td></tr>';
       }).join('')+'</tbody></table>';
     box.querySelectorAll('input[type=checkbox]').forEach(function(cb){
       cb.onchange=function(){
@@ -4003,7 +4149,7 @@ document.getElementById('cgPickSearchBtn').onclick=function(){
         cgRenderPicked();
       };
     });
-  }).catch(function(e){document.getElementById('cgPickResults').innerHTML='<div style="color:#dc2626;font-size:13px">❌ '+esc(e.message)+'</div>'});
+  }).catch(function(e){document.getElementById('cgPickResults').innerHTML='<div class="s-red13">❌ '+esc(e.message)+'</div>'});
 };
 document.getElementById('cgClearPicked').onclick=function(){cgPickedIds=[];cgRenderPicked();document.getElementById('cgPickResults').innerHTML=''};
 cgRenderPicked();
@@ -4029,7 +4175,7 @@ document.getElementById('cgCreate').onclick=function(){
 };
 function cgBar(c){
   var t=c.total||1;
-  var seg=function(n,cls){return n?'<div class="cp-seg '+cls+'" style="width:'+(n/t*100)+'%"></div>':''};
+  var seg=function(n,cls){return n?'<div class="cp-seg '+cls+'" data-w="'+(n/t*100)+'"></div>':''};
   return '<div class="cp-bar">'+seg(c.sent,'cp-sent')+seg(c.generated,'cp-generated')+seg(c.pending,'cp-pending')+seg(c.failed,'cp-failed')+'</div>'
     +'<div class="cp-legend"><span><i class="cp-sent"></i>已发送 '+c.sent+'</span><span><i class="cp-generated"></i>待发送 '+c.generated+'</span><span><i class="cp-pending"></i>待生成 '+c.pending+'</span><span><i class="cp-failed"></i>失败 '+c.failed+'</span>'
     +(c.skipped?'<span>跳过 '+c.skipped+'</span>':'')+'<span>共 '+c.total+'</span></div>';
@@ -4042,23 +4188,24 @@ function loadCampaigns(){
     var campaigns=res[0].campaigns||[],q=res[1];
     if(q)document.getElementById('cgQuota').textContent='📧 Gmail 今日 '+q.sent_today+'/'+q.daily_limit+'，剩余 '+q.remaining;
     var box=document.getElementById('cgList');
-    if(!campaigns.length){box.innerHTML='<div class="panel"><p style="color:#6b7280;margin:0">还没有群发任务。用上面的筛选条件统计客群 → 创建群发任务。</p></div>';return}
+    if(!campaigns.length){box.innerHTML='<div class="panel"><p class="s-gray0">还没有群发任务。用上面的筛选条件统计客群 → 创建群发任务。</p></div>';return}
     box.innerHTML=campaigns.map(function(c){
-      var state=c.done?'<span class="badge badge-sent">已完成</span>':(c.status==='paused'?'<span class="badge badge-draft">已暂停</span>':'<span class="badge" style="background:#dbeafe;color:#1e40af">进行中</span>');
-      var err=c.last_error?'<div style="font-size:12px;color:#b91c1c;margin-top:6px">最近错误：'+esc(c.last_error)+'</div>':'';
+      var state=c.done?'<span class="badge badge-sent">已完成</span>':(c.status==='paused'?'<span class="badge badge-draft">已暂停</span>':'<span class="badge s-bgdbeafe-c1e40af" >进行中</span>');
+      var err=c.last_error?'<div class="s-fs12-cb91c1c-mt6">最近错误：'+esc(c.last_error)+'</div>':'';
       var canGen=c.pending>0,canSend=c.generated>0;
       return '<div class="cp-card'+(c.done?' done':'')+'">'
-        +'<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center">'
-        +'<div><b style="font-size:15px">'+esc(c.name)+'</b> <span class="cp-chip">'+esc(c.brand_name)+'</span> '+state
-        +'<div class="cp-hint" style="margin:2px 0">创建于 '+esc(c.created_at||'')+(c.group_id?' · 来自已保存客群':'')+'</div></div>'
-        +'<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">'
-        +'<button class="btn btn-sm btn-secondary cg-gen" data-id="'+c.id+'"'+(canGen&&!c.done?'':' disabled style="opacity:.45"')+'>🤖 生成草稿</button>'
-        +'<button class="btn btn-sm btn-primary cg-send" data-id="'+c.id+'"'+(canSend&&!c.done?'':' disabled style="opacity:.45"')+'>📤 继续发送</button>'
-        +'<button class="btn btn-sm '+(c.status==='paused'?'btn-primary':'btn-secondary')+' cg-pause" data-id="'+c.id+'" data-status="'+esc(c.status)+'"'+(c.done?' disabled style="opacity:.45"':'')+'>'+(c.status==='paused'?'▶ 恢复':'⏸ 暂停')+'</button>'
+        +'<div class="s-between">'
+        +'<div><b class="s-fs15">'+esc(c.name)+'</b> <span class="cp-chip">'+esc(c.brand_name)+'</span> '+state
+        +'<div class="cp-hint s-m2 0" >创建于 '+esc(c.created_at||'')+(c.group_id?' · 来自已保存客群':'')+'</div></div>'
+        +'<div class="s-dfx-g6-aic-fxww">'
+        +'<button class="btn btn-sm btn-secondary cg-gen" data-id="'+c.id+'"'+(canGen&&!c.done?'':' disabled cg-off')+'>🤖 生成草稿</button>'
+        +'<button class="btn btn-sm btn-primary cg-send" data-id="'+c.id+'"'+(canSend&&!c.done?'':' disabled cg-off')+'>📤 继续发送</button>'
+        +'<button class="btn btn-sm '+(c.status==='paused'?'btn-primary':'btn-secondary')+' cg-pause" data-id="'+c.id+'" data-status="'+esc(c.status)+'"'+(c.done?' disabled cg-off':'')+'>'+(c.status==='paused'?'▶ 恢复':'⏸ 暂停')+'</button>'
         +'<button class="btn btn-sm btn-secondary cg-members" data-id="'+c.id+'">名单</button>'
         +'<button class="btn btn-sm btn-danger cg-del" data-id="'+c.id+'">删除</button>'
         +'</div></div>'+cgBar(c)+err+'</div>';
     }).join('');
+    box.querySelectorAll('.cp-seg').forEach(function(el){el.style.width=el.getAttribute('data-w')+'%'});
     box.querySelectorAll('.cg-gen').forEach(function(b){b.onclick=function(){
       var id=b.dataset.id,limit=Number(document.getElementById('cgBatch').value);
       if(cgBusy[id])return;
@@ -4108,7 +4255,7 @@ function loadCampaigns(){
     }});
     box.querySelectorAll('.cg-members').forEach(function(b){b.onclick=function(){cgShowMembers(b.dataset.id)}});
   }).catch(function(e){
-    document.getElementById('cgList').innerHTML='<div class="panel"><p style="color:#dc2626;margin:0">❌ '+esc(e.message)+'</p></div>';
+    document.getElementById('cgList').innerHTML='<div class="panel"><p class="s-cdc2626-m0">❌ '+esc(e.message)+'</p></div>';
   });
 }
 function cgShowMembers(id){
@@ -4118,9 +4265,9 @@ function cgShowMembers(id){
     var rows=(d.items||[]).map(function(m){
       return '<tr><td>'+esc(m.display_id||m.customer_id)+'</td><td>'+esc(m.company_name||'-')+'</td><td>'+esc(m.country||'-')+'</td>'
         +'<td>'+esc((m.email_to||'-').slice(0,30))+'</td><td><span class="cp-chip">'+(LBL[m.status]||esc(m.status))+'</span></td>'
-        +'<td style="font-size:12px;color:'+(m.status==='failed'?'#dc2626':'#6b7280')+'">'+esc((m.error||'').slice(0,60))+'</td></tr>';
+        +'<td class="'+(m.status==='failed'?'mo-fail':'mo-ok')+'">'+esc((m.error||'').slice(0,60))+'</td></tr>';
     }).join('');
-    var head='<div class="panel" style="background:#f8fafc"><div style="display:flex;justify-content:space-between;align-items:center"><b>任务 #'+id+' 名单（'+d.campaign.name+'，共 '+d.campaign.total+' 家）</b><button class="btn btn-sm btn-secondary cg-close-members">关闭</button></div>'
+    var head='<div class="panel s-bgf8fafc" ><div class="s-dfx-jcb-aic"><b>任务 #'+id+' 名单（'+d.campaign.name+'，共 '+d.campaign.total+' 家）</b><button class="btn btn-sm btn-secondary cg-close-members">关闭</button></div>'
       +(rows?'<table class="cp-table"><thead><tr><th>客户ID</th><th>公司</th><th>国家</th><th>收件人</th><th>状态</th><th>备注</th></tr></thead><tbody>'+rows+'</tbody></table>':'<p class="cp-hint">名单为空</p>')
       +'<div class="cp-hint">最多显示 200 家。</div></div>';
     box.innerHTML=head+box.innerHTML;
@@ -4158,6 +4305,38 @@ tr.inactive td{opacity:.5}
 #toast{position:fixed;top:18px;right:18px;background:#1f2430;color:#fff;padding:10px 16px;border-radius:8px;font-size:14px;display:none;max-width:420px;z-index:9}
 #toast.err{background:#b23b3b}
 .hint{font-size:12px;color:#7a8291;margin-top:6px}
+
+/* stage30 auto: inline style -> class */
+.s-num{text-align:right;padding:4px 8px}
+.s-muted{color:#6b7280;margin:4px 0}
+.s-mw130{min-width:130px}
+.s-hint12{font-size:12px;color:#6b7280}
+.s-ok{color:#16a34a;margin:4px 0}
+.s-btnlg{padding:9px 22px}
+.s-scrollx{overflow-x:auto}
+.s-mw90{min-width:90px}
+.s-faint2{color:#9ca3af}
+.s-pad48{padding:4px 8px}
+.s-cdc2626{color:#dc2626}
+.s-w100-ffmono-fs13{width:100%;font-family:monospace;font-size:13px}
+.s-mt6-dfx-g8-fxww-aic{margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.s-fs11-c94a3b8-fw400{font-size:11px;color:#94a3b8;font-weight:400}
+.s-cb23b3b-m4 0{color:#b23b3b;margin:4px 0}
+.s-ml8{margin-left:8px}
+.s-bgfee2e2-c991b1b{background:#fee2e2;color:#991b1b}
+.s-w100-bordercollapsecollape-fs13{width:100%;border-collapse:collapse;font-size:13px}
+.s-tal-p4 8{text-align:left;padding:4px 8px}
+.s-bge5e7eb-br6-h10-w110-posrel{background:#e5e7eb;border-radius:6px;height:10px;width:110px;position:relative}
+.s-fs11-c6b7280{font-size:11px;color:#6b7280}
+.s-bdt1 ol f1f5f9{border-top:1px solid #f1f5f9}
+.s-cdc2626-fs11{color:#dc2626;font-size:11px}
+.s-fs12-c6b7280-m6 0 0{font-size:12px;color:#6b7280;margin:6px 0 0}
+.s-fs12-c059669-m6 0 0{font-size:12px;color:#059669;margin:6px 0 0}
+.s-w200{width:200px}
+.s-w160{width:160px}
+/* stage30: dynamic-variant classes (usage bar) */
+.pb-fill{border-radius:6px;height:10px}
+.pb-hot{background:#dc2626}.pb-warm{background:#f59e0b}.pb-ok{background:#16a34a}
 </style></head><body>
 <header class="top"><h1>⚡ 动态 Key 池（D1 即时生效，无需部署）</h1><a href="/admin">← 返回客户管理</a></header>
 <div class="wrap">
@@ -4174,7 +4353,7 @@ tr.inactive td{opacity:.5}
     <div class="field"><label>单Key RPM (留空=默认)</label><input id="nkRpm" type="number" min="1"></div>
     <div class="field"><label>模型覆盖 (留空=默认)</label><input id="nkModel" placeholder="如 llama-3.3-70b"></div>
   </div>
-  <p><button class="btn on" id="addKey" style="padding:9px 22px">添加 Key</button></p>
+  <p><button class="btn on s-btnlg" id="addKey" >添加 Key</button></p>
   <p class="hint">Key 池按 D1 优先解析：此处添加的 Key 立即生效（30 秒内全节点刷新）；env Secrets 仅作为引导后备。</p>
 </div>
 <div class="card"><h2>📦 批量导入（适合 Tavily/Exa 等大量 Key）</h2>
@@ -4190,22 +4369,22 @@ tr.inactive td{opacity:.5}
     <div class="field"><label>统一单Key RPM (留空=默认)</label><input id="bulkRpm" type="number" min="1"></div>
   </div>
   <div class="field"><label>导入模板（每行一条：<b>API Key,备注/账号</b>；也支持 Tab 或 | 分隔，纯 Key 也可以）</label>
-    <textarea id="bulkKeys" rows="8" autocomplete="off" spellcheck="false" style="width:100%;font-family:monospace;font-size:13px" placeholder="tvly-xxxxxxxx,账号1
+    <textarea id="bulkKeys" rows="8" autocomplete="off" spellcheck="false" class="s-w100-ffmono-fs13" placeholder="tvly-xxxxxxxx,账号1
 tvly-yyyyyyyy,账号2
 tvly-zzzzzzzz,账号3"></textarea>
-    <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <span style="font-size:12px;color:#6b7280">填充模板：</span>
+    <div class="s-mt6-dfx-g8-fxww-aic">
+      <span class="s-hint12">填充模板：</span>
       <button class="btn tpl" data-tpl="tavily" type="button">Tavily</button>
       <button class="btn tpl" data-tpl="exa" type="button">Exa</button>
       <button class="btn tpl" data-tpl="generic" type="button">通用</button>
-      <span style="font-size:12px;color:#6b7280">（覆盖 textarea 内容；分隔符可用英文逗号、Tab 或 | ）</span>
+      <span class="s-hint12">（覆盖 textarea 内容；分隔符可用英文逗号、Tab 或 | ）</span>
     </div>
   </div>
-  <p><button class="btn on" id="bulkImport" style="padding:9px 22px">批量导入</button></p>
+  <p><button class="btn on s-btnlg" id="bulkImport" >批量导入</button></p>
 </div>
-<div class="card" id="encCard"><h2>🔐 凭据加密</h2><div id="encBox"><p style="color:#6b7280;margin:4px 0">加载中…</p></div></div>
-<div class="card"><h2>🗝 已配置 Keys</h2><div style="overflow-x:auto"><table id="keysTable"><thead><tr><th>平台</th><th>备注</th><th>Key</th><th>RPM</th><th>模型</th><th>状态</th><th>最近错误</th><th>操作</th></tr></thead><tbody></tbody></table></div></div>
-<div class="card"><h2>📊 本月用量（成功调用数，按自然月）<span style="font-size:11px;color:#94a3b8;font-weight:400"> v2026-09-09b</span></h2><div id="usageBox"><p style="color:#6b7280;margin:4px 0">加载中…</p></div></div>
+<div class="card" id="encCard"><h2>🔐 凭据加密</h2><div id="encBox"><p class="s-muted">加载中…</p></div></div>
+<div class="card"><h2>🗝 已配置 Keys</h2><div class="s-scrollx"><table id="keysTable"><thead><tr><th>平台</th><th>备注</th><th>Key</th><th>RPM</th><th>模型</th><th>状态</th><th>最近错误</th><th>操作</th></tr></thead><tbody></tbody></table></div></div>
+<div class="card"><h2>📊 本月用量（成功调用数，按自然月）<span class="s-fs11-c94a3b8-fw400"> v2026-09-09b</span></h2><div id="usageBox"><p class="s-muted">加载中…</p></div></div>
 <div class="card"><h2>🧊 冷却中的 Key（429/限流自动暂停）</h2><div id="cooldownBox"></div></div>
 <div class="card"><h2>📜 冷却历史（最近 20 条）</h2><div id="historyBox"></div></div>
 <div class="card"><h2>⚙️ 平台设置（默认模型 / 总RPM / 启用）</h2><div id="settingsBox"></div></div>
@@ -4234,7 +4413,7 @@ function renderEncryption(enc){
   var left=enc.plaintext_rows||0;
   var genBtn='<button class="btn" id="genEncKey" type="button">生成密钥</button>';
   if(!enc.configured){
-    box.innerHTML='<p style="color:#b23b3b;margin:4px 0"><b>⚠️ 未配置加密密钥 —— 新增/导入 Key 已被拒绝。</b></p>'+
+    box.innerHTML='<p class="s-cb23b3b-m4 0"><b>⚠️ 未配置加密密钥 —— 新增/导入 Key 已被拒绝。</b></p>'+
       '<p class="hint">点「生成密钥」拿到 32 字节 base64 值，再把它作为 Worker Secret <code>CREDENTIAL_ENC_KEY</code> 保存（面板「🔑 凭据与密钥」页，或 <code>npx wrangler secret put CREDENTIAL_ENC_KEY</code>）。'+
       '保存后回到本页刷新即可。'+
       '<br><br><b>为什么必须先设：</b>密钥只存在于 Worker Secret，与面板 Token 同级保护 —— 拿到它的人本就能控制这个 Worker。'+
@@ -4252,9 +4431,9 @@ function renderEncryption(enc){
   }
   var tail=left
     ?'<button class="btn on" id="doEncrypt" type="button">一键加密 '+left+' 条存量</button>'+
-     '<span class="hint" style="margin-left:8px">就地改写，不可撤销。建议先 <code>npx wrangler d1 export</code> 备份。</span>'
+     '<span class="hint s-ml8" >就地改写，不可撤销。建议先 <code>npx wrangler d1 export</code> 备份。</span>'
     :'<span class="hint">全部 Key 已加密。</span>';
-  box.innerHTML='<p style="color:#16a34a;margin:4px 0">✔️ 加密密钥已配置'+(left?'，仍有 '+left+' 条为明文':'，无明文存量')+'。</p>'+
+  box.innerHTML='<p class="s-ok">✔️ 加密密钥已配置'+(left?'，仍有 '+left+' 条为明文':'，无明文存量')+'。</p>'+
     '<p class="hint">表内 <code>api_key</code> 存 AES-GCM 密文；面板只显示加密前算好的 <code>key_hint</code>，D1 泄露拿不到可用凭据。'+
     '该密钥只存在于 Worker Secret，<b>没有备份就无法恢复</b>。</p><p>'+tail+'</p>';
   var encBtn=document.getElementById('doEncrypt');
@@ -4281,7 +4460,7 @@ function loadKeys(){
       var cd=cdMap[k.id];
       var status=k.is_active?'启用':'停用';
       if(cd){var mins=Math.max(1,Math.round((new Date(cd.exhausted_until.replace(' ','T')+'Z')-Date.now())/60000));status+='<span class="cdtag">冷却中 ~'+mins+'分钟</span>';}
-      var keyCell=esc(k.key_hint)+(k.encrypted?'':'<span class="cdtag" style="background:#fee2e2;color:#991b1b">明文</span>');
+      var keyCell=esc(k.key_hint)+(k.encrypted?'':'<span class="cdtag s-bgfee2e2-c991b1b" >明文</span>');
       tr.innerHTML='<td>'+providerName(k.provider)+'</td><td>'+esc(k.label||'-')+'</td><td><code>'+keyCell+'</code></td><td>'+(k.rpm_limit||'默认')+'</td><td>'+esc(k.model||'-')+'</td><td>'+status+'</td><td>'+esc(k.last_error||'-')+'</td>';
       var td=document.createElement('td');
       var tog=document.createElement('button');tog.className='btn '+(k.is_active?'off':'on');tog.textContent=k.is_active?'停用':'启用';
@@ -4293,33 +4472,34 @@ function loadKeys(){
     api('/admin/api/keys/usage').then(function(u){
       var box=document.getElementById('usageBox');
       var list=u.usage||[];
-      if(list.length===0){box.innerHTML='<p style="color:#6b7280;margin:4px 0">本月暂无调用记录</p>';return;}
-      var h='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'+
-        '<th style="text-align:left;padding:4px 8px">平台</th><th style="text-align:right;padding:4px 8px">本月</th><th style="text-align:right;padding:4px 8px">累计</th><th style="text-align:right;padding:4px 8px">活动Key</th><th style="text-align:right;padding:4px 8px">本月用过</th><th style="text-align:right;padding:4px 8px">月容量(估算)</th><th style="text-align:right;padding:4px 8px">消耗</th></tr></thead><tbody>';
+      if(list.length===0){box.innerHTML='<p class="s-muted">本月暂无调用记录</p>';return;}
+      var h='<div class="s-scrollx"><table class="s-w100-bordercollapsecollape-fs13"><thead><tr>'+
+        '<th class="s-tal-p4 8">平台</th><th class="s-num">本月</th><th class="s-num">累计</th><th class="s-num">活动Key</th><th class="s-num">本月用过</th><th class="s-num">月容量(估算)</th><th class="s-num">消耗</th></tr></thead><tbody>';
       list.forEach(function(r){
         var pct=r.monthly_capacity?Math.min(100,Math.round(r.month_calls/r.monthly_capacity*100)):null;
-        var bar=pct===null?'<span style="color:#9ca3af">—</span>':'<div style="background:#e5e7eb;border-radius:6px;height:10px;width:110px;position:relative"><div style="background:'+(pct>80?'#dc2626':pct>50?'#f59e0b':'#16a34a')+';border-radius:6px;height:10px;width:'+pct+'%"></div></div><span style="font-size:11px;color:#6b7280">'+pct+'%</span>';
-        h+='<tr style="border-top:1px solid #f1f5f9"><td style="padding:4px 8px">'+providerName(r.provider)+'</td>'+
-          '<td style="text-align:right;padding:4px 8px">'+r.month_calls+'</td><td style="text-align:right;padding:4px 8px">'+r.total_calls+'</td>'+
-          '<td style="text-align:right;padding:4px 8px">'+r.active_keys+(r.cooling_keys?(' <span style="color:#dc2626;font-size:11px">(🧊'+r.cooling_keys+')</span>'):'')+'</td>'+
-          '<td style="text-align:right;padding:4px 8px">'+r.keys_used_this_month+'</td>'+
-          '<td style="text-align:right;padding:4px 8px">'+(r.monthly_capacity?r.monthly_capacity:'—')+'</td>'+
-          '<td style="padding:4px 8px">'+bar+'</td></tr>';
+        var bar=pct===null?'<span class="s-faint2">—</span>':'<div class="s-bge5e7eb-br6-h10-w110-posrel"><div class="pb-fill '+(pct>80?'pb-hot':pct>50?'pb-warm':'pb-ok')+'" data-w="'+pct+'"></div></div><span class="s-fs11-c6b7280">'+pct+'%</span>';
+        h+='<tr class="s-bdt1 ol f1f5f9"><td class="s-pad48">'+providerName(r.provider)+'</td>'+
+          '<td class="s-num">'+r.month_calls+'</td><td class="s-num">'+r.total_calls+'</td>'+
+          '<td class="s-num">'+r.active_keys+(r.cooling_keys?(' <span class="s-cdc2626-fs11">(🧊'+r.cooling_keys+')</span>'):'')+'</td>'+
+          '<td class="s-num">'+r.keys_used_this_month+'</td>'+
+          '<td class="s-num">'+(r.monthly_capacity?r.monthly_capacity:'—')+'</td>'+
+          '<td class="s-pad48">'+bar+'</td></tr>';
       });
-      h+='</tbody></table></div><p style="font-size:12px;color:#6b7280;margin:6px 0 0">月容量按免费层估算：Tavily 500次深度搜索/Key、Exa ~2000次/Key；AI 平台无固定容量（取决于 token 混合）。Brave 已停用（免费档需绑卡）。</p>';
+      h+='</tbody></table></div><p class="s-fs12-c6b7280-m6 0 0">月容量按免费层估算：Tavily 500次深度搜索/Key、Exa ~2000次/Key；AI 平台无固定容量（取决于 token 混合）。Brave 已停用（免费档需绑卡）。</p>';
       var pc=d.precheck||{skipped_today:0,tokens_saved_estimate:0};
-      if(pc.skipped_today>0){h+='<p style="font-size:12px;color:#059669;margin:6px 0 0">⚡ 免费预检今日已跳过 <b>'+pc.skipped_today+'</b> 家不相关客户，估算节省付费输入 token ~'+(pc.tokens_saved_estimate>=1000?(Math.round(pc.tokens_saved_estimate/1000)+'k'):pc.tokens_saved_estimate)+'（Workers AI Neurons，0 成本）</p>';}
+      if(pc.skipped_today>0){h+='<p class="s-fs12-c059669-m6 0 0">⚡ 免费预检今日已跳过 <b>'+pc.skipped_today+'</b> 家不相关客户，估算节省付费输入 token ~'+(pc.tokens_saved_estimate>=1000?(Math.round(pc.tokens_saved_estimate/1000)+'k'):pc.tokens_saved_estimate)+'（Workers AI Neurons，0 成本）</p>';}
       box.innerHTML=h;
-    }).catch(function(){document.getElementById('usageBox').innerHTML='<p style="color:#6b7280;margin:4px 0">用量数据不可用</p>'});
+      box.querySelectorAll('.pb-fill').forEach(function(el){el.style.width=el.getAttribute('data-w')+'%'});
+    }).catch(function(){document.getElementById('usageBox').innerHTML='<p class="s-muted">用量数据不可用</p>'});
     var cdBox=document.getElementById('cooldownBox');
     var cdList=d.cooldowns||[];
-    if(cdList.length===0){cdBox.innerHTML='<p style="color:#16a34a;margin:4px 0">✓ 所有 Key 状态正常，无冷却中</p>';}
+    if(cdList.length===0){cdBox.innerHTML='<p class="s-ok">✓ 所有 Key 状态正常，无冷却中</p>';}
     else{
       cdBox.innerHTML='';
       cdList.forEach(function(c){
         var row=document.createElement('div');row.style.cssText='display:flex;gap:10px;align-items:center;margin:4px 0';
         var mins=Math.max(1,Math.round((new Date(c.exhausted_until.replace(' ','T')+'Z')-Date.now())/60000));
-        row.innerHTML='<span style="min-width:90px">'+providerName(c.provider)+'</span><code style="min-width:130px">'+esc(c.key_index||'')+'</code><span style="color:#dc2626">'+esc(c.last_error||'限流')+'</span><span>剩余 ~'+mins+' 分钟</span>';
+        row.innerHTML='<span class="s-mw90">'+providerName(c.provider)+'</span><code class="s-mw130">'+esc(c.key_index||'')+'</code><span class="s-cdc2626">'+esc(c.last_error||'限流')+'</span><span>剩余 ~'+mins+' 分钟</span>';
         var clr=document.createElement('button');clr.className='btn on';clr.textContent='清除';
         clr.onclick=function(){api('/admin/api/keys/cooldowns/'+c.provider,{method:'DELETE'}).then(loadKeys).catch(function(e){toast(e.message,true)})};
         row.appendChild(clr);cdBox.appendChild(row);
@@ -4327,14 +4507,14 @@ function loadKeys(){
     }
     var histBox=document.getElementById('historyBox');
     var histList=d.history||[];
-    if(histList.length===0){histBox.innerHTML='<p style="color:#6b7280;margin:4px 0">暂无历史记录</p>';}
+    if(histList.length===0){histBox.innerHTML='<p class="s-muted">暂无历史记录</p>';}
     else{
       histBox.innerHTML='';
       histList.forEach(function(c){
         var row=document.createElement('div');row.style.cssText='display:flex;gap:10px;align-items:center;margin:4px 0;color:#6b7280;font-size:13px';
         var until='';
         try{until=new Date(c.exhausted_until.replace(' ','T')+'Z').toLocaleString();}catch(e){until=c.exhausted_until||'';}
-        row.innerHTML='<span style="min-width:90px">'+providerName(c.provider)+'</span><code style="min-width:130px">'+esc(c.key_index||'')+'</code><span style="color:#dc2626">'+esc(c.last_error||'限流')+'</span><span>冷却至 '+esc(until)+'</span>';
+        row.innerHTML='<span class="s-mw90">'+providerName(c.provider)+'</span><code class="s-mw130">'+esc(c.key_index||'')+'</code><span class="s-cdc2626">'+esc(c.last_error||'限流')+'</span><span>冷却至 '+esc(until)+'</span>';
         histBox.appendChild(row);
       });
     }
@@ -4343,8 +4523,8 @@ function loadKeys(){
     Object.keys(PROVIDER_NAMES).forEach(function(p){
       var s=sMap[p]||{};
       var row=document.createElement('div');row.style.cssText='display:flex;gap:10px;align-items:end;margin-bottom:8px;flex-wrap:wrap';
-      row.innerHTML='<div class="field"><label>'+PROVIDER_NAMES[p]+' 默认模型</label><input id="m_'+p+'" value="'+esc(s.default_model||'')+'" style="width:200px"></div>'+
-        '<div class="field"><label>总RPM (留空=按Key数推算)</label><input id="r_'+p+'" type="number" min="1" value="'+esc(s.rpm_total||'')+'" style="width:160px"></div>';
+      row.innerHTML='<div class="field"><label>'+PROVIDER_NAMES[p]+' 默认模型</label><input id="m_'+p+'" value="'+esc(s.default_model||'')+'" class="s-w200"></div>'+
+        '<div class="field"><label>总RPM (留空=按Key数推算)</label><input id="r_'+p+'" type="number" min="1" value="'+esc(s.rpm_total||'')+'" class="s-w160"></div>';
       var en=document.createElement('div');en.className='field';en.innerHTML='<label>启用</label>';
       var cb=document.createElement('input');cb.type='checkbox';cb.id='e_'+p;cb.checked=s.enabled===undefined?true:!!s.enabled;en.appendChild(cb);row.appendChild(en);
       var btn=document.createElement('button');btn.className='btn on';btn.textContent='保存';
@@ -4418,6 +4598,9 @@ td{padding:8px;border-bottom:1px solid #eef1f6;vertical-align:top}
 #toast{position:fixed;top:18px;right:18px;background:#1f2430;color:#fff;padding:10px 16px;border-radius:8px;font-size:14px;display:none;max-width:420px;z-index:9}
 #toast.err{background:#b23b3b}
 .hint{font-size:12px;color:#7a8291;margin-top:6px}
+
+/* stage30 auto: inline style -> class */
+.s-hidden{display:none}
 </style></head><body>
 <header class="top"><h1>🧾 审计日志（只读）</h1><a href="/admin">← 返回客户管理</a></header>
 <div class="wrap">
@@ -4425,7 +4608,7 @@ td{padding:8px;border-bottom:1px solid #eef1f6;vertical-align:top}
   <div class="bar">
     <input id="fAction" placeholder="按动作过滤，如 ACCESS_DENIED">
     <button class="btn" id="fGo">刷新</button>
-    <button class="btn gray" id="more" style="display:none">加载更多 ↓</button>
+    <button class="btn gray s-hidden" id="more" >加载更多 ↓</button>
   </div>
   <table><thead><tr><th>时间 (UTC)</th><th>操作人</th><th>动作</th><th>资源</th><th>request_id</th><th>详情</th></tr></thead>
   <tbody id="rows"><tr><td colspan="6">加载中…</td></tr></tbody></table>
@@ -4581,10 +4764,14 @@ button.secondary{background:#475569}
 .error{color:#b91c1c;min-height:20px;margin-top:10px;font-size:14px}
 details{margin-top:18px}summary{cursor:pointer;color:#475569;font-size:14px}
 .hint{font-size:12px;color:#7a8291;margin-top:8px}
+
+/* stage30 auto: inline style -> class */
+.s-fs14{font-size:14px}
+.s-fs14-c334155{font-size:14px;color:#334155}
 </style></head>
 <body><main class="card">
 <h1>🔐 两步验证</h1>
-<p style="font-size:14px;color:#334155">该账户已启用双因素认证。请使用安全密钥或通行密钥完成验证。</p>
+<p class="s-fs14-c334155">该账户已启用双因素认证。请使用安全密钥或通行密钥完成验证。</p>
 <button id="authnBtn" type="button">使用安全密钥验证</button>
 <div id="msg" class="error"></div>
 <details><summary>无法使用安全密钥？使用恢复码</summary>
@@ -4663,13 +4850,19 @@ td{padding:8px;border-bottom:1px solid #eef1f6;vertical-align:top}
 .hint{font-size:12px;color:#7a8291;margin-top:6px}
 #codeArea{width:100%;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace;font-size:13px;padding:10px;border:1px solid #cbd5e1;border-radius:6px;margin-top:10px;display:none}
 .warn{background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:10px 12px;font-size:13px;color:#92400e;margin-top:10px;display:none}
+
+/* stage30 auto: inline style -> class */
+.s-hidden{display:none}
+.s-fs13{font-size:13px}
+.s-mw220{min-width:220px}
+.s-fs13-m0 0 10{font-size:13px;margin:0 0 10px}
 </style></head><body>
 <header class="top"><h1>🛡️ 安全设置</h1><a href="/admin">← 返回客户管理</a></header>
 <div class="wrap">
 <div class="card">
   <h2>双因素认证（WebAuthn / 通行密钥） <span id="statusBadge" class="badge off">未启用</span></h2>
   <div class="bar">
-    <input id="credName" placeholder="名称备注（如 YubiKey 5C）" style="min-width:220px">
+    <input id="credName" placeholder="名称备注（如 YubiKey 5C）" class="s-mw220">
     <button class="btn" id="addBtn">添加安全密钥</button>
     <button class="btn gray" id="refresh">刷新</button>
   </div>
@@ -4680,8 +4873,8 @@ td{padding:8px;border-bottom:1px solid #eef1f6;vertical-align:top}
 </div>
 <div class="card">
   <h2>恢复码</h2>
-  <p style="font-size:13px;margin:0 0 10px">安全密钥丢失时用于应急登录。每个恢复码仅可使用一次，当前可用：<b id="codesCount">—</b></p>
-  <div class="bar"><button class="btn gray" id="regenBtn">重新生成恢复码</button><button class="btn gray" id="copyBtn" style="display:none">复制</button></div>
+  <p class="s-fs13-m0 0 10">安全密钥丢失时用于应急登录。每个恢复码仅可使用一次，当前可用：<b id="codesCount">—</b></p>
+  <div class="bar"><button class="btn gray" id="regenBtn">重新生成恢复码</button><button class="btn gray s-hidden" id="copyBtn" >复制</button></div>
   <div id="codeWarn" class="warn">⚠️ 恢复码只在此时显示一次。请立即复制并离线妥善保管（密码管理器 / 打印件）。</div>
   <textarea id="codeArea" rows="6" readonly></textarea>
   <div id="codeMsg" class="hint"></div>

@@ -79,7 +79,7 @@ With the flag on, the send state machine runs end-to-end but the Gmail transport
 
 ## 5. Verification record
 
-- Pipeline gate as of this document: 642/642 tests (52 files), `tsc --noEmit` clean, dry-run build 520.55 KiB (gzip 127.65 KiB), 7 panels clean.
+- Pipeline gate as of this document: 642/642 tests (52 files), `tsc --noEmit` clean, dry-run build 526.27 KiB (gzip 130.02 KiB), 7 panels clean.
 - Smoke-mechanism tests: `tests/health.test.ts` (probe contract), `tests/outreach-dry-run.test.ts` (dry-run guard).
 
 ## 6. Enabling WebAuthn 2FA (post-V2 Stage 29) — read before setting `WEBAUTHN_RP_ID`
