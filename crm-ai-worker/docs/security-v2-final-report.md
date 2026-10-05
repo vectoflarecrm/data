@@ -64,7 +64,9 @@ Stage-by-stage detail lives in `docs/stages/stage-01` … `stage-26`; the runnin
 - **Post-spec §31/§32 hardening**: `docs/deployment-v2.md` (the no-staging safe-deploy pipeline + production smoke procedure), an unauthenticated `GET /health` liveness probe (200 only when the D1 binding answers, 503 otherwise), and the `OUTREACH_DRY_RUN` flag — "true"/"1" walks the full send state machine while the Gmail transport stays a no-op (no API call, no reservation, no quota row; rows marked `dry-run-…`), so smoke tests can never send real email.
 - **Post-V2 Stage 25 (audit retention + view)**: `AUDIT_RETENTION_DAYS` (default 180, "0" = keep forever, typo-fail-safe) pruned by the 5-min cron before the claim early-return, every non-empty prune self-recording an `AUDIT_PRUNE` row; read-only `GET /admin/api/audit-logs` (audit.read: cursor paging, action filter, no IP/UA hashes) and the `/admin/audit` panel page.
 - **Post-V2 Stage 26 (key rotation)**: `CREDENTIAL_ENC_KEY_PREVIOUS` decrypt fallback + idempotent `POST /admin/api/keys/reseal` and `POST /admin/api/gmail/reseal` sweeps (credentials.write) that re-encrypt every row onto the current master with the Stage 4 verification gate — rotation is now a documented 5-step procedure instead of panel re-entry (`docs/backup-recovery.md` §4).
-- **Post-V2 verification**: 576/576 tests (48 files: 403 pre-existing + 72 security + 59 concurrency + 9 smoke + 19 retention + 14 rotation), `tsc` exit 0, dry-run 456.28 KiB / gzip 115.15 KiB, 5 panels clean.
+- **Post-V2 Stage 27 (session inventory + admin-wide revocation)**: `GET /admin/api/auth/sessions` (cross-user listing, `is_current`, no token material), `POST /admin/api/auth/sessions/revoke` (any user's session) and `POST /admin/api/auth/revoke-all` (spares the session caller's own row) — all super_admin only with the gate's ACCESS_DENIED audit shape; `/admin/sessions` panel; cron vacuums sessions expired more than a fixed 7-day inspection grace ago (`src/auth/session-hygiene.ts`, own fail-open envelope).
+- **Post-V2 Stage 28 (transport hygiene)**: `callGeminiOutreach` now carries the API key in the `x-goog-api-key` header and URL-encodes the model name (parity with the analysis call site) — no fetch error path can ship the key into logs via the request URL.
+- **Post-V2 verification**: 594/594 tests (50 files: 403 pre-existing + 72 security + 59 concurrency + 9 smoke + 19 retention + 14 rotation + 16 session-inventory + 2 transport (added within the same files as applicable)), `tsc` exit 0, dry-run 467.21 KiB / gzip 116.66 KiB, 6 panels clean.
 
 ## Database Migrations
 
@@ -179,7 +181,7 @@ Accepted and documented, none unmitigated:
 - ~~Audit retention/prune job + panel view over audit_logs~~ — done in post-V2 Stage 25 (`AUDIT_RETENTION_DAYS` cron prune, `/admin/api/audit-logs`, `/admin/audit`).
 - ~~Automated `CREDENTIAL_ENC_KEY` rotation (re-encryption sweep) instead of panel re-entry~~ — done in post-V2 Stage 26 (`CREDENTIAL_ENC_KEY_PREVIOUS` + reseal sweeps).
 - FK-adding table rebuilds for existing databases.
-- 2FA (WebAuthn) for admin accounts; session inventory/admin-wide revocation UI.
+- 2FA (WebAuthn) for admin accounts; ~~session inventory/admin-wide revocation UI~~ — done in post-V2 Stage 27 (`/admin/api/auth/sessions` + `/admin/sessions`, super_admin only).
 - Per-row `request_id` on D1 business tables to shorten the traceability chain.
 
 ## Deployment Instructions
