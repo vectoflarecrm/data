@@ -80,6 +80,11 @@ interface Env {
   WEBAUTHN_RP_ID?: string;
   WEBAUTHN_RP_NAME?: string;
   WEBAUTHN_ORIGINS?: string;
+  // Post-V2 Stage 32: Durable Object binding for the provider RPM limiter.
+  // Present ⇒ the distributed tier is a true global sliding window (no
+  // fixed-window 2x boundary); absent ⇒ the Stage 16 D1 fixed window stays
+  // authoritative. See src/rate-limiter.ts.
+  RATE_LIMITER?: DurableObjectNamespace;
   [key: string]: unknown;
 }
 
@@ -1868,6 +1873,10 @@ export {
 // research claim path is a single atomic UPDATE ... RETURNING, and the
 // concurrency suite proves N parallel claims never take the same row.
 export { claimCustomers };
+
+// Post-V2 Stage 32: Durable Object classes MUST be exported from the main
+// entry point. One DO instance per provider key; see src/rate-limiter.ts.
+export { RateLimiterDO } from "./rate-limiter";
 
 function isRetryableAiError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;

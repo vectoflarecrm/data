@@ -53,9 +53,17 @@ export class LocalRateLimiter implements RateLimiter {
   }
 }
 
-/** Minimal env shape needed by the D1-backed limiter. */
+/**
+ * Minimal env shape needed by the distributed limiter tier.
+ *
+ * Stage 32: when the `RATE_LIMITER` Durable Object binding is present it
+ * takes over the distributed tier (true sliding window, no fixed-window 2x
+ * boundary). Absent (local dev, tests, a deploy before the migration) the
+ * D1 fixed window stays authoritative — exactly the Stage 16 behavior.
+ */
 export interface RateLimiterEnv {
   DB: D1Database;
+  RATE_LIMITER?: DurableObjectNamespace;
 }
 
 /**
@@ -107,6 +115,81 @@ export class D1RateLimiter implements RateLimiter {
 }
 
 /**
+ * Stage 32 — Durable-Object-backed sliding window, the documented drop-in
+ * for the distributed tier. One DO instance per key (idFromName), so its
+ * whole state is one timestamp list: the window is TRULY sliding, which
+ * removes the fixed-window 2x-boundary overshoot the D1 tier documents.
+ *
+ * In-memory only by design: DO eviction resets the window, which is the
+ * same fail-open stance as every other tier here — proactive limiting is a
+ * protective optimization, never a correctness control; the reactive 429
+ * capture + api_key_health cooldown remains the global safety net.
+ */
+export class RateLimiterDO {
+  /** Timestamps inside the current window (one instance = one key). */
+  private timestamps: number[] = [];
+
+  constructor(_state: DurableObjectState, _env: unknown) {}
+
+  async fetch(request: Request): Promise<Response> {
+    if (new URL(request.url).pathname !== "/acquire") {
+      return new Response("not found", { status: 404 });
+    }
+    let body: { limit?: unknown; windowMs?: unknown };
+    try {
+      body = (await request.json()) as { limit?: unknown; windowMs?: unknown };
+    } catch {
+      return new Response("bad json", { status: 400 });
+    }
+    const limit = Number(body.limit);
+    const windowMs = Number(body.windowMs);
+    if (!Number.isInteger(limit) || limit <= 0 || !Number.isInteger(windowMs) || windowMs <= 0) {
+      return new Response("limit/windowMs must be positive integers", { status: 400 });
+    }
+    const now = Date.now();
+    const windowStart = now - windowMs;
+    this.timestamps = this.timestamps.filter((t) => t > windowStart);
+    if (this.timestamps.length >= limit) {
+      return Response.json({ allowed: false });
+    }
+    this.timestamps.push(now);
+    return Response.json({ allowed: true });
+  }
+}
+
+/** Client for the DO tier. Fail-open on ANY error (DO unavailable, cold
+ * start, unexpected shape): the call proceeds under the local limiter only
+ * and a warning is logged — identical policy to D1RateLimiter. */
+export class DurableObjectRateLimiter implements RateLimiter {
+  constructor(private ns: DurableObjectNamespace) {}
+
+  async acquire(key: string, limit: number, windowMs: number): Promise<boolean> {
+    try {
+      const stub = this.ns.get(this.ns.idFromName(key));
+      const res = await stub.fetch("https://rate-limiter-do/acquire", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ limit, windowMs }),
+      });
+      if (!res.ok) {
+        throw new Error(`acquire answered HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as { allowed?: unknown };
+      if (typeof data.allowed !== "boolean") {
+        throw new Error("acquire response missing boolean allowed");
+      }
+      return data.allowed;
+    } catch (e) {
+      safeLog("warn",
+        `[rate-limiter] DO window unavailable for "${key}", failing open to local-only limiting: ` +
+          (e instanceof Error ? e.message : String(e)),
+      );
+      return true;
+    }
+  }
+}
+
+/**
  * Local fast limiter first (cheap in-memory reject, no D1 round trip), then
  * the authoritative distributed window. A call the distributed window
  * rejects still consumes a local slot — harmless: the isolate stays under
@@ -131,13 +214,17 @@ export class TieredRateLimiter implements RateLimiter {
 const sharedLocal = new LocalRateLimiter();
 
 /**
- * Provider RPM limiter for this worker: shared local sliding window +
- * D1 fixed window, keyed by provider id. Safe to construct per call —
- * both tiers are stateless wrappers; the state lives in sharedLocal
- * and in D1.
+ * Provider RPM limiter for this worker: shared local sliding window plus
+ * the distributed tier — the DO sliding window when the binding exists,
+ * the D1 fixed window otherwise. Safe to construct per call — both tiers
+ * are stateless wrappers; the state lives in sharedLocal, in D1, or in
+ * the DO instance.
  */
 export function providerRateLimiter(env: RateLimiterEnv): RateLimiter {
-  return new TieredRateLimiter(sharedLocal, new D1RateLimiter(env));
+  const distributed: RateLimiter = env.RATE_LIMITER
+    ? new DurableObjectRateLimiter(env.RATE_LIMITER)
+    : new D1RateLimiter(env);
+  return new TieredRateLimiter(sharedLocal, distributed);
 }
 
 /** Test-only: reset the shared per-isolate window. */

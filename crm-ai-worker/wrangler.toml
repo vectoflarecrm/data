@@ -64,3 +64,18 @@ database_id = "REPLACE_WITH_D1_DATABASE_ID"
 # WEBAUTHN_RP_ID = "crm.example.com"
 # WEBAUTHN_RP_NAME = "CRM Admin"
 # WEBAUTHN_ORIGINS = "https://crm.example.com"
+
+# Post-V2 Stage 32: Durable-Object-backed sliding-window rate limiter.
+# With this binding the provider RPM cap becomes a TRUE global sliding
+# window (the Stage 16 D1 fixed window could admit up to 2x the cap across
+# a window boundary). The DO keeps its window in memory only: eviction
+# resets it, which is the same fail-open policy as every limiter tier —
+# the reactive 429 + api_key_health cooldown stays the safety net. If the
+# binding is absent the D1 fixed window remains authoritative, so nothing
+# breaks locally or in tests.
+[durable_objects]
+bindings = [{ name = "RATE_LIMITER", class_name = "RateLimiterDO" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RateLimiterDO"]

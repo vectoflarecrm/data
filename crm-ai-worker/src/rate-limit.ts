@@ -136,14 +136,16 @@ export function resetRpmBuckets(): void {
 /**
  * Security V2 (spec §17): async RPM acquisition through the switchable
  * RateLimiter abstraction — the per-isolate sliding window (local fast
- * limiter) first, then the D1-backed distributed fixed window so the
- * aggregate provider cap holds across isolates and worker instances.
- * Prefer this over the sync tryAcquireRpmSlot whenever an await is
- * acceptable; the D1 tier fails open, so a migration-pending or degraded
- * D1 degrades to exactly the pre-Stage-16 single-isolate behavior.
+ * limiter) first, then the distributed window so the aggregate provider
+ * cap holds across isolates and worker instances. Since Stage 32 the
+ * distributed tier is the DO sliding window when the RATE_LIMITER binding
+ * exists, the D1 fixed window otherwise. Prefer this over the sync
+ * tryAcquireRpmSlot whenever an await is acceptable; both tiers fail
+ * open, so a degraded backend degrades to exactly the pre-Stage-16
+ * single-isolate behavior.
  */
 export async function acquireRpmSlot(
-  env: { DB: D1Database },
+  env: { DB: D1Database; RATE_LIMITER?: DurableObjectNamespace },
   provider: ProviderId,
   limit: number,
 ): Promise<boolean> {
