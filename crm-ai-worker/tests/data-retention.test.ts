@@ -196,19 +196,22 @@ describe("scheduled cron tick hosts the data prune (fail-open)", () => {
   const ctx = { waitUntil: () => {} } as unknown as ExecutionContext;
   const controller = { cron: "*/5 * * * *", scheduledTime: 0 } as unknown as ScheduledController;
 
-  it("prunes all five tables and writes a DATA_PRUNE row with per-table counts", async () => {
+  it("prunes all six tables and writes a DATA_PRUNE row with per-table counts", async () => {
     const db = makeDb();
     insertSendLog(db, "old@x.com", toSqlUtc(new Date(Date.now() - 40 * DAY)));
     insertSendLog(db, "new@x.com", toSqlUtc(new Date()));
     insertRun(db, "r-old", toSqlUtc(new Date(Date.now() - 40 * DAY)));
     insertEvidence(db, 1, 0, toSqlUtc(new Date(Date.now() - 40 * DAY)), toSqlUtc(new Date(Date.now() - 35 * DAY)));
     insertImport(db, "imp-old", toSqlUtc(new Date(Date.now() - 40 * DAY)));
-    // Phase 3 Stage 36: superseded raw sources prune like superseded
-    // evidence; the current snapshot survives regardless of age.
+    // Phase 3 Stage 36/37: superseded raw sources and typed facts prune like
+    // superseded evidence; the current sets survive regardless of age.
     db.exec(`
       INSERT INTO research_sources (customer_id, source_type, raw_text, fetched_at, is_current, valid_until) VALUES
         ('c1', 'website', 'superseded old', '${toSqlUtc(new Date(Date.now() - 40 * DAY))}', 0, '${toSqlUtc(new Date(Date.now() - 35 * DAY))}'),
         ('c1', 'website', 'current old',   '${toSqlUtc(new Date(Date.now() - 40 * DAY))}', 1, NULL);
+      INSERT INTO research_facts (customer_id, fact_type, fact_value, source_type, fetched_at, is_current, valid_until) VALUES
+        ('c1', 'email', 'superseded@old.io', 'website', '${toSqlUtc(new Date(Date.now() - 40 * DAY))}', 0, '${toSqlUtc(new Date(Date.now() - 35 * DAY))}'),
+        ('c1', 'email', 'current@old.io',    'website', '${toSqlUtc(new Date(Date.now() - 40 * DAY))}', 1, NULL);
     `);
     const env: any = { DB: new FakeD1(db), DATA_RETENTION_DAYS: "30", GEMINI_API_KEY: "x" };
     await worker.scheduled!(controller, env, ctx);
@@ -217,6 +220,7 @@ describe("scheduled cron tick hosts the data prune (fail-open)", () => {
     expect(db.prepare("SELECT COUNT(*) AS n FROM evidence").get().n).toBe(0);
     expect(db.prepare("SELECT COUNT(*) AS n FROM customer_imports").get().n).toBe(0);
     expect(db.prepare("SELECT raw_text FROM research_sources").all().map((r: any) => r.raw_text)).toEqual(["current old"]);
+    expect(db.prepare("SELECT fact_value FROM research_facts").all().map((r: any) => r.fact_value)).toEqual(["current@old.io"]);
     const prune = db.prepare("SELECT metadata_json FROM audit_logs WHERE action = 'DATA_PRUNE'").get() as any;
     expect(prune).toBeTruthy();
     expect(JSON.parse(prune.metadata_json)).toEqual({
@@ -225,6 +229,7 @@ describe("scheduled cron tick hosts the data prune (fail-open)", () => {
       research_runs: 1,
       evidence_superseded: 1,
       research_sources_superseded: 1,
+      research_facts_superseded: 1,
       customer_imports: 1,
     });
   });
@@ -237,12 +242,15 @@ describe("scheduled cron tick hosts the data prune (fail-open)", () => {
     db.exec(`
       INSERT INTO research_sources (customer_id, source_type, raw_text, fetched_at, is_current, valid_until) VALUES
         ('c1', 'website', 'superseded but kept', '${toSqlUtc(new Date(Date.now() - 400 * DAY))}', 0, '${toSqlUtc(new Date(Date.now() - 399 * DAY))}');
+      INSERT INTO research_facts (customer_id, fact_type, fact_value, source_type, fetched_at, is_current, valid_until) VALUES
+        ('c1', 'email', 'superseded@kept.io', 'website', '${toSqlUtc(new Date(Date.now() - 400 * DAY))}', 0, '${toSqlUtc(new Date(Date.now() - 399 * DAY))}');
     `);
     const env: any = { DB: new FakeD1(db), DATA_RETENTION_DAYS: "0", GEMINI_API_KEY: "x" };
     await worker.scheduled!(controller, env, ctx);
     expect(db.prepare("SELECT COUNT(*) AS n FROM gmail_send_log").get().n).toBe(1);
     expect(db.prepare("SELECT COUNT(*) AS n FROM evidence").get().n).toBe(1);
     expect(db.prepare("SELECT COUNT(*) AS n FROM research_sources").get().n).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM research_facts").get().n).toBe(1);
     expect(db.prepare("SELECT COUNT(*) AS n FROM admin_login_attempts").get().n).toBe(0);
     expect(db.prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'DATA_PRUNE'").get().n).toBe(0);
   });

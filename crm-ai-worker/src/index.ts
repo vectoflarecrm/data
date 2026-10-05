@@ -14,10 +14,11 @@ import {
   pruneResearchRuns,
   pruneSupersededEvidence,
   pruneSupersededResearchSources,
+  pruneSupersededResearchFacts,
   resolveDataRetentionDays,
 } from "./data-retention";
 import { cleanupExpiredChallenges } from "./auth/webauthn";
-import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, newProvenance, type AnalysisProvenance } from "./research-run";
+import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, hasCurrentResearchFacts, capResearchSourcesToBudget, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, FACTS_PER_RUN_CAP } from "./research-run";
 
 export interface CustomerRow {
   id: number;
@@ -234,6 +235,48 @@ function extractContactEvidence(text: string): { emails: string[]; phones: strin
     })
     .slice(0, 8);
   return { emails, phones };
+}
+
+// Shared link-mining regexes (Phase 3 Stage 37): the reuse path builds its
+// facts block from these and mineResearchFacts turns the same matches into
+// typed research_facts rows. Module-level /g literals are safe to share —
+// String.match and String.matchAll both clone the regex internally.
+const WHATSAPP_LINK_REGEX = /wa\.me\/[0-9]+|api\.whatsapp\.com\/send\?phone=[0-9]+/gi;
+const SOCIAL_LINK_REGEX = /https:\/\/(?:www\.)?(linkedin|facebook|instagram|twitter|x|youtube|tiktok)\.com[^\s)\]"']*/gi;
+
+/** Mine typed facts (research_facts substrate, 建议 §二十一 "Fact
+ * Extraction") from crawl segments. One entry per distinct
+ * (fact_type, fact_value): the first segment that contained the value
+ * becomes its source_type and repeats across segments aggregate into
+ * occurrence_count. Mining runs on the SAME budget-capped text that lands
+ * in research_sources, so every fact's supporting text stays queryable.
+ * Bound: at most FACTS_PER_RUN_CAP entries per run (miner-side; the writer
+ * re-enforces). */
+export function mineResearchFacts(
+  segments: Array<{ source_type: string; text: string }>,
+): ResearchFactEntry[] {
+  const seen = new Map<string, ResearchFactEntry>();
+  const add = (fact_type: string, raw: string, source_type: string): void => {
+    const fact_value = raw.trim();
+    if (!fact_value) return;
+    const key = `${fact_type}\u0000${fact_value}`;
+    const existing = seen.get(key);
+    if (existing) {
+      existing.occurrence_count = (existing.occurrence_count ?? 1) + 1;
+      return;
+    }
+    if (seen.size >= FACTS_PER_RUN_CAP) return;
+    seen.set(key, { fact_type, fact_value, source_type, occurrence_count: 1 });
+  };
+  for (const seg of segments) {
+    if (!seg.text) continue;
+    const { emails, phones } = extractContactEvidence(seg.text);
+    for (const e of emails) add("email", e, seg.source_type);
+    for (const p of phones) add("phone", p, seg.source_type);
+    for (const m of seg.text.match(WHATSAPP_LINK_REGEX) ?? []) add("whatsapp", m, seg.source_type);
+    for (const m of seg.text.matchAll(SOCIAL_LINK_REGEX)) add("social", m[0], seg.source_type);
+  }
+  return [...seen.values()];
 }
 // 2026-09: the gemini-2.5 family is no longer available to new Google
 // accounts (chat call returns 404). Official current endpoints per AI Studio:
@@ -2062,13 +2105,32 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
       // the fresh path would produce, incl. JSON-LD and [直接提取] lines);
       // the cleaned body comes from the cache computed in the reuse check.
       const facts = extractContactEvidence(savedResearch);
-      const waFacts = savedResearch.match(/wa\.me\/[0-9]+|api\.whatsapp\.com\/send\?phone=[0-9]+/gi) ?? [];
-      const socialMatches = [...savedResearch.matchAll(/https:\/\/(?:www\.)?(linkedin|facebook|instagram|twitter|x|youtube|tiktok)\.com[^\s)\]"']*/gi)]
+      const waFacts = savedResearch.match(WHATSAPP_LINK_REGEX) ?? [];
+      const socialMatches = [...savedResearch.matchAll(SOCIAL_LINK_REGEX)]
         .map((m) => m[0]);
       const factsBlock = buildFactsBlock(facts.emails, facts.phones, [...socialMatches, ...waFacts]);
       researchForAi = factsBlock
         ? `${factsBlock}\n\n${cleanedSavedResearch()}`.slice(0, CLEAN_MAX_TOTAL_CHARS + 2_000)
         : cleanedSavedResearch();
+
+      // Phase 3 Stage 37 gap-fill: customers researched before the facts
+      // writer landed have no current research_facts rows — a reuse pass
+      // writes them from the saved text (observed during THIS run) so the
+      // substrate converges without a heavy one-time backfill. Customers
+      // with current facts are left alone (their rows are already the
+      // truth; re-mining identical text would only churn run ids). The
+      // 'backfill' source_type marks facts mined from legacy material,
+      // same vocabulary as the 0021 source rows. Fail-open end to end.
+      if (!(await hasCurrentResearchFacts(env, customer.company_id))) {
+        const minedGapFacts = mineResearchFacts([{ source_type: "backfill", text: savedResearch }]);
+        if (minedGapFacts.length > 0) {
+          await appendResearchFacts(env, {
+            companyId: customer.company_id,
+            runId: researchRunId,
+            facts: minedGapFacts,
+          });
+        }
+      }
     } else {
       const verifiedSocialText = verifiedSocial.map((s) => `${s.platform}: ${s.url} (${s.verified ? "已验证" : "未验证"})`).join("\n");
       const socialInfo = verifiedSocial.length > 0
@@ -2091,15 +2153,30 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
       // overwritten with the blob. Dual-write during transition — the blob
       // stays authoritative for the reuse path and panel until Stage 38.
       // Fail-open: an auditability layer must never fail paid research.
+      const sourceEntries: ResearchSourceEntry[] = [
+        { source_type: "website", source_url: normalizeDomain(customer.domain), raw_text: pageText },
+        { source_type: "social", raw_text: verifiedSocialText },
+        { source_type: "search", raw_text: googleResults },
+        { source_type: "additional", raw_text: additionalText },
+      ];
       await appendResearchSources(env, {
         companyId: customer.company_id,
         runId: researchRunId,
-        sources: [
-          { source_type: "website", source_url: normalizeDomain(customer.domain), raw_text: pageText },
-          { source_type: "social", raw_text: verifiedSocialText },
-          { source_type: "search", raw_text: googleResults },
-          { source_type: "additional", raw_text: additionalText },
-        ],
+        sources: sourceEntries,
+      });
+
+      // Phase 3 Stage 37: rule-mined contact facts become typed
+      // research_facts rows — the Phase 4 substrate (entity resolution,
+      // personas, signals) reads these instead of re-grepping raw prose.
+      // Mined from the SAME capped segments saved above so every fact's
+      // supporting text stays queryable. Fail-open like the sources write.
+      const minedFacts = mineResearchFacts(
+        capResearchSourcesToBudget(sourceEntries).map((e) => ({ source_type: e.source_type, text: e.raw_text })),
+      );
+      await appendResearchFacts(env, {
+        companyId: customer.company_id,
+        runId: researchRunId,
+        facts: minedFacts,
       });
 
       // Clean the raw context BEFORE the AI call — dedupe repeated
@@ -2352,8 +2429,9 @@ export default {
         const researchRuns = await pruneResearchRuns(env, dataDays);
         const evidenceSuperseded = await pruneSupersededEvidence(env, dataDays);
         const researchSourcesSuperseded = await pruneSupersededResearchSources(env, dataDays);
+        const researchFactsSuperseded = await pruneSupersededResearchFacts(env, dataDays);
         const customerImports = await pruneCustomerImports(env, dataDays);
-        const total = gmailSendLog + researchRuns + evidenceSuperseded + researchSourcesSuperseded + customerImports;
+        const total = gmailSendLog + researchRuns + evidenceSuperseded + researchSourcesSuperseded + researchFactsSuperseded + customerImports;
         if (total > 0) {
           await writeAuditLog(env, null, {
             actorUserId: null,
@@ -2367,6 +2445,7 @@ export default {
               research_runs: researchRuns,
               evidence_superseded: evidenceSuperseded,
               research_sources_superseded: researchSourcesSuperseded,
+              research_facts_superseded: researchFactsSuperseded,
               customer_imports: customerImports,
             },
           });

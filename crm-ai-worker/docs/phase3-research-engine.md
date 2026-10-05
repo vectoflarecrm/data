@@ -1,9 +1,10 @@
 # Phase 3 — Research Engine: design
 
-Status: Stage 36 implemented (`docs/stages/stage-36-research-sources.md`);
-Stage 37 (research_facts) and Stage 38 (blob deprecation) pending. Same
-rules as Security V2 (additive migrations, fail-open provenance, every
-stage green on the full suite before commit).
+Status: Stage 36 (`research_sources`, docs/stages/stage-36-research-sources.md)
+and Stage 37 (`research_facts`, docs/stages/stage-37-research-facts.md)
+implemented; Stage 38 (cutover + blob deprecation) pending. Same rules as
+Security V2 (additive migrations, fail-open provenance, every stage green
+on the full suite before commit).
 
 Source requirements: 建议.txt §十三 (P2 schema), §十四 (evidence upgrade),
 §二十 (Phase 3 — Research Engine), §二十一 (Phase 4 outlook), §二十二
@@ -128,18 +129,27 @@ an explicit cleanup decision later.
   path unaffected, backfill SQL idempotence (run twice → same rows),
   retention horizon, fail-open on missing table.
 
-**Stage 37 — `research_facts` (substrate).**
-- Rule-miner contact facts (emails/phones/social/whatsapp with confidence
-  and their source segment) become fact rows linked to `research_sources` /
-  `evidence`; the reuse path re-mines from `research_sources` instead of
-  the blob.
-- Panel: 完整研究文本 textarea becomes read-only over the sources view (or
-  keeps editing only until Stage 38 — decided in the stage report).
+**Stage 37 — `research_facts` (substrate).** Implemented as designed minus
+one move (below): rule-mined contact facts (email/phone/whatsapp/social)
+become typed rows — one per distinct `(fact_type, fact_value)` per run,
+first-seen segment as `source_type`, repeats aggregated into
+`occurrence_count`, mined from the same budget-capped segments saved to
+`research_sources`. Customers researched before the stage are gap-filled
+lazily: the next reuse pass writes facts from the saved text
+(`source_type = 'backfill'`) when `hasCurrentResearchFacts` is false — no
+one-time backfill migration. *Amendment: "the reuse path re-mines from
+research_sources instead of the blob" moved to Stage 38 — the reuse path
+and the panel edit handler are coupled (a manual `full_research_text` edit
+must not be shadowed by stale source rows), so the whole cutover lands as
+one stage.*
 
-**Stage 38 — blob deprecation.**
-- Stop writing `full_research_text`; reuse path and panel read exclusively
-  from `research_sources`. Column retained (deprecated cache), documented
-  in schema.sql and the final report.
+**Stage 38 — cutover + blob deprecation.**
+- Reuse path reads the current `research_sources` set (blob fallback for
+  safety); panel edit handler supersedes + appends a `manual` source row
+  alongside the blob edit so manual edits stay visible to the reuse path;
+  then stop writing `full_research_text`; panel raw view reads sources.
+  Column retained (deprecated cache), documented in schema.sql and the
+  final report.
 
 **Normalization (companies / people / company_domains / …) — Phase 3b,
 gated.** Audit §十三 lists the full split; §二十二 warns against wholesale

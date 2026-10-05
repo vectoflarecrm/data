@@ -41,6 +41,9 @@ export const EVIDENCE_PARSER_VERSION = "evidence-v2";
  * that captured it. Legacy backfill rows use 'backfill-v1' instead. */
 export const SOURCES_PARSER_VERSION = "sources-v1";
 
+/** Version of the typed-fact writer (research_facts rows). */
+export const FACTS_PARSER_VERSION = "facts-v1";
+
 /** Which provider/model actually produced an analysis. Stamped by the
  * analyzeWithX callers in index.ts at their single success return point. */
 export interface AnalysisProvenance {
@@ -258,12 +261,94 @@ export async function appendResearchSources(env: ResearchRunEnv, params: AppendS
              (research_run_id, customer_id, source_type, source_url, raw_text,
               content_hash, parser_version, fetched_at, is_current, valid_from)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
-        ).bind(runId, companyId, s.source_type, s.source_url ?? null, s.raw_text,
+        )        .bind(runId, companyId, s.source_type, s.source_url ?? null, s.raw_text,
           contentHash, SOURCES_PARSER_VERSION, sqlUtc(now), sqlUtc(now)),
       );
     }
     await env.DB.batch(stmts);
   } catch (e) {
     warnSkip(e);
+  }
+}
+
+/** One typed fact for research_facts (Phase 3): a rule-mined observation
+ * (email / phone / whatsapp link / social link) with the crawl segment it
+ * was first found in. occurrence_count aggregates repeats across segments
+ * within one run; confidence defaults to 1 (deterministic observation —
+ * the saved text contains this exact string). */
+export interface ResearchFactEntry {
+  fact_type: string;
+  fact_value: string;
+  source_type?: string | null;
+  occurrence_count?: number;
+  confidence?: number;
+}
+
+/** Writer-side bounds (defensive, same spirit as the source budget): no
+ * unbounded fact rows or values can reach D1 regardless of caller. */
+export const FACTS_PER_RUN_CAP = 100;
+export const FACT_VALUE_CAP = 500;
+
+export interface AppendFactsParams {
+  companyId: string;
+  runId: string | null;
+  facts: ResearchFactEntry[];
+  now?: Date;
+}
+
+/** Append one attempt's typed facts. The previous current set for the
+ * company is superseded (is_current = 0, valid_until = now) — never deleted
+ * — and the new rows land with is_current = 1 and valid_from = now, in one
+ * D1 batch (atomic supersede + append). Input is bounded first: at most
+ * FACTS_PER_RUN_CAP rows, each fact_value at most FACT_VALUE_CAP chars. */
+export async function appendResearchFacts(env: ResearchRunEnv, params: AppendFactsParams): Promise<void> {
+  const { companyId, runId } = params;
+  const now = params.now ?? new Date();
+  const bounded = params.facts.slice(0, FACTS_PER_RUN_CAP).map((f) => ({
+    fact_type: f.fact_type,
+    fact_value: f.fact_value.slice(0, FACT_VALUE_CAP),
+    source_type: f.source_type ?? null,
+    occurrence_count: Math.max(1, Math.floor(f.occurrence_count ?? 1)),
+    confidence: f.confidence ?? 1,
+  }));
+  if (bounded.length === 0) return;
+  try {
+    const stmts: D1PreparedStatement[] = [
+      env.DB.prepare(
+        `UPDATE research_facts SET is_current = 0, valid_until = ?
+         WHERE customer_id = ? AND is_current = 1`,
+      ).bind(sqlUtc(now), companyId),
+    ];
+    for (const f of bounded) {
+      stmts.push(
+        env.DB.prepare(
+          `INSERT INTO research_facts
+             (research_run_id, customer_id, fact_type, fact_value, source_type,
+              occurrence_count, confidence, parser_version, fetched_at, is_current, valid_from)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+        ).bind(runId, companyId, f.fact_type, f.fact_value, f.source_type,
+          f.occurrence_count, f.confidence, FACTS_PARSER_VERSION, sqlUtc(now), sqlUtc(now)),
+      );
+    }
+    await env.DB.batch(stmts);
+  } catch (e) {
+    warnSkip(e);
+  }
+}
+
+/** Does this company have any current fact rows? Used by the reuse path to
+ * gap-fill customers researched before facts landed (their runs predate the
+ * facts writer). Fail-open: a missing table reads as "no facts", and the
+ * append that follows fails open too — no research is ever lost to the
+ * substrate. */
+export async function hasCurrentResearchFacts(env: ResearchRunEnv, companyId: string): Promise<boolean> {
+  try {
+    const row = await env.DB.prepare(
+      `SELECT 1 FROM research_facts WHERE customer_id = ? AND is_current = 1 LIMIT 1`,
+    ).bind(companyId).first();
+    return row !== undefined && row !== null;
+  } catch (e) {
+    warnSkip(e);
+    return false;
   }
 }

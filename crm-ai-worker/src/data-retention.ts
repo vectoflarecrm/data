@@ -21,6 +21,10 @@
  *                         source rows keep their own customer_id /
  *                         fetched_at so they stay meaningful without the
  *                         run row.
+ *   - research_facts      typed fact substrate per run (Phase 3). Same
+ *                         superseded-only policy: the current facts of
+ *                         every company survive for Phase 4 consumers;
+ *                         expired history is cut.
  *   - customer_imports    the raw import layer (docx 建议三). Written on
  *                         every CSV import, read by nothing today; rows carry
  *                         the full raw_json so this is the heaviest table
@@ -152,6 +156,23 @@ export async function pruneSupersededResearchSources(
   return pruneBefore(
     env,
     "DELETE FROM research_sources WHERE is_current = 0 AND COALESCE(valid_until, fetched_at) < ?",
+    cutoff,
+  );
+}
+
+/** Superseded research facts only (is_current = 0): the current typed
+ * facts of every company survive regardless of age (Phase 4 consumers
+ * read them); expired history is cut with the same policy and fallback
+ * timestamp as evidence/sources. */
+export async function pruneSupersededResearchFacts(
+  env: { DB: D1Database },
+  days: number,
+  now: Date = new Date(),
+): Promise<number> {
+  const cutoff = toSqlUtc(new Date(now.getTime() - days * 86_400_000));
+  return pruneBefore(
+    env,
+    "DELETE FROM research_facts WHERE is_current = 0 AND COALESCE(valid_until, fetched_at) < ?",
     cutoff,
   );
 }

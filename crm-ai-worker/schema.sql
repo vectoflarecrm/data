@@ -327,6 +327,27 @@ CREATE TABLE IF NOT EXISTS research_sources (
   valid_until TEXT
 );
 
+-- Typed fact substrate (Phase 3, 建议 §二十一: Raw Evidence → Fact
+-- Extraction → …): one row per distinct rule-mined fact per run
+-- (fact_type 'email' | 'phone' | 'whatsapp' | 'social'). Append + supersede
+-- like evidence/sources; Phase 4 (entity resolution, personas, signals)
+-- consumes this instead of re-grepping raw prose.
+CREATE TABLE IF NOT EXISTS research_facts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  research_run_id TEXT,
+  customer_id TEXT NOT NULL,
+  fact_type TEXT NOT NULL,
+  fact_value TEXT NOT NULL,
+  source_type TEXT,
+  occurrence_count INTEGER NOT NULL DEFAULT 1,
+  confidence REAL,
+  parser_version TEXT,
+  fetched_at TEXT NOT NULL,
+  is_current INTEGER NOT NULL DEFAULT 1,
+  valid_from TEXT,
+  valid_until TEXT
+);
+
 -- Raw import layer (docx 建议三): original uploaded rows are immutable; the
 -- normalized/enriched customer rows reference back to them. Re-importing the
 -- same file never destroys original data.
@@ -623,6 +644,11 @@ CREATE INDEX IF NOT EXISTS idx_research_runs_customer ON research_runs(customer_
 -- per-run history slice (superseded sets keep is_current = 0).
 CREATE INDEX IF NOT EXISTS idx_research_sources_customer ON research_sources(customer_id, is_current);
 CREATE INDEX IF NOT EXISTS idx_research_sources_run ON research_sources(research_run_id);
+
+-- Fact-substrate lookups: current facts per customer (Phase 4 consumers)
+-- and the per-run history slice.
+CREATE INDEX IF NOT EXISTS idx_research_facts_customer ON research_facts(customer_id, is_current);
+CREATE INDEX IF NOT EXISTS idx_research_facts_run ON research_facts(research_run_id);
 
 -- The §18.1 UNIQUE indexes — customers(domain), api_configs(provider,
 -- key_fingerprint), contacts.contact_id and contacts(company_id, seq) — are
