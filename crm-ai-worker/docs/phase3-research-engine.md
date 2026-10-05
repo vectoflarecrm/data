@@ -1,10 +1,11 @@
 # Phase 3 — Research Engine: design
 
-Status: Stage 36 (`research_sources`, docs/stages/stage-36-research-sources.md)
-and Stage 37 (`research_facts`, docs/stages/stage-37-research-facts.md)
-implemented; Stage 38 (cutover + blob deprecation) pending. Same rules as
-Security V2 (additive migrations, fail-open provenance, every stage green
-on the full suite before commit).
+Status: Phase 3 shipped — Stage 36 (`research_sources`,
+docs/stages/stage-36-research-sources.md), Stage 37 (`research_facts`,
+docs/stages/stage-37-research-facts.md) and Stage 38 (cutover + blob
+deprecation, docs/stages/stage-38-blob-deprecation.md) implemented. Same
+rules as Security V2 (additive migrations, fail-open provenance, every
+stage green on the full suite before commit).
 
 Source requirements: 建议.txt §十三 (P2 schema), §十四 (evidence upgrade),
 §二十 (Phase 3 — Research Engine), §二十一 (Phase 4 outlook), §二十二
@@ -143,13 +144,20 @@ and the panel edit handler are coupled (a manual `full_research_text` edit
 must not be shadowed by stale source rows), so the whole cutover lands as
 one stage.*
 
-**Stage 38 — cutover + blob deprecation.**
-- Reuse path reads the current `research_sources` set (blob fallback for
-  safety); panel edit handler supersedes + appends a `manual` source row
-  alongside the blob edit so manual edits stay visible to the reuse path;
-  then stop writing `full_research_text`; panel raw view reads sources.
-  Column retained (deprecated cache), documented in schema.sql and the
-  final report.
+**Stage 38 — cutover + blob deprecation.** Implemented as designed minus
+one concern (below): the reuse path and the admin detail view read the
+current `research_sources` set via `readSavedResearchText`
+(`buildSavedResearchText` rebuilds the exact legacy `=== ... ===` blob
+format, since `cleanResearchContextForAi` splits on those headers), the
+blob stays as the pre-Stage-36 fallback, and the fresh path no longer
+writes `full_research_text` (the dual-write from Stage 36 ends here). The
+panel field is now `readonly` — honest, because the PATCH whitelist never
+accepted it. *Amendment: the planned "manual source row on panel edit"
+was dropped — `updateCustomer`'s editable whitelist never contained
+`full_research_text`, so manual edits have never persisted and cannot be
+shadowed by source rows. No `manual` rows exist; the reader still passes
+them through verbatim (single-snapshot semantics) should that ever
+change. Column retained (deprecated cache, documented in schema.sql).*
 
 **Normalization (companies / people / company_domains / …) — Phase 3b,
 gated.** Audit §十三 lists the full split; §二十二 warns against wholesale

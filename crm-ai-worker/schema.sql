@@ -43,6 +43,11 @@ CREATE TABLE IF NOT EXISTS customers (
   is_rental INTEGER DEFAULT 0,
   is_oem INTEGER DEFAULT 0,
   social_accounts TEXT,
+  -- DEPRECATED (Phase 3 Stage 38): legacy single-blob cache of the raw
+  -- research text. No longer written by the pipeline; kept only as the
+  -- read fallback for snapshots predating research_sources (Stage 36).
+  -- Readers rebuild the text from research_sources via
+  -- readSavedResearchText; do not add new writers to this column.
   full_research_text TEXT,
   social_accounts_verified TEXT,
   customer_segment TEXT,

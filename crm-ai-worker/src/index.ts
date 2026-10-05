@@ -18,7 +18,7 @@ import {
   resolveDataRetentionDays,
 } from "./data-retention";
 import { cleanupExpiredChallenges } from "./auth/webauthn";
-import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, hasCurrentResearchFacts, capResearchSourcesToBudget, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, FACTS_PER_RUN_CAP } from "./research-run";
+import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, hasCurrentResearchFacts, capResearchSourcesToBudget, readSavedResearchText, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, FACTS_PER_RUN_CAP } from "./research-run";
 
 export interface CustomerRow {
   id: number;
@@ -29,6 +29,8 @@ export interface CustomerRow {
   company_name: string | null;
   country: string | null;
   customer_segment: string | null;
+  /** Deprecated blob cache (Phase 3 Stage 38): the reuse path reads
+   * research_sources first; this column only serves pre-Stage-36 snapshots. */
   full_research_text?: string | null;
   personas_and_solutions: string | null;
   remarks: string | null;
@@ -1725,8 +1727,9 @@ async function claimCustomers(env: Env): Promise<CustomerRow[]> {
 
   // One UPDATE atomically claims the first three pending rows. This avoids the
   // SELECT-then-UPDATE race between overlapping Cron invocations.
-  // full_research_text rides along so retries reuse the already-crawled
-  // research instead of re-fetching pages and re-spending search quota.
+  // full_research_text rides along only as the Stage 38 fallback: retries
+  // reuse the already-crawled research (research_sources first, blob for
+  // pre-Stage-36 snapshots) instead of re-spending search quota.
   const result = await env.DB.prepare(`
     UPDATE customers
     SET status = 'processing', updated_at = CURRENT_TIMESTAMP
@@ -2035,11 +2038,14 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
     // timeout, provider 429, pool cooldown) happens AFTER research, so a
     // retry that re-crawls re-pays fetch time and — worse — Tavily/Brave
     // search credits (1 credit per query, 1k/month) for identical data.
+    // Phase 3 Stage 38: the saved research now reads from research_sources
+    // (authoritative since Stage 36) via readSavedResearchText — the blob
+    // column is only the fallback for pre-Stage-36 snapshots.
     // cleanedResearchCache dedupes the (only) clean pass shared by the
     // reuse-check and the AI-input build further down.
     let cleanedResearchCache: string | null = null;
     const cleanedSavedResearch = () => cleanedResearchCache ??= cleanResearchContextForAi(savedResearch);
-    const savedResearch = (customer.full_research_text ?? "").trim();
+    const savedResearch = (await readSavedResearchText(env, customer.company_id, customer.full_research_text ?? "")).trim();
     const canReuseResearch =
       savedResearch.length >= 500 && cleanedSavedResearch().length > 200;
 
@@ -2140,19 +2146,12 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
         ? `=== 主网站内容 ===\n${pageText}${socialInfo}${googleResults}${additionalText}`
         : `=== 主网站无法访问 ===${socialInfo}${googleResults}${additionalText}`;
 
-      // Save full research text to database (raw context kept for audit and
-      // re-analysis/retry without re-crawling)
-      const trimmedResearch = researchContext.slice(0, 50_000);
-      await env.DB.prepare(
-        `UPDATE customers SET full_research_text = ? WHERE id = ?`
-      ).bind(trimmedResearch, customer.id).run();
-
-      // Phase 3 Stage 36: the same crawl is also registered per segment in
-      // research_sources (append + supersede, budget-capped to the same
-      // 50 000 chars) so raw history survives re-research instead of being
-      // overwritten with the blob. Dual-write during transition — the blob
-      // stays authoritative for the reuse path and panel until Stage 38.
-      // Fail-open: an auditability layer must never fail paid research.
+      // Phase 3 Stage 38: the blob write is gone. Raw research is persisted
+      // per segment in research_sources (append + supersede, budget-capped
+      // to the same 50 000 chars); readers rebuild the legacy text via
+      // readSavedResearchText. customers.full_research_text is a deprecated
+      // cache kept only as the pre-Stage-36 fallback — a fresh run no
+      // longer touches it. researchContext stays in memory as the AI input.
       const sourceEntries: ResearchSourceEntry[] = [
         { source_type: "website", source_url: normalizeDomain(customer.domain), raw_text: pageText },
         { source_type: "social", raw_text: verifiedSocialText },

@@ -32,6 +32,7 @@ import {
   hintFor,
 } from "./credential-crypto";
 import { parseBulkKeyEntries } from "./bulk-keys";
+import { readSavedResearchText } from "./research-run";
 import {
   parseSegmentFilters,
   segmentClause,
@@ -214,6 +215,9 @@ interface AdminCustomer {
   is_rental: number | null;
   is_oem: number | null;
   social_accounts: string | null;
+  /** Deprecated blob cache — Stage 38: detail views overwrite this with the
+   * research_sources reconstruction (blob only as pre-Stage-36 fallback). */
+  full_research_text?: string | null;
   customer_segment: string | null;
   personas_and_solutions: string | null;
   remarks: string | null;
@@ -2518,6 +2522,14 @@ async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthCo
       if (request.method === "GET") {
         const customer = await getCustomer(env, id);
         if (!customer) return jsonResponse({ detail: "Customer not found" }, 404);
+        // Phase 3 Stage 38: the panel reads raw research from
+        // research_sources (rebuilt into the legacy text format); the
+        // deprecated blob column is only the fallback for pre-Stage-36
+        // snapshots. Fail-open — a missing source table must never break
+        // the detail view.
+        customer.full_research_text = await readSavedResearchText(
+          env, customer.company_id, customer.full_research_text ?? "",
+        );
         const contacts = await getCustomerContacts(env, customer.company_id);
         const evidence = await getCustomerEvidence(env, customer.company_id);
         // Stage 15: both quality axes on one response — fit (lead_score) and
@@ -3508,7 +3520,10 @@ const ADMIN_PANEL_HTML = `<!doctype html>
     {key:'product_categories',label:'产品类别 (Product Categories)',type:'input'},
     {key:'company_size',label:'公司规模 (Company Size)',type:'select',options:['Small','Medium','Large','Enterprise']},
     {key:'geographic_coverage',label:'地理覆盖 (Geographic Coverage)',type:'select',options:['Local','National','International']},
-    {key:'full_research_text',label:'完整研究文本',type:'textarea'},
+    // Phase 3 Stage 38: raw research is system-generated (research_sources,
+    // rebuilt for display) and was never accepted by the PATCH whitelist —
+    // readonly keeps the panel honest about that.
+    {key:'full_research_text',label:'完整研究文本',type:'textarea',readonly:true},
     {key:'social_accounts_verified',label:'已验证社交媒体',type:'textarea'},
     {key:'personas_and_solutions',label:'AI 分析结果 JSON',type:'textarea',parseJson:true},
     {key:'remarks',label:'中文备注 (Remarks)',type:'textarea'},
@@ -3538,6 +3553,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
           if(sl.length>0){h+='<div class="section-title">💡 解决方案</div>';sl.forEach(function(s){h+='<div class="solution-card"><h4>'+esc(s.name||'')+'</h4><p>'+esc(s.value||'')+'</p></div>'})}
           if(pl.length===0&&sl.length===0){h+='<em class="s-faint">暂无数据</em>'}}else{h+='<pre class="s-wspw-fs12">'+esc(val)+'</pre>'}}
       else if(f.key==='remarks'){h+='<div class="s-wspw-lh16">'+(esc(val)||'<em class="s-faint">暂无备注</em>')+'</div>'}
+      else if(isReadonly&&f.type==='textarea'){h+='<pre class="s-wspw-fs12">'+(esc(val)||'<em class="s-faint">-</em>')+'</pre>'}
       else{h+=esc(val)||'<em class="s-faint">-</em>'}
       h+='</div>';
       if(!isReadonly){h+='<div class="field-input" id="fi_'+f.key+'">';

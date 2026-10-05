@@ -352,3 +352,83 @@ export async function hasCurrentResearchFacts(env: ResearchRunEnv, companyId: st
     return false;
   }
 }
+
+// ── Phase 3 Stage 38: read raw research from research_sources ──
+// The blob column (customers.full_research_text) is deprecated as a cache:
+// fresh runs stop overwriting it (a single blob per company destroyed
+// history) and every reader rebuilds the legacy text format from the
+// current source set instead. The column itself is kept as a read-only
+// fallback for snapshots that predate the Stage 36 writer — dropping it
+// would rebuild the customers table for no functional gain.
+
+/** One row of a company's current source set, as read for the legacy-text
+ * reconstruction. */
+export interface SavedSourceRow {
+  source_type: string;
+  source_url?: string | null;
+  raw_text?: string | null;
+}
+
+/** Rebuild the exact legacy blob format from the current source set.
+ * cleanResearchContextForAi splits saved research on `=== ... ===`
+ * headers, so the reconstruction must stay byte-compatible with what the
+ * fresh path used to write as one blob:
+ *   - website: gains the `=== 主网站内容 ===` header, or collapses to the
+ *     `=== 主网站无法访问 ===` marker when the crawl found nothing;
+ *   - social: gains the `=== 已验证社交媒体 ===` header (stored rows keep
+ *     only the rendered lines);
+ *   - search/additional: carry their own `--- ... ---` segment headers
+ *     verbatim, no rebuilding;
+ *   - backfill/manual: a single snapshot row whose raw_text already IS the
+ *     full legacy format (the 0021 backfill stored old blobs verbatim) —
+ *     returned as-is.
+ * Rows must arrive in append order (readers use ORDER BY id). */
+export function buildSavedResearchText(rows: SavedSourceRow[]): string {
+  if (
+    rows.length === 1 &&
+    (rows[0].source_type === "backfill" || rows[0].source_type === "manual")
+  ) {
+    return rows[0].raw_text ?? "";
+  }
+  let text = "";
+  for (const row of rows) {
+    const raw = row.raw_text ?? "";
+    if (row.source_type === "website") {
+      text += raw ? `=== 主网站内容 ===\n${raw}` : "=== 主网站无法访问 ===";
+    } else if (row.source_type === "social") {
+      if (raw) text += `\n\n=== 已验证社交媒体 ===\n${raw}`;
+    } else {
+      // search/additional segments keep their own headers; unknown future
+      // types are appended verbatim rather than dropped.
+      text += raw;
+    }
+  }
+  return text;
+}
+
+/** Sources-first saved-research read with blob fallback. Returns the
+ * company's current source set rebuilt into the legacy text format, or —
+ * when the source set is empty (pre-Stage-36 snapshots) or the read fails —
+ * the deprecated blob value. Fail-open is the rule everywhere in this
+ * substrate: a read problem must never cost paid re-research. */
+export async function readSavedResearchText(
+  env: ResearchRunEnv,
+  companyId: string,
+  blobFallback: string,
+): Promise<string> {
+  try {
+    const result = await env.DB.prepare(
+      `SELECT source_type, source_url, raw_text
+         FROM research_sources
+        WHERE customer_id = ? AND is_current = 1
+        ORDER BY id`,
+    )
+      .bind(companyId)
+      .all<SavedSourceRow>();
+    const fromSources = buildSavedResearchText(result.results ?? []);
+    if (fromSources.length > 0) return fromSources;
+  } catch (e) {
+    warnSkip(e);
+  }
+  return blobFallback;
+}
