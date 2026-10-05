@@ -1,10 +1,12 @@
 # Phase 3b — Schema Normalization: design review
 
-Status: **DRAFT — awaiting operator sign-off.** No implementation is
-scheduled until this review is approved. Trigger: `docs/phase3-research-engine.md`
-§4 gates the split on "its own design review with a concrete
-consumer-by-consumer cutover plan once the research engine lands" — the
-research engine landed in Stage 38 (commit 9292f75).
+Status: **Signed off and implemented.** Operator approved the §4 verdicts
+and Stage 39 on 2026-10-06 (including the assumption that the
+list/sample APIs have no consumer beyond the bundled panel). Stage 39
+landed as docs/stages/stage-39-read-path-slimming.md; the §4
+reject/defer verdicts are now pinned decisions (§6). Trigger history:
+`docs/phase3-research-engine.md` §4 gated this review on the research
+engine landing — Stage 38, commit 9292f75.
 
 Source requirements: 建议.txt §十三 (P2 schema split), §二十二 (staged,
 never wholesale), 架构.txt §35 (no cosmetic refactors), Phase 3 design doc
@@ -126,13 +128,15 @@ This is fixable with **zero schema change and zero data change**:
    `company_domains`; social-based search → `company_socials`; per-run /
    per-brand profiles → `outreach_profiles` (likely Phase 4).
 
-## 7. Review checklist for the operator
+## 7. Review checklist — resolved
 
-- [ ] Stage 39 (read-path slimming) — approve / reject / amend
-- [ ] §4 verdicts (reject/defer per split) — confirm or override
-- [ ] Assumption check: the admin list/sample APIs are consumed only by
-      the bundled panel (Bearer-gated, same-origin). Any external consumer
-      that reads `full_research_text` or the dead person columns from LIST
-      responses would break under Stage 39 — confirm none exists.
-- [ ] Decide whether Phase 4 profile versioning should pull
-      `outreach_profiles` forward.
+- [x] Stage 39 (read-path slimming) — **approved** (2026-10-06), implemented
+      in docs/stages/stage-39-read-path-slimming.md.
+- [x] §4 verdicts (reject/defer per split) — confirmed as written; now
+      pinned (§6).
+- [x] Assumption check: the admin list/sample APIs are consumed only by
+      the bundled panel — confirmed by the operator (no external
+      consumer reads `full_research_text` or the dead person columns from
+      LIST responses).
+- [ ] Phase 4 profile versioning pulling `outreach_profiles` forward —
+      open, decided at Phase 4 design time.

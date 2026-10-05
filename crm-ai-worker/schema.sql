@@ -8,6 +8,13 @@ CREATE TABLE IF NOT EXISTS customers (
   legal_name TEXT,
   trading_name TEXT,
   normalized_domain TEXT,
+  -- DEPRECATED (Phase 3b Stage 39): the embedded person block below is
+  -- vestigial — no code path has ever written these columns (people data
+  -- lives in contacts; customers.email is the import-time contact). They
+  -- are kept for the detail view's response shape and must never gain
+  -- writers; list/sample queries already exclude them
+  -- (docs/phase3b-normalization-review.md §2). Do not DROP without a
+  -- forcing migration (SQLite rebuilds the table).
   first_name TEXT,
   last_name TEXT,
   full_name TEXT,
@@ -42,6 +49,10 @@ CREATE TABLE IF NOT EXISTS customers (
   is_ecommerce INTEGER DEFAULT 0,
   is_rental INTEGER DEFAULT 0,
   is_oem INTEGER DEFAULT 0,
+  -- DEPRECATED (Phase 3b Stage 39): never written by any code path (the
+  -- pipeline writes social_accounts_verified below). Same rules as the
+  -- person block above — no new writers, no DROP without a forcing
+  -- migration.
   social_accounts TEXT,
   -- DEPRECATED (Phase 3 Stage 38): legacy single-blob cache of the raw
   -- research text. No longer written by the pipeline; kept only as the

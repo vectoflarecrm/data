@@ -280,6 +280,25 @@ const CUSTOMER_COLUMNS = `
   personas_and_solutions, remarks, updated_at,
   company_profile, outreach_context, buying_signals, lead_score, source_import_id
 `;
+/* Phase 3b Stage 39: list/sample queries ship a slim column set. The full
+ * set above still serves the detail view (the modal renders every field
+ * and the blob is the Stage 38 fallback source). Dropped here: the
+ * deprecated blob plus ten columns no code path has ever written (the
+ * embedded person block minus email/cellphone, and social_accounts —
+ * docs/phase3b-normalization-review.md §2). cellphone stays: the panel
+ * list row falls back to it next to email. */
+const CUSTOMER_LIST_COLUMNS = `
+  id, company_id, display_id, domain, status, company_name, legal_name, trading_name, normalized_domain,
+  street_address, zip_city, country, country_code, region, city, postal_code,
+  email, cellphone, products_services, business_tag,
+  industry, company_type, business_model, founded_year, employee_range,
+  description, target_markets, is_manufacturer, is_importer, is_distributor,
+  is_wholesaler, is_retailer, is_ecommerce, is_rental, is_oem,
+  social_accounts_verified, customer_segment,
+  product_categories, company_size, geographic_coverage,
+  personas_and_solutions, remarks, updated_at,
+  company_profile, outreach_context, buying_signals, lead_score, source_import_id
+`;
 const CUSTOMER_STATUSES = new Set(["pending", "processing", "completed", "failed"]);
 
 /* ── Admin sessions (Security V2 Stage 1) ────────────────────────────────
@@ -882,7 +901,7 @@ async function listCustomers(request: Request, env: AdminEnv): Promise<Response>
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const [rows, count] = await Promise.all([
     env.DB.prepare(
-      `SELECT ${CUSTOMER_COLUMNS} FROM customers ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`,
+      `SELECT ${CUSTOMER_LIST_COLUMNS} FROM customers ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`,
     )
       .bind(...bindings, limit, offset)
       .all<AdminCustomer>(),
@@ -1066,7 +1085,7 @@ async function preFilterCustomers(request: Request, env: AdminEnv, auth: AdminAu
     `SELECT COUNT(*) AS n FROM customers ${clause}`,
   ).bind(...binds).first<{ n: number }>();
   const sample = await env.DB.prepare(
-    `SELECT ${CUSTOMER_COLUMNS} FROM customers ${clause} ORDER BY lead_score DESC NULLS LAST, id LIMIT 20`,
+    `SELECT ${CUSTOMER_LIST_COLUMNS} FROM customers ${clause} ORDER BY lead_score DESC NULLS LAST, id LIMIT 20`,
   ).bind(...binds).all<AdminCustomer>();
   return jsonResponse({ matching: count?.n ?? 0, sample: sample.results });
 }
