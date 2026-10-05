@@ -754,17 +754,23 @@ async function callAiForOutreach(
   return null;
 }
 
-async function callGeminiOutreach(
+/* Exported for the test suite (Stage 23 precedent): pins the transport
+ * contract — key in the x-goog-api-key header, never in the URL. */
+export async function callGeminiOutreach(
   env: AdminEnv,
   prompt: string,
   key: string
 ): Promise<{ subject: string; body: string }> {
   const model = env.GEMINI_MODEL || "gemini-3.5-flash-lite";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+  // Post-V2 hygiene: the API key travels in the x-goog-api-key header, never
+  // the URL — an error message that embeds the request URL (fetch rejections,
+  // provider diagnostics) must not carry the key into logs. Model names are
+  // encoded for parity with the analysis call site (index.ts).
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 
   const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: {
