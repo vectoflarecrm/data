@@ -65,6 +65,21 @@ database_id = "REPLACE_WITH_D1_DATABASE_ID"
 # WEBAUTHN_RP_NAME = "CRM Admin"
 # WEBAUTHN_ORIGINS = "https://crm.example.com"
 
+# Post-V2 Stage 35 (Cloudflare Access perimeter). Both optional; set BOTH or
+# neither — a half-configured deploy fails closed with a loud 500 (a typo must
+# never silently disable the perimeter). When both are set, every /admin
+# request must carry a valid Cf-Access-Jwt-Assertion, verified in code against
+# the team's JWKS with the application's AUD pinned (fail-closed on every
+# error). This makes the perimeter deploy state instead of dashboard state.
+# Setup runbook: docs/deployment-v2.md §7.
+# CF_ACCESS_TEAM: the Zero Trust team subdomain, i.e. "<team>" in
+#   https://<team>.cloudflareaccess.com.
+# CF_ACCESS_AUD: the AUD tag of the Access application covering the admin
+#   hostname (Zero Trust dashboard → the application → "AUD tag").
+# [vars]
+# CF_ACCESS_TEAM = "your-team"
+# CF_ACCESS_AUD = "your-app-aud-tag"
+
 # Post-V2 Stage 32: Durable-Object-backed sliding-window rate limiter.
 # With this binding the provider RPM cap becomes a TRUE global sliding
 # window (the Stage 16 D1 fixed window could admit up to 2x the cap across

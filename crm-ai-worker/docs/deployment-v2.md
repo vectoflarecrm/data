@@ -6,7 +6,7 @@ Security V2 spec §31/§32. This project has no staging environment, so this doc
 
 ```
 local tests            migration validation           preview/staging         smoke test            production
-(682 vitest tests,    (tsc --noEmit + wrangler      (none exists — the      (§32 below, with      (CI push of the
+(708 vitest tests,    (tsc --noEmit + wrangler      (none exists — the      (§32 below, with      (CI push of the
  tsc --noEmit,         deploy --dry-run proves the    dry-run build + CI      OUTREACH_DRY_RUN      reviewed branch;
  check-panel.mjs)      bundle builds and binds)       gate steps in the       on, then off)         CI runs schema.sql
                                                         workflow are the                              + column checks
@@ -15,7 +15,7 @@ local tests            migration validation           preview/staging         sm
 
 Concretely, before every deploy:
 
-1. **Local tests** — `npm test` (682 tests: unit/stage suites + 72 security acceptance + 59 concurrency + dry-run/health + post-V2 suites), `npm run typecheck`, `node scripts/check-panel.mjs`. All must be green.
+1. **Local tests** — `npm test` (708 tests: unit/stage suites + 72 security acceptance + 59 concurrency + dry-run/health + post-V2 suites), `npm run typecheck`, `node scripts/check-panel.mjs`. All must be green.
 2. **Build validation** — `npx wrangler deploy --dry-run --outdir dist-dryrun` with `WRANGLER_SEND_METRICS=false`. Proves the bundle compiles and binds. Delete `dist-dryrun/` afterwards.
 3. **Migration validation** — CI applies migrations idempotently and **verifies**: `schema.sql` runs with IF NOT EXISTS, then per-statement ALTER steps (duplicate-column tolerant), then `pragma_table_info` assertions that fail the deploy if any expected column is missing; the Stage 34 step conditionally rebuilds legacy `outreach_emails` with its FK declaration (skipped when the FK already exists, blocked over orphaned rows, single transaction). A deploy cannot succeed with a half-migrated database. Forward-only per §29; every change is additive, so an old worker on a new schema keeps working (backward compatibility, §30 — business data is never touched).
 4. **Production** — push the reviewed branch; the workflow deploys. The worker is stateless; the only state is D1.
@@ -80,7 +80,7 @@ With the flag on, the send state machine runs end-to-end but the Gmail transport
 
 ## 5. Verification record
 
-- Pipeline gate as of this document: 682/682 tests (56 files), `tsc --noEmit` clean, dry-run build 532.92 KiB (gzip 131.24 KiB), 7 panels clean.
+- Pipeline gate as of this document: 708/708 tests (57 files), `tsc --noEmit` clean, dry-run build 541.05 KiB (gzip 133.16 KiB), 7 panels clean.
 - **outreach_emails FK rebuild (post-V2 Stage 34)**: legacy databases whose `outreach_emails` predates the FK declaration get it via a single-transaction rebuild (`migrations/0019_outreach_emails_fk_rebuild.sql`, wrangler `--file` = one implicit transaction). The CI step gates on `pragma_foreign_key_list` — skip when the FK exists, block with the cleanup SQL when orphaned drafts are found, verify FK + unchanged row count afterwards. Fresh installs are unaffected (schema.sql always declared the FK). Rolling back a Stage-34 deploy is safe: the table shape is unchanged (same columns, same indexes); only the constraint declaration differs, and old code never wrote orphans.
 - Smoke-mechanism tests: `tests/health.test.ts` (probe contract), `tests/outreach-dry-run.test.ts` (dry-run guard).
 - **request_id columns (post-V2 Stage 33)**: `outreach_emails` / `gmail_send_log` / `customer_imports` gain a nullable `request_id` via the CI idempotent ALTER block (`migrations/0018_business_request_ids.sql` is the change record; fresh installs get the columns straight from schema.sql). Old rows keep NULL — the column only populates from the first deploy onward. No smoke step: the column is exercised by the first generate/send/import.
@@ -95,3 +95,30 @@ With the flag on, the send state machine runs end-to-end but the Gmail transport
 3. From this moment login is two-step: token → 安全密钥/恢复码 → session. **The Bearer master-token API path is closed** (`Authorization: Bearer <ADMIN_PANEL_TOKEN>` answers 401 on every admin API route). This is deliberate — a second factor that scripts can skip by moving the token into a header would be decoration. Any automation must either drive a real login (token + key / recovery code → `crm_session` cookie) or you must not enable 2FA.
 4. Lockout / break-glass: if the key is lost, sign in with a recovery code (each burns after one use; the MFA page offers the form under "无法使用安全密钥？"). With a live session, `/admin/security` can register a replacement key or regenerate the code set (regeneration invalidates ALL previous codes, used and unused). If key and codes are both gone, the operator is locked out of the panel — recovery then requires removing the credential rows from D1 directly (`UPDATE webauthn_credentials SET revoked_at = CURRENT_TIMESTAMP;` via `wrangler d1 execute`) or a Time Travel restore to a pre-enrollment bookmark; runbook in `docs/backup-recovery.md` §4.
 5. Turning 2FA off = removing the last credential in `/admin/security` (audited as `WEBAUTHN_REVOKE`). Bearer re-opens immediately. Unsetting `WEBAUTHN_RP_ID` also puts the feature back to sleep but leaves the credential rows in place — prefer the panel removal, which is explicit and audited.
+
+## 7. Putting the admin panel behind Cloudflare Access (post-V2 Stage 35)
+
+Cloudflare Access is an **outer perimeter** in front of the admin surface: the edge authenticates the caller against your identity provider and injects a signed `Cf-Access-Jwt-Assertion` into every request it forwards. It **composes with** (does not replace) the inner auth — callers still need a session, and WebAuthn 2FA still applies on top. Enabling it is a two-layer decision: the edge app (dashboard) plus the code-side gate (deploy state).
+
+**Why the code-side gate exists**: edge enforcement alone is dashboard state — one mis-scoped or deleted Access application silently removes the perimeter. With `CF_ACCESS_TEAM` + `CF_ACCESS_AUD` set, the worker itself verifies every `/admin` request's assertion against the team's JWKS (audience pinned to your app's AUD, `iss` pinned to the team, `exp`/`nbf` checked, ES256/RS256 signatures verified, fail-closed on every error). The perimeter then lives in `wrangler.toml` + CI, where a change is reviewed and a removal is visible.
+
+Sequence:
+
+1. **Prerequisite**: the admin hostname must be a domain in a Cloudflare zone you control (edge Access does not cover `workers.dev` — see the note below). Point the zone's DNS/proxy at the worker route or custom domain first.
+2. **Create the Access application**: Zero Trust dashboard → Access → Applications → *Add a self-hosted application*. Set the application domain to the admin hostname, path `/admin` (subpaths are covered). Configure the sign-in policy (your IdP, allowed emails/groups). Save.
+3. **Copy the AUD tag**: on the application's page, note the **AUD tag** (a hex string).
+4. **Set both vars** (`wrangler.toml [vars]`, uncommented) and redeploy via CI:
+   - `CF_ACCESS_TEAM` — your Zero Trust team subdomain (the `<team>` in `https://<team>.cloudflareaccess.com`);
+   - `CF_ACCESS_AUD` — the AUD tag from step 3.
+   Set **both or neither**: a half-configured deploy answers **500 on every /admin request** (loud by design — a typo must never silently disable the perimeter).
+5. **Smoke**: with the edge app active, a browser visit to `/admin` redirects to the IdP first, then the panel login. A direct request without an assertion gets a plain `401 {"detail":"Cloudflare Access authentication required"}` — that shape is the code gate talking; if you see it in a browser, the edge app's domain/path does not cover the URL being visited. `GET /health` is outside `/admin` and stays public (probes keep working).
+6. **Automation / CI smoke against a perimeter-enabled deployment**: the assertion is only injected by the edge after Access authentication, so plain `curl` cannot pass. Use an Access **service token** (Zero Trust → Service Tokens): send `CF-Access-Client-Id` + `CF-Access-Client-Secret` headers on every request; the edge validates them and injects the assertion the code gate verifies. Alternatively, run the §3 smoke before enabling the perimeter.
+
+Behavior notes:
+
+- **Fail-closed everywhere**: missing/invalid/expired assertion, unknown signing key after a bounded rotation refetch, or an unreachable JWKS endpoint → `401`. The team's certs endpoint is fetched with a 10s timeout and cached for 1 hour (module-per-isolate); an unknown `kid` triggers at most one refetch per 60s.
+- **Key rotation** is automatic: Access rotates signing keys rarely; the gate refetches the JWKS when a token carries a `kid` the cached keys lack (bounded, see above).
+- **Audit posture**: perimeter rejections are `safeLog`-only (never an audit row) — they are internet-scanner noise, the same policy as the WebAuthn gate. Session-level events (login, 2FA) keep their audit rows.
+- **`workers.dev` caveat**: without a zone you cannot create the edge app, so browser users have no way to obtain an assertion — do not enable the vars there. (If you must lock down a `workers.dev` deployment for scripts only, the code gate + service tokens technically work, but the recommended posture is a custom domain + edge app.)
+- **Rollback / disable**: remove both vars and redeploy — the gate goes dormant, no data involved. The edge app can stay; it is harmless.
+- **Order of gates on every /admin request**: Cloudflare Access (when configured) → origin guard → session auth (+ WebAuthn when active) → RBAC.

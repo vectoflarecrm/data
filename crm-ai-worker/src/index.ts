@@ -85,6 +85,11 @@ interface Env {
   // fixed-window 2x boundary); absent ⇒ the Stage 16 D1 fixed window stays
   // authoritative. See src/rate-limiter.ts.
   RATE_LIMITER?: DurableObjectNamespace;
+  // Post-V2 Stage 35 (Cloudflare Access perimeter): both set ⇒ every /admin
+  // request must carry a valid Cf-Access-Jwt-Assertion (code-side, fail-
+  // closed); exactly one set ⇒ loud 500. See src/security/cf-access.ts.
+  CF_ACCESS_TEAM?: string;
+  CF_ACCESS_AUD?: string;
   [key: string]: unknown;
 }
 

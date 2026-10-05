@@ -58,6 +58,7 @@ import { originGuardRejection } from "./security/origin-guard";
 import { sanitizeResponse } from "./security/redaction";
 import { safeLog } from "./security/safe-log";
 import { setRequestId, getRequestId } from "./security/request-context";
+import { checkCloudflareAccess } from "./security/cf-access";
 import { readCsvImportBody, parseCsvBounded, CsvLimitError } from "./security/csv-limits";
 import { writeAuditLog, AuditMetadata } from "./audit/audit-log";
 import {
@@ -161,6 +162,12 @@ export interface AdminEnv extends GmailEnv {
   WEBAUTHN_RP_ID?: string;
   WEBAUTHN_RP_NAME?: string;
   WEBAUTHN_ORIGINS?: string;
+  // Post-V2 Stage 35 (Cloudflare Access perimeter): both set ⇒ every /admin
+  // request must carry a valid Cf-Access-Jwt-Assertion (verified in code
+  // against the team's JWKS, fail-closed); exactly one set ⇒ loud 500, so a
+  // misconfiguration can never silently disable the perimeter.
+  CF_ACCESS_TEAM?: string;
+  CF_ACCESS_AUD?: string;
 }
 
 interface AdminCustomer {
@@ -2566,6 +2573,16 @@ async function routeAdminRequest(
   try {
   const url = new URL(request.url);
   if (url.pathname !== "/admin" && !url.pathname.startsWith("/admin/")) return null;
+
+  // Post-V2 Stage 35: optional Cloudflare Access perimeter, checked before
+  // origin guard, auth and RBAC — a perimeter rejection says nothing about
+  // routes or accounts (generic detail, safeLog-only, never an audit row:
+  // rejections are internet-scanner noise, the Stage 29 class). Fail-closed
+  // on every error, including a half-configured env (500, loud by design).
+  const access = await checkCloudflareAccess(request, env);
+  if (access.outcome === "reject") {
+    return jsonResponse({ detail: access.detail }, access.status);
+  }
 
   // Stage 6: a foreign-origin state-changing request (POST/PUT/PATCH/DELETE)
   // dies here — before routing, auth, or any handler side effect. Browsers
