@@ -476,6 +476,14 @@ async function countActiveSessions(env: AdminEnv, userId: string): Promise<numbe
   return row?.n ?? 0;
 }
 
+/** Active sessions across ALL users (super_admin inventory / revoke-all). */
+async function countAllActiveSessions(env: AdminEnv): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM admin_sessions WHERE revoked_at IS NULL AND expires_at > ?`,
+  ).bind(sqlUtc()).first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
 /**
  * Single authentication entry point for every admin route.
  *
@@ -2608,6 +2616,109 @@ async function routeAdminRequest(
     return jsonResponse({ ok: true, revoked, remaining });
   }
 
+  /* ── Session inventory + admin-wide revocation (post-V2) ──
+   * GET  /admin/api/auth/sessions        → active sessions, all users
+   * POST /admin/api/auth/sessions/revoke → revoke one session by id
+   * POST /admin/api/auth/revoke-all      → revoke every active session
+   * All three are super_admin only. The rbac gate maps /admin/api/auth/*
+   * to no permission (session lifecycle), so the role check lives HERE —
+   * mirroring the gate's audit shape so a denial is on the trail. */
+  if (url.pathname === "/admin/api/auth/sessions" && request.method === "GET") {
+    const auth = await authenticate(request, env);
+    if (!auth) return authFailure(request);
+    if (auth.user.role !== "super_admin") {
+      await auditAdminAction(env, request, auth, "ACCESS_DENIED", "admin_session", null, {
+        reason: "forbidden",
+        requires: "super_admin",
+        path: url.pathname,
+      });
+      return jsonResponse({ detail: "无权执行此操作（仅 super_admin）" }, 403);
+    }
+    const rows = await env.DB.prepare(
+      `SELECT s.id, s.user_id, u.username, s.role, s.created_at, s.expires_at, s.last_seen_at, s.ip_hash
+       FROM admin_sessions s JOIN admin_users u ON u.id = s.user_id
+       WHERE s.revoked_at IS NULL AND s.expires_at > ?
+       ORDER BY s.created_at DESC LIMIT 200`,
+    ).bind(sqlUtc()).all<{
+      id: string;
+      user_id: string;
+      username: string;
+      role: string;
+      created_at: string;
+      expires_at: string;
+      last_seen_at: string | null;
+      ip_hash: string | null;
+    }>();
+    const sessions = (rows.results ?? []).map((row) => ({
+      ...row,
+      is_current: row.id === auth.sessionId,
+    }));
+    return jsonResponse({ sessions });
+  }
+
+  if (url.pathname === "/admin/api/auth/sessions/revoke" && request.method === "POST") {
+    const auth = await authenticate(request, env);
+    if (!auth) return authFailure(request);
+    if (auth.user.role !== "super_admin") {
+      await auditAdminAction(env, request, auth, "ACCESS_DENIED", "admin_session", null, {
+        reason: "forbidden",
+        requires: "super_admin",
+        path: url.pathname,
+      });
+      return jsonResponse({ detail: "无权执行此操作（仅 super_admin）" }, 403);
+    }
+    let sessionId = "";
+    try {
+      const body = await request.json() as { session_id?: unknown };
+      if (typeof body.session_id === "string") sessionId = body.session_id;
+    } catch { /* empty body → 400 below */ }
+    if (!sessionId) return jsonResponse({ detail: "缺少 session_id" }, 400);
+    const target = await env.DB.prepare(
+      "SELECT id, user_id, revoked_at FROM admin_sessions WHERE id = ?",
+    ).bind(sessionId).first<{ id: string; user_id: string; revoked_at: string | null }>();
+    if (!target) return jsonResponse({ detail: "会话不存在" }, 404);
+    const info = await env.DB.prepare(
+      `UPDATE admin_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`,
+    ).bind(sqlUtc(), sessionId).run();
+    const revoked = Number(info.meta.changes ?? 0);
+    await auditAdminAction(env, request, auth, "REVOKE_SESSION", "admin_session", sessionId, {
+      target_user_id: target.user_id,
+      already_revoked: revoked === 0,
+    });
+    return jsonResponse({ ok: true, revoked });
+  }
+
+  if (url.pathname === "/admin/api/auth/revoke-all" && request.method === "POST") {
+    const auth = await authenticate(request, env);
+    if (!auth) return authFailure(request);
+    if (auth.user.role !== "super_admin") {
+      await auditAdminAction(env, request, auth, "ACCESS_DENIED", "admin_session", null, {
+        reason: "forbidden",
+        requires: "super_admin",
+        path: url.pathname,
+      });
+      return jsonResponse({ detail: "无权执行此操作（仅 super_admin）" }, 403);
+    }
+    // Keep the caller's own session alive so an operator responding to an
+    // incident does not lock themselves out mid-response. The Bearer
+    // bootstrap path has no session row, so it revokes everything.
+    const keepCurrent = auth.via === "session" && auth.sessionId !== "";
+    const info = keepCurrent
+      ? await env.DB.prepare(
+          `UPDATE admin_sessions SET revoked_at = ? WHERE revoked_at IS NULL AND expires_at > ? AND id != ?`,
+        ).bind(sqlUtc(), sqlUtc(), auth.sessionId).run()
+      : await env.DB.prepare(
+          `UPDATE admin_sessions SET revoked_at = ? WHERE revoked_at IS NULL AND expires_at > ?`,
+        ).bind(sqlUtc(), sqlUtc()).run();
+    const revoked = Number(info.meta.changes ?? 0);
+    const remaining = await countAllActiveSessions(env);
+    await auditAdminAction(env, request, auth, "REVOKE_ALL_SESSIONS", "admin_session", null, {
+      revoked,
+      kept_current: keepCurrent,
+    });
+    return jsonResponse({ ok: true, revoked, remaining });
+  }
+
   if (url.pathname === "/admin/outreach") {
     if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
     return (await authenticate(request, env))
@@ -2629,6 +2740,18 @@ async function routeAdminRequest(
     return (await authenticate(request, env))
       ? htmlResponse(AUDIT_PANEL_HTML)
       : htmlResponse(ADMIN_LOGIN_HTML);
+  }
+
+  // Post-V2: session inventory + revocation, super_admin only (incident
+  // response surface). Non-super_admin gets a JSON 403, not the page.
+  if (url.pathname === "/admin/sessions") {
+    if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
+    const auth = await authenticate(request, env);
+    if (!auth) return htmlResponse(ADMIN_LOGIN_HTML);
+    if (auth.user.role !== "super_admin") {
+      return jsonResponse({ detail: "无权执行此操作（仅 super_admin）" }, 403);
+    }
+    return htmlResponse(SESSIONS_PANEL_HTML);
   }
 
   /* ── Central authorization gate (Security V2 Stage 2) ──
@@ -3874,6 +3997,89 @@ function load(before){
 document.getElementById('fGo').onclick=function(){load()};
 document.getElementById('fAction').addEventListener('keydown',function(e){if(e.key==='Enter')load()});
 document.getElementById('more').onclick=function(){if(_next)load(_next)};
+load();
+})();
+</script></body></html>`;
+
+/* Post-V2 — session inventory + revocation (super_admin only; the server
+ * route already 403s everyone else before this HTML is ever served).
+ * Backing APIs: GET /admin/api/auth/sessions,
+ * POST /admin/api/auth/sessions/revoke, POST /admin/api/auth/revoke-all.
+ * Same escaping discipline as the other panels. */
+const SESSIONS_PANEL_HTML = `<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>会话管理 - CRM</title><style>
+body{font-family:system-ui,sans-serif;margin:0;background:#f3f5f9;color:#1f2430}
+.top{background:#1f2430;color:#fff;padding:14px 24px;display:flex;justify-content:space-between;align-items:center}
+.top h1{font-size:18px;margin:0}
+.top a{color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 14px;border-radius:8px;font-weight:600;font-size:14px}
+.wrap{max-width:1000px;margin:24px auto;padding:0 16px}
+.card{background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:20px;margin-bottom:20px}
+h2{font-size:16px;margin:0 0 12px}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.btn{border:0;border-radius:6px;padding:7px 14px;cursor:pointer;font-size:13px;font-weight:600;background:#3f9d63;color:#fff}
+.btn.del{background:#fde8e8;color:#b23b3b}
+.btn.gray{background:#8b93a3}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:#f0f2f7;padding:8px;text-align:left;font-size:12px;color:#5a6270}
+td{padding:8px;border-bottom:1px solid #eef1f6;vertical-align:top}
+.mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+.cur{display:inline-block;margin-left:6px;padding:1px 8px;border-radius:10px;background:#dcfce7;color:#166534;font-size:12px;font-weight:600}
+#toast{position:fixed;top:18px;right:18px;background:#1f2430;color:#fff;padding:10px 16px;border-radius:8px;font-size:14px;display:none;max-width:420px;z-index:9}
+#toast.err{background:#b23b3b}
+.hint{font-size:12px;color:#7a8291;margin-top:6px}
+</style></head><body>
+<header class="top"><h1>🔐 会话管理（仅 super_admin）</h1><a href="/admin">← 返回客户管理</a></header>
+<div class="wrap">
+<div class="card">
+  <div class="bar">
+    <button class="btn" id="refresh">刷新</button>
+    <button class="btn del" id="revokeAll">吊销其他所有会话</button>
+  </div>
+  <table><thead><tr><th>用户</th><th>角色</th><th>登录时间 (UTC)</th><th>过期时间</th><th>IP 哈希</th><th></th></tr></thead>
+  <tbody id="rows"><tr><td colspan="6">加载中…</td></tr></tbody></table>
+  <p class="hint">吊销立即生效：被吊销会话的下一个请求将收到 401。「吊销其他所有会话」保留你当前登录，便于应急响应时不把自己锁在门外。</p>
+</div>
+</div>
+<div id="toast"></div>
+<script>
+(function(){
+'use strict';
+function esc(v){return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
+function toast(msg,isErr){var t=document.getElementById('toast');t.textContent=msg;t.className=isErr?'err':'';t.style.display='block';setTimeout(function(){t.style.display='none'},3200)}
+function api(path,init){return fetch(path,Object.assign({credentials:'same-origin'},init||{})).then(function(r){return r.json().then(function(body){if(!r.ok)throw new Error(body.detail||('HTTP '+r.status));return body})})}
+function render(sessions){
+  var tb=document.getElementById('rows');
+  if(!sessions.length){tb.innerHTML='<tr><td colspan="6">无活跃会话</td></tr>';return}
+  var html='';
+  for(var i=0;i<sessions.length;i++){
+    var s=sessions[i];
+    html+='<tr><td>'+esc(s.username)+'<span class="mono">('+esc(s.user_id)+')</span>'+(s.is_current?'<span class="cur">当前</span>':'')+'</td>'
+      +'<td>'+esc(s.role)+'</td>'
+      +'<td class="mono">'+esc(s.created_at)+'</td>'
+      +'<td class="mono">'+esc(s.expires_at)+'</td>'
+      +'<td class="mono">'+(s.ip_hash?esc(s.ip_hash.slice(0,12))+'…':'—')+'</td>'
+      +'<td>'+(s.is_current?'':'<button class="btn del" data-sid="'+esc(s.id)+'">吊销</button>')+'</td></tr>';
+  }
+  tb.innerHTML=html;
+  Array.prototype.forEach.call(tb.querySelectorAll('button[data-sid]'),function(b){
+    b.onclick=function(){
+      api('/admin/api/auth/sessions/revoke',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:b.getAttribute('data-sid')})})
+      .then(function(body){toast(body.revoked>0?'会话已吊销':'该会话已处于吊销状态');load()})
+      .catch(function(e){toast(e.message,true)});
+    };
+  });
+}
+function load(){
+  api('/admin/api/auth/sessions').then(function(body){render(body.sessions||[])})
+  .catch(function(e){toast(e.message,true)});
+}
+document.getElementById('refresh').onclick=load;
+document.getElementById('revokeAll').onclick=function(){
+  if(!confirm('确定吊销除当前会话外的全部活跃会话？此操作立即生效。'))return;
+  api('/admin/api/auth/revoke-all',{method:'POST'}).then(function(body){toast('已吊销 '+body.revoked+' 个会话');load()})
+  .catch(function(e){toast(e.message,true)});
+};
 load();
 })();
 </script></body></html>`;

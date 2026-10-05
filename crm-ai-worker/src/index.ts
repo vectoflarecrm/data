@@ -6,6 +6,7 @@ import { assertPublicHttpUrl } from "./security/outbound-url";
 import { safeLog } from "./security/safe-log";
 import { writeAuditLog } from "./audit/audit-log";
 import { resolveAuditRetentionDays, pruneAuditLogs } from "./audit/audit-retention";
+import { pruneExpiredSessions } from "./auth/session-hygiene";
 import { startResearchRun, completeResearchRun, appendFieldEvidence, newProvenance, type AnalysisProvenance } from "./research-run";
 
 export interface CustomerRow {
@@ -2264,6 +2265,17 @@ export default {
       } catch (e) {
         safeLog("error", "[audit-retention] prune failed, continuing research tick", e instanceof Error ? e.message : String(e));
       }
+    }
+    // Post-V2 session hygiene: expired admin_sessions rows (older than a
+    // 7-day inspection grace) are dead state — vacuum them on the same
+    // tick, in its own fail-open envelope so neither job can break the other.
+    try {
+      const prunedSessions = await pruneExpiredSessions(env);
+      if (prunedSessions > 0) {
+        safeLog("log", `[session-hygiene] pruned ${prunedSessions} expired admin_sessions rows`);
+      }
+    } catch (e) {
+      safeLog("error", "[session-hygiene] prune failed, continuing research tick", e instanceof Error ? e.message : String(e));
     }
     // Claim-first design: rows are flipped to 'processing' before any slow work
     // starts, so an overlapping cron tick can never double-claim the same
