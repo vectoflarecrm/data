@@ -2443,6 +2443,23 @@ async function getCustomerCompleteness(env: AdminEnv, id: number): Promise<numbe
   }
 }
 
+/** Phase 5 Stage 43 (建议 §十八): read the lead score's six-dimension
+ * breakdown the same fail-open way — not in the shared column lists, so
+ * migration-pending databases and bare test fixtures keep working. Returns
+ * null (raw JSON string) while the migration is pending or the row predates
+ * Stage 43 / was skipped by the relevance precheck. */
+async function getCustomerLeadScoreBreakdown(env: AdminEnv, id: number): Promise<string | null> {
+  try {
+    const row = await env.DB.prepare(
+      "SELECT lead_score_breakdown FROM customers WHERE id = ?",
+    ).bind(id).first<{ lead_score_breakdown: string | null }>();
+    return row?.lead_score_breakdown ?? null;
+  } catch (e) {
+    if (e instanceof Error && e.message.includes("no such column")) return null;
+    throw e;
+  }
+}
+
 /** Row shape of the read-only audit view (GET /admin/api/audit-logs). */
 interface AuditLogViewRow {
   id: string;
@@ -2599,7 +2616,19 @@ async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthCo
         } catch {
           // pre-migration window / bare test fixture — no section
         }
-        return jsonResponse({ ...customer, contacts, evidence, signals, personas, linked_facts: linkedFacts, data_completeness_score: await getCustomerCompleteness(env, id) });
+        // Phase 5 Stage 43 (§4.2): the six-dimension decomposition rides the
+        // same response — raw JSON, fail-open to null like the completeness
+        // axis (migration-pending DBs / pre-stage rows / precheck skips).
+        return jsonResponse({
+          ...customer,
+          contacts,
+          evidence,
+          signals,
+          personas,
+          linked_facts: linkedFacts,
+          data_completeness_score: await getCustomerCompleteness(env, id),
+          lead_score_breakdown: await getCustomerLeadScoreBreakdown(env, id),
+        });
       }
       if (request.method === "PATCH") return await updateCustomer(request, env, id, auth);
     }
@@ -3648,7 +3677,21 @@ const ADMIN_PANEL_HTML = `<!doctype html>
     +'</div>'});h+='</div>';return h};
   var renderSignals=function(sv){if(!sv||!sv.length)return'';var h='<div class="section-title">🚨 采购信号 (Buying Signals)</div><div class="s-dfx-fxdcol-g8">';sv.forEach(function(s){h+='<div class="s-bgf8fafc-bd1 ol e2e8f0-br8-p10 12 s-fs13">'+esc(s.signal_text)+'</div>'});h+='</div>';return h};
   var renderLinkedFacts=function(lf){if(!lf||!lf.length)return'';var h='<div class="section-title">🔗 联系方式归属（实体关联）</div><div class="s-dfx-fxdcol-g8">';lf.forEach(function(f){var nm=([f.first_name,f.last_name].filter(Boolean).join(' ')||f.contact_id);var ttl=f.title?'（'+f.title+'）':'';var icon=f.fact_type==='phone'?'📞':'✉️';var src=f.source_type?(' · '+esc(f.source_type)):'';h+='<div class="s-bgf8fafc-bd1 ol e2e8f0-br8-p10 14-dfx-aic-g8"><span class="s-fs18">'+icon+'</span><div><div class="s-fw600-fs13 wbba">'+esc(f.fact_value)+'</div><div class="s-fs12-c475569">→ '+esc(nm)+esc(ttl)+src+' · '+esc((f.fetched_at||'').slice(0,10))+'</div></div></div>'});h+='</div>';return h};
-  window.openDetail=function(id){api('/admin/api/customers/'+id).then(function(c){state.selected=id;state.dirty={};$('modalTitle').textContent='客户详情 — '+esc(c.company_name||c.domain||'');var body=buildModal(c);body+=renderSignals(c.signals);body+=renderEvidence(c.evidence);body+=renderLinkedFacts(c.linked_facts);body+=renderVerifiedSocial(c.social_accounts_verified);body+='<div class="section-title">👥 联系人列表</div>';body+='<div id="contactsArea"></div>';$('modalBody').innerHTML=body;var ca=document.getElementById('contactsArea');if(ca)ca.innerHTML=renderContacts(c.contacts);$('modalMsg').classList.add('hidden');$('modal').classList.add('active');document.body.style.overflow='hidden';
+  // Phase 5 (建议 §十八): the lead score's six-dimension decomposition.
+  // Bars reuse the histogram's score-fill widget (track + data-w fill).
+  // A NULL/invalid breakdown — pre-Stage-43 rows, precheck skips,
+  // migration-pending databases — hides the section; the total and the
+  // completeness axis above it keep rendering. Dimension maxes mirror the
+  // server's LEAD_SCORE_WEIGHTS (docs/phase5-lead-score-v2.md §4).
+  var renderLeadScoreBreakdown=function(c){var b=null;if(c.lead_score_breakdown){try{b=JSON.parse(c.lead_score_breakdown)}catch(e){}}
+    if(!b||b.version!=='lead-score-v2')return'';
+    var dims=[['ICP 契合','icp_fit',30],['产品匹配','product_fit',20],['决策人','buyer_role',10],['采购信号','buying_signal',15],['可触达','reachability',15],['战略价值','strategic_value',10]];
+    var h='<div class="section-title">🎯 线索评分维度（六维拆解）</div><div class="s-dfx-fxdcol-g8">';
+    dims.forEach(function(d){var v=Math.max(0,Number(b[d[1]])||0);var pct=Math.round(v/d[2]*100);var fill=pct>=80?'sf-hi':pct>=40?'sf-mid':pct>0?'sf-low':'sf-none';
+      h+='<div><div class="s-dfx-jcb-g8-mb4"><span class="s-fw600-fs13">'+esc(d[0])+'</span><span class="s-fs12-c475569">'+v+' / '+d[2]+'</span></div>'
+      +'<div class="s-bge2e8f0-br4-h8-ovh"><div class="score-fill '+fill+'" data-w="'+pct+'"></div></div></div>'});
+    h+='</div>';return h};
+  window.openDetail=function(id){api('/admin/api/customers/'+id).then(function(c){state.selected=id;state.dirty={};$('modalTitle').textContent='客户详情 — '+esc(c.company_name||c.domain||'');var body=buildModal(c);body+=renderLeadScoreBreakdown(c);body+=renderSignals(c.signals);body+=renderEvidence(c.evidence);body+=renderLinkedFacts(c.linked_facts);body+=renderVerifiedSocial(c.social_accounts_verified);body+='<div class="section-title">👥 联系人列表</div>';body+='<div id="contactsArea"></div>';$('modalBody').innerHTML=body;$('modalBody').querySelectorAll('.score-fill').forEach(function(el){el.style.width=el.getAttribute('data-w')+'%'});var ca=document.getElementById('contactsArea');if(ca)ca.innerHTML=renderContacts(c.contacts);$('modalMsg').classList.add('hidden');$('modal').classList.add('active');document.body.style.overflow='hidden';
       document.querySelectorAll('.edit-btn').forEach(function(btn){btn.onclick=function(){var key=btn.getAttribute('data-key');var row=btn.closest('.field-row');row.classList.add('editing');state.dirty[key]=true;var inp=document.getElementById('inp_'+key);if(inp&&inp.focus)inp.focus()}})}).catch(function(e){showMsg('listMessage',e.message,false)})};
   var closeModal=function(){$('modal').classList.remove('active');document.body.style.overflow='';state.selected=null;state.dirty={}};
   $('closeModal').onclick=closeModal;

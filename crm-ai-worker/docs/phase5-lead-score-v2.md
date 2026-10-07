@@ -1,6 +1,11 @@
 # Phase 5 — Lead Score V2: design
 
-Status: design committed — stages 43/44 pending.
+Status: shipped in full — stages 43/44 done (Lead Score V2 engine +
+`customers.lead_score_breakdown` storage; fail-open detail reader + panel
+six-bar rendering — reports in `docs/stages/stage-43-lead-score-v2.md` /
+`stage-44-panel-breakdown.md`). Follow-ups keep their triggers: the
+`lead_scores` per-run history table (§3.3), per-dimension campaign filters
+(Phase 6 targeting material).
 
 Source requirements: 建议.txt §十八 (the six-dimension lead score), signed by
 the operator as the Phase 5 direction after Phases 1–4 shipped in full.
