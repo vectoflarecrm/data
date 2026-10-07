@@ -1,6 +1,6 @@
 # Phase 8 — Persona-targeted per-person campaigns: design
 
-Status: design committed — stages 49/50/51 pending.
+Status: shipped in full — stages 49/50/51 done (per-person generation layer + persona campaign engine + panel wiring; per-person dedup triple key live).
 
 Source requirements: phase4 §4.4's trigger ("revisit when a persona-targeted
 campaign needs per-person dedup counts"), phase6 §3.6 out-of-scope

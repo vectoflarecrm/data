@@ -3615,7 +3615,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 .ev-hi{font-size:11px;color:#059669;font-weight:700}.ev-mid{font-size:11px;color:#d97706;font-weight:700}.ev-lo{font-size:11px;color:#9ca3af;font-weight:700}
 </style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div class="s-dfx-g12-aic"><a href="/admin/security" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">🛡️ 安全设置</a><a href="/admin/outreach" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">📧 开发信管理</a><a href="/admin/keys" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
 <section class="panel"><h2>📥 客户数据导入（Seed CSV）</h2><p class="s-note">粘贴 CSV（需表头，支持列：company_name, country, domain/website, email, product）。原始数据永久保存在 customer_imports（不可变原始层）；域名或公司名匹配的行自动去重跳过，新公司以 pending 状态进入研究队列。</p><div class="toolbar"><input id="importFileName" placeholder="文件名备注（可选）" class="s-xw220"><button class="button" id="importBtn">导入并去重入队</button></div><textarea id="importCsv" rows="6" placeholder="company_name,country,website,email,product\nABC Sports,USA,,buyer@abcsports.com,SUP\nOcean Pro,Germany,oceanpro.de,,RIB"></textarea><div id="importMsg" class="notice hidden"></div></section>
-<section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p class="s-note">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围，再点「重新入队」让管道二次研究高价值客户。筛选项为下拉勾选，右侧数字是该条件当前命中的客户数（勾选「有邮箱」后只计有邮箱的）。</p><div class="toolbar"><span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span><span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span><span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span><select id="pfMinScore" class="s-mw130"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="50">最低分 ≥50</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select><label class="s-chiprow"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><label class="s-chiprow"><input type="checkbox" id="pfHasSignal"> 有购买信号</label><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button></div><div id="pfResult" class="notice hidden"></div></section>
+<section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p class="s-note">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围，再点「重新入队」让管道二次研究高价值客户。筛选项为下拉勾选，右侧数字是该条件当前命中的客户数（勾选「有邮箱」后只计有邮箱的）。</p><div class="toolbar"><span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span><span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span><span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span><select id="pfMinScore" class="s-mw130"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="50">最低分 ≥50</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select><label class="s-chiprow"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><label class="s-chiprow"><input type="checkbox" id="pfHasSignal"> 有购买信号</label><input id="pfPersonaRoles" placeholder="人物角色（逗号分隔，如：采购总监）" class="s-p8-bd1 ol cbd5e1-br6-fs13-mw180"><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button></div><div id="pfResult" class="notice hidden"></div></section>
 <section class="panel"><h2>客户列表</h2><div id="scoreCard" class="hidden s-mb12" ></div><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>评分</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
 </main>
 <div class="modal-overlay" id="modal"><div class="modal"><div class="modal-header"><h2 id="modalTitle">客户详情</h2><button class="button secondary small" id="closeModal">✕ 关闭</button></div><div class="modal-body" id="modalBody"></div><div class="modal-footer"><span id="modalMsg" class="notice hidden s-mra" ></span><button class="button danger small" id="requeueBtn">设为 pending 重新处理</button><button class="button" id="submitBtn">提交修改</button></div></div></div>
@@ -3683,7 +3683,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
   document.querySelectorAll('.cp-dd-btn').forEach(function(btn){btn.onclick=function(ev){ev.stopPropagation();var dd=btn.parentElement,was=dd.classList.contains('open');document.querySelectorAll('.cp-dd.open').forEach(function(o){o.classList.remove('open')});if(!was)dd.classList.add('open')}});
   document.addEventListener('click',function(ev){if(!(ev.target.closest&&ev.target.closest('.cp-dd')))document.querySelectorAll('.cp-dd.open').forEach(function(o){o.classList.remove('open')})});
   $('pfHasEmail').onchange=function(){pfDDAll(pfDDList)};
-  var pfParams=function(){var p=new URLSearchParams();var c=pfDDSel.countries.join(','),s=pfDDSel.segments.join(','),pr=pfDDSel.products.join(','),m=$('pfMinScore').value;if(c)p.set('countries',c);if(s)p.set('segments',s);if(pr)p.set('products',pr);if(m&&Number(m)>0)p.set('min_lead_score',m);if($('pfHasEmail').checked)p.set('has_email','1');if($('pfHasSignal').checked)p.set('has_buying_signal','1');return p};
+  var pfParams=function(){var p=new URLSearchParams();var c=pfDDSel.countries.join(','),s=pfDDSel.segments.join(','),pr=pfDDSel.products.join(','),m=$('pfMinScore').value,proles=$('pfPersonaRoles').value.trim();if(c)p.set('countries',c);if(s)p.set('segments',s);if(pr)p.set('products',pr);if(m&&Number(m)>0)p.set('min_lead_score',m);if($('pfHasEmail').checked)p.set('has_email','1');if($('pfHasSignal').checked)p.set('has_buying_signal','1');if(proles)p.set('persona_roles',proles);return p};
   $('pfCount').onclick=function(){var p=pfParams();p.set('action','count');$('pfCount').disabled=true;api('/admin/api/customers/pre-filter?'+p.toString()).then(function(d){var s=d.sample||[];var lines=s.slice(0,5).map(function(c){return esc((c.company_name||c.display_id||c.id)+'（'+(c.lead_score??'—')+'分）')}).join('、');$('pfResult').classList.remove('hidden');$('pfResult').innerHTML='🎯 匹配 <b>'+d.matching+'</b> 家'+(lines?'。高分示例：'+lines:'');$('pfResult').style.color='#123b68'}).catch(function(e){$('pfResult').classList.remove('hidden');$('pfResult').textContent='❌ '+e.message;$('pfResult').style.color='#b91c1c'}).finally(function(){$('pfCount').disabled=false})};
   $('pfQueue').onclick=function(){if(!confirm('确定将所有匹配的已完成客户重置为 pending 重新研究？'))return;var p=pfParams();p.set('action','queue');$('pfQueue').disabled=true;api('/admin/api/customers/pre-filter?'+p.toString()).then(function(d){$('pfResult').classList.remove('hidden');$('pfResult').innerHTML='✅ 已重新入队 <b>'+d.queued+'</b> 家，等待 cron 逐批处理';$('pfResult').style.color='#123b68';load()}).catch(function(e){$('pfResult').classList.remove('hidden');$('pfResult').textContent='❌ '+e.message;$('pfResult').style.color='#b91c1c'}).finally(function(){$('pfQueue').disabled=false})};
   var fields=[
@@ -4030,9 +4030,11 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 <select id="cgIcpFloor" class="s-p8-bd1 ol cbd5e1-br6-fs13-w110"><option value="">ICP 匹配：不限</option><option value="25">ICP 匹配 ≥25</option><option value="30">ICP 匹配 ≥30</option></select>
 <label class="s-chiprow"><input type="checkbox" id="cgHasSignal"> 有购买信号</label>
 <label class="s-chiprow"><input type="checkbox" id="cgExcludeSent" checked> 排除本品牌已发送</label>
+<label class="s-chiprow"><input type="checkbox" id="cgPerPerson"> 按联系人发送</label>
+<input id="cgPersonaRoles" placeholder="人物角色筛选（逗号分隔，如：采购总监,门店老板）" class="s-p8-bd1 ol cbd5e1-br6-fs13-fx1-mw220">
 <button class="btn btn-primary btn-sm" id="cgPreview">🔍 统计客群</button>
 </div>
-<p class="cp-hint">只统计已完成研究（<code>status=completed</code>）且<b>有邮箱</b>的客户——没有研究档案无法生成个性化开发信，没有邮箱无法发送。手工勾选的客户会与其余条件取交集。下拉筛选项右侧的数字是该条件当前命中的<b>可发信</b>客户数（未扣除本品牌已发送）。关键词取自客户名称与描述中的高频业务词，最多可选 5 个。</p>
+<p class="cp-hint">只统计已完成研究（<code>status=completed</code>）且<b>有邮箱</b>的客户——没有研究档案无法生成个性化开发信，没有邮箱无法发送。勾选「按联系人发送」后改为定向每家公司<b>最早发现的有邮箱联系人</b>，公司自身邮箱不再要求；没有带邮箱联系人的公司会被跳过。人物角色取自最新研究档案的买家画像（精确匹配）。手工勾选的客户会与其余条件取交集。下拉筛选项右侧的数字是该条件当前命中的<b>可发信</b>客户数（未扣除本品牌已发送）。关键词取自客户名称与描述中的高频业务词，最多可选 5 个。</p>
 <div id="cgPickedWrap" class="s-mt8">
 <div class="s-dfx-g8-aic-fxww"><span class="s-fs13">手工勾选：</span><span id="cgPicked" class="cp-chip"></span><button class="btn btn-sm btn-secondary" id="cgClearPicked">清空</button></div>
 <div class="s-dfx-g8-aic-mt8-fxww"><input id="cgPickSearch" placeholder="搜索公司名/网址/国家以勾选客户" class="s-p8-bd1 ol cbd5e1-br6-fs13-fx1-mw220"><button class="btn btn-sm btn-secondary" id="cgPickSearchBtn">🔎 搜索并勾选</button></div>
@@ -4347,7 +4349,7 @@ function loadFilterOptions(){
 function cgFilters(){
   var min=Number(document.getElementById('cgMinScore').value)||0;
   var icp=Number(document.getElementById('cgIcpFloor').value)||0;
-  return {countries:cgDDSel.countries.join(','),segments:cgDDSel.segments.join(','),products:cgDDSel.products.join(','),keywords:cgDDSel.keywords.join(','),min_lead_score:min,exclude_sent:document.getElementById('cgExcludeSent').checked,customer_ids:cgPickedIds,has_buying_signal:document.getElementById('cgHasSignal').checked,dimension_floors:icp>0?{icp_fit:icp}:{}};
+  return {countries:cgDDSel.countries.join(','),segments:cgDDSel.segments.join(','),products:cgDDSel.products.join(','),keywords:cgDDSel.keywords.join(','),min_lead_score:min,exclude_sent:document.getElementById('cgExcludeSent').checked,customer_ids:cgPickedIds,has_buying_signal:document.getElementById('cgHasSignal').checked,dimension_floors:icp>0?{icp_fit:icp}:{},per_person:document.getElementById('cgPerPerson').checked,persona_roles:document.getElementById('cgPersonaRoles').value.trim()};
 }
 function cgSetFilters(f){
   f=f||{};
@@ -4356,6 +4358,8 @@ function cgSetFilters(f){
   ms.value=mv;
   document.getElementById('cgExcludeSent').checked=f.exclude_sent!==false;
   document.getElementById('cgHasSignal').checked=f.has_buying_signal===true;
+  document.getElementById('cgPerPerson').checked=f.per_person===true;
+  document.getElementById('cgPersonaRoles').value=Array.isArray(f.persona_roles)?f.persona_roles.join(','):(typeof f.persona_roles==='string'?f.persona_roles:'');
   var icpf=document.getElementById('cgIcpFloor'),iv=String((f.dimension_floors&&f.dimension_floors.icp_fit)||'');
   if(iv&&!icpf.querySelector('option[value="'+iv+'"]')){var io=document.createElement('option');io.value=iv;io.textContent='ICP 匹配 ≥'+iv;icpf.appendChild(io)}
   icpf.value=iv;
@@ -4419,14 +4423,15 @@ document.getElementById('cgSaveGroup').onclick=function(){
 };
 document.getElementById('cgPreview').onclick=function(){
   var btn=this;btn.disabled=true;btn.textContent='⏳ 统计中…';
+  var pp=document.getElementById('cgPerPerson').checked;
   api('/admin/api/outreach/segment-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:document.getElementById('cgBrand').value,filters:cgFilters()})})
     .then(function(d){
       var box=document.getElementById('cgPreviewBox');
       var countries=(d.by_country||[]).map(function(c){return esc(c.country||'（未知国家）')+' ×'+c.n}).join('　');
       var rows=(d.sample||[]).map(function(c){return '<tr><td>'+esc(c.display_id||c.id)+'</td><td>'+esc(c.company_name||'-')+'</td><td>'+esc(c.country||'-')+'</td><td>'+(c.lead_score==null?'—':c.lead_score)+'</td><td>'+esc((c.customer_segment||'-').slice(0,26))+'</td><td>'+esc((c.email||'-').slice(0,30))+'</td><td>'+(c.has_draft?'📄 已有草稿':'待生成')+'</td></tr>'}).join('');
       box.innerHTML='<div class="s-bgf0fdfa-bd1 ol 99f6e4-br10-p14">'
-        +'<div class="s-fs15-fw700-c0f766e">匹配 '+d.matching+' 家客户</div>'
-        +'<div class="s-fs13-c475569-mt4">其中 <b>'+d.already+'</b> 家该品牌已有开发信（直接沿用，不再花 AI 费用），<b>'+d.pending+'</b> 家需要生成</div>'
+        +'<div class="s-fs15-fw700-c0f766e">匹配 '+d.matching+' 家客户'+(pp?'（按联系人：只计有带邮箱联系人的公司）':'')+'</div>'
+        +'<div class="s-fs13-c475569-mt4">其中 <b>'+d.already+'</b> 家'+(pp?'的目标联系人':'')+'该品牌已有开发信（直接沿用，不再花 AI 费用），<b>'+d.pending+'</b> 家需要生成</div>'
         +(countries?'<div class="s-fs12-c6b7280-mt6">国家分布：'+countries+'</div>':'')
         +(rows?'<table class="cp-table"><thead><tr><th>客户ID</th><th>公司</th><th>国家</th><th>评分</th><th>细分</th><th>邮箱</th><th>开发信</th></tr></thead><tbody>'+rows+'</tbody></table><div class="cp-hint">仅预览前 20 家（按评分优先）</div>':'')
         +'</div>';
@@ -4471,7 +4476,15 @@ document.getElementById('cgCreate').onclick=function(){
   var payload=gid?{brand:brand,group_id:Number(gid),name:name||null}:{brand:brand,name:name||null,filters:cgFilters()};
   api('/admin/api/outreach/campaigns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
     .then(function(d){
-      var msg='✅ 群发任务已创建：共 '+d.total+' 家客户'+(d.capped?'（超过单任务上限，已截取评分最高的 '+d.total+' 家）':'')+'。点「生成草稿」开始分批生成。';
+      var pp=document.getElementById('cgPerPerson').checked;
+      var msg;
+      if(pp&&typeof d.companies==='number'){
+        msg='✅ 群发任务已创建：匹配 '+d.companies+' 家公司，定向 '+d.total+' 个联系人'
+          +(d.companies>d.total?'（'+(d.companies-d.total)+' 家公司没有带邮箱的联系人，已跳过）':'')
+          +(d.capped?'（超过单任务上限，已截取）':'')+'。每家公司取最早发现的有邮箱联系人。点「生成草稿」开始分批生成。';
+      }else{
+        msg='✅ 群发任务已创建：共 '+d.total+' 家客户'+(d.capped?'（超过单任务上限，已截取评分最高的 '+d.total+' 家）':'')+'。点「生成草稿」开始分批生成。';
+      }
       showMsg('cgMsg',msg,true);showToast('群发任务已创建',true);
       document.getElementById('cgName').value='';
       loadCampaigns();
@@ -4568,13 +4581,21 @@ function cgShowMembers(id){
   var box=document.getElementById('cgList');
   api('/admin/api/outreach/campaigns/'+id+'/members?limit=200').then(function(d){
     var LBL={pending:'待生成',generated:'待发送',sent:'已发送',skipped:'跳过',failed:'失败'};
+    // The campaign's grain travels in its filters JSON (§2.2): only a
+    // per-person campaign gets the contact column.
+    var pp=false;try{pp=(JSON.parse((d.campaign&&d.campaign.filters)||'{}')||{}).per_person===true}catch(e){}
     var rows=(d.items||[]).map(function(m){
-      return '<tr><td>'+esc(m.display_id||m.customer_id)+'</td><td>'+esc(m.company_name||'-')+'</td><td>'+esc(m.country||'-')+'</td>'
+      var contact=pp
+        ? '<td>'+esc(((m.contact_first_name||'')+' '+(m.contact_last_name||'')).trim()||m.contact_ref||'-')
+          +(m.contact_title?'<div class="cp-hint">'+esc(m.contact_title)+'</div>':'')
+          +(m.contact_email?'<div class="cp-hint">'+esc(m.contact_email)+'</div>':'')+'</td>'
+        : '';
+      return '<tr><td>'+esc(m.display_id||m.customer_id)+'</td><td>'+esc(m.company_name||'-')+'</td>'+contact+'<td>'+esc(m.country||'-')+'</td>'
         +'<td>'+esc((m.email_to||'-').slice(0,30))+'</td><td><span class="cp-chip">'+(LBL[m.status]||esc(m.status))+'</span></td>'
         +'<td class="'+(m.status==='failed'?'mo-fail':'mo-ok')+'">'+esc((m.error||'').slice(0,60))+'</td></tr>';
     }).join('');
-    var head='<div class="panel s-bgf8fafc" ><div class="s-dfx-jcb-aic"><b>任务 #'+id+' 名单（'+d.campaign.name+'，共 '+d.campaign.total+' 家）</b><button class="btn btn-sm btn-secondary cg-close-members">关闭</button></div>'
-      +(rows?'<table class="cp-table"><thead><tr><th>客户ID</th><th>公司</th><th>国家</th><th>收件人</th><th>状态</th><th>备注</th></tr></thead><tbody>'+rows+'</tbody></table>':'<p class="cp-hint">名单为空</p>')
+    var head='<div class="panel s-bgf8fafc" ><div class="s-dfx-jcb-aic"><b>任务 #'+id+' 名单（'+d.campaign.name+'，共 '+d.campaign.total+(pp?' 个联系人':' 家')+'）</b><button class="btn btn-sm btn-secondary cg-close-members">关闭</button></div>'
+      +(rows?'<table class="cp-table"><thead><tr><th>客户ID</th><th>公司</th>'+(pp?'<th>联系人</th>':'')+'<th>国家</th><th>收件人</th><th>状态</th><th>备注</th></tr></thead><tbody>'+rows+'</tbody></table>':'<p class="cp-hint">名单为空</p>')
       +'<div class="cp-hint">最多显示 200 家。</div></div>';
     box.innerHTML=head+box.innerHTML;
     box.querySelector('.cg-close-members').onclick=loadCampaigns;
