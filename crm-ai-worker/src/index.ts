@@ -1,5 +1,6 @@
 import { handleAdminRequest } from "./admin";
 import { LEAD_SCORE_WEIGHTS } from "./lead-score-dims";
+import { planContactPersist, type ExistingContact } from "./contact-merge";
 import { rpmLimitFor, acquireRpmSlot, rpmEnvOverride } from "./rate-limit";
 import { collectKeyPool, buildKeyOrder } from "./key-pool";
 import { getProviderState, isProviderUsable, noteProviderKeyError, noteProviderKeySuccess, noteKeyUsage, keyHealthName } from "./provider-keys";
@@ -2342,57 +2343,30 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
     // separate column; neither score influences or overwrites the other.
     const completenessScore = computeCompletenessScore(customer, analysis, verifiedSocial.length);
 
-    // Step 5: Save found contacts to contacts table
+    // Step 5: Save found contacts to contacts table.
+    // Phase 7 Stage 47: the exact-fingerprint skip alone let the same
+    // person found again with a NEW channel (email added, phone found
+    // later) land as a second row. planContactPersist keeps the skip and
+    // adds a conservative same-person rule (channel identity + compatible
+    // names → COALESCE fill-NULL merge; conflicting names never merge).
+    // Pure planner, one batch, same admission guard as before.
     if (analysis.found_contacts && analysis.found_contacts.length > 0) {
-      // Get current max seq for this company
       const maxSeqResult = await env.DB.prepare(
         `SELECT COALESCE(MAX(seq), 0) AS max_seq FROM contacts WHERE company_id = ?`
       ).bind(customer.company_id).first<{ max_seq: number }>();
-      let nextSeq = (maxSeqResult?.max_seq ?? 0) + 1;
-
-      // Load existing contact fingerprints for this company so re-researched
-      // companies don't accumulate duplicate rows on retry.
       const existing = await env.DB.prepare(
-        `SELECT first_name, last_name, email, cellphone, whatsapp FROM contacts WHERE company_id = ?`
-      ).bind(customer.company_id).all<{ first_name: string | null; last_name: string | null; email: string | null; cellphone: string | null; whatsapp: string | null }>();
-      const fingerprint = (c: { first_name?: string | null; last_name?: string | null; email?: string | null; cellphone?: string | null; whatsapp?: string | null }) =>
-        [c.first_name, c.last_name, c.email, c.cellphone, c.whatsapp].map((v) => (v || "").trim().toLowerCase()).join("|");
-      const seen = new Set((existing.results ?? []).map(fingerprint));
-
-      const contactStmts: D1PreparedStatement[] = [];
-      for (const ct of analysis.found_contacts) {
-        // Only save contacts with at least a name or email
-        const hasName = ct.first_name || ct.last_name;
-        const hasContact = ct.email || ct.cellphone || ct.whatsapp;
-        if (!hasName && !hasContact) continue;
-
-        const fp = fingerprint(ct);
-        if (seen.has(fp)) continue; // skip duplicates (within batch and vs. DB)
-        seen.add(fp);
-
-        const contactId = `${customer.display_id || customer.company_id}_${String(nextSeq).padStart(3, "0")}`;
-        contactStmts.push(
-          env.DB.prepare(
-            `INSERT OR IGNORE INTO contacts (contact_id, company_id, seq, first_name, last_name, title, email, cellphone, whatsapp, linkedin_url, department)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).bind(
-            contactId,
-            customer.company_id,
-            nextSeq,
-            ct.first_name || null,
-            ct.last_name || null,
-            ct.title || null,
-            ct.email || null,
-            ct.cellphone || null,
-            ct.whatsapp || null,
-            ct.linkedin_url || null,
-            ct.source || null,
-          )
-        );
-        nextSeq++;
-      }
-      if (contactStmts.length > 0) {
-        await env.DB.batch(contactStmts);
+        `SELECT contact_id, first_name, last_name, title, department, email, cellphone, whatsapp, linkedin_url
+         FROM contacts WHERE company_id = ?`
+      ).bind(customer.company_id).all<ExistingContact>();
+      const plan = planContactPersist({
+        existing: existing.results ?? [],
+        incoming: analysis.found_contacts,
+        companyId: customer.company_id,
+        nextSeq: (maxSeqResult?.max_seq ?? 0) + 1,
+        contactIdPrefix: `${customer.display_id || customer.company_id}_`,
+      });
+      if (plan.statements.length > 0) {
+        await env.DB.batch(plan.statements.map((s) => env.DB.prepare(s.sql).bind(...s.binds)));
       }
     }
 
