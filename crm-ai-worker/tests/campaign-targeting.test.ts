@@ -10,6 +10,7 @@ import {
 } from "../src/campaigns";
 import { LEAD_SCORE_DIMENSIONS, LEAD_SCORE_WEIGHTS } from "../src/lead-score-dims";
 import type { AdminEnv } from "../src/admin";
+import { handleAdminRequest } from "../src/admin";
 
 /* Phase 6 Stage 45 (docs/phase6-campaign-targeting.md): two additive
  * targeting dimensions over the frozen Phase 5 contract —
@@ -332,6 +333,71 @@ describe("previewSegment reflects the Phase 6 dimensions end to end", () => {
     // Signal alone: superseded rows still do not count.
     const signalsOnly = await previewSegment(env, parseSegmentFilters({ has_buying_signal: true }), null);
     expect(signalsOnly.matching).toBe(1);
+
+    db.close();
+  });
+});
+
+/* Stage 46: the 海选 pre-filter endpoint carries the new query param through
+ * handleAdminRequest — the panel checkbox is only useful if the count the
+ * operator sees is narrowed by it. */
+describe("pre-filter endpoint: has_buying_signal query param", () => {
+  const BASE = "https://worker.example";
+  const TOKEN = "correct-horse-battery-staple";
+
+  function call(env: AdminEnv, path: string): Promise<Response> {
+    return handleAdminRequest(
+      new Request(`${BASE}${path}`, {
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+      }),
+      env,
+    ) as Promise<Response>;
+  }
+
+  it("narrows the matching count to companies with current signals", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(":memory:");
+    db.exec(`
+      CREATE TABLE customers (
+        id INTEGER PRIMARY KEY, company_id TEXT, display_id TEXT, domain TEXT, status TEXT,
+        company_name TEXT, legal_name TEXT, trading_name TEXT, normalized_domain TEXT,
+        first_name TEXT, last_name TEXT, full_name TEXT, title TEXT, department TEXT, linkedin_url TEXT,
+        street_address TEXT, zip_city TEXT, country TEXT, country_code TEXT, region TEXT, city TEXT, postal_code TEXT,
+        tel TEXT, email TEXT, cellphone TEXT, whatsapp TEXT, products_services TEXT, business_tag TEXT,
+        industry TEXT, company_type TEXT, business_model TEXT, founded_year TEXT, employee_range TEXT,
+        description TEXT, target_markets TEXT, is_manufacturer TEXT, is_importer TEXT, is_distributor TEXT,
+        is_wholesaler TEXT, is_retailer TEXT, is_ecommerce TEXT, is_rental TEXT, is_oem TEXT, social_accounts TEXT,
+        full_research_text TEXT, social_accounts_verified TEXT, customer_segment TEXT,
+        product_categories TEXT, company_size TEXT, geographic_coverage TEXT,
+        personas_and_solutions TEXT, remarks TEXT, updated_at TEXT,
+        company_profile TEXT, outreach_context TEXT, buying_signals TEXT, lead_score INTEGER,
+        source_import_id TEXT, lead_score_breakdown TEXT
+      );
+      CREATE TABLE research_signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id TEXT NOT NULL,
+        signal_text TEXT NOT NULL, is_current INTEGER NOT NULL DEFAULT 1
+      );
+      INSERT INTO customers (id, company_id, status, email, company_name, country, lead_score) VALUES
+        (1,'c1','completed','a@x.com','Acme','US',90),
+        (2,'c2','completed','b@x.com','Beta','US',80),
+        (3,'c3','completed','c@x.com','Gamma','US',70);
+      INSERT INTO research_signals (customer_id, signal_text, is_current) VALUES
+        ('c1','asked for pricing',1),
+        ('c2','visited booth',0);
+    `);
+    const env = { DB: new FakeD1(db), ADMIN_PANEL_TOKEN: TOKEN } as unknown as AdminEnv;
+
+    // Without the param the endpoint behaves exactly as before (Stage 45's
+    // "default OFF" guarantee, now pinned at the HTTP surface too).
+    const before = await call(env, "/admin/api/customers/pre-filter");
+    expect(before.status).toBe(200);
+    expect(((await before.json()) as { matching: number }).matching).toBe(3);
+
+    const after = await call(env, "/admin/api/customers/pre-filter?has_buying_signal=1");
+    expect(after.status).toBe(200);
+    const body = (await after.json()) as { matching: number; sample: Array<{ company_name: string }> };
+    expect(body.matching).toBe(1);
+    expect(body.sample[0].company_name).toBe("Acme");
 
     db.close();
   });

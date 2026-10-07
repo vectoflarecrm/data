@@ -1,6 +1,8 @@
 # Phase 6 — Campaign targeting over the intelligence layers: design
 
-Status: design committed — stages 45/46 pending.
+Status: shipped in full — stages 45/46 done (targeting engine + panel wiring;
+no schema change; both dimensions default OFF, so existing payloads behave
+identically until an operator opts in).
 
 Source requirements: the Phase 4 stage reports' deferred follow-up ("campaign
 targeting over research_signals"), 建议.txt §二十一's layer pipeline (the
