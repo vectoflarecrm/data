@@ -490,6 +490,18 @@ jobs:
           echo "backfill complete: $n_sources source rows for $n_runs synthetic runs"
           [ "$n_sources" = "$n_runs" ] || { echo "Migration failed: backfill runs without matching source rows ($n_runs runs vs $n_sources sources)"; exit 1; }
 
+      - name: Migrate research_facts contact_id (Phase 4 Stage 42)
+        # Light entity resolution (phase4 §4.4): a nullable column needs no
+        # table rebuild, so existing databases take a single ALTER —
+        # duplicate-column tolerant like every Stage 17+ ALTER (re-deploys
+        # must stay green). Fresh installs already have the column from the
+        # schema.sql step above; the pragma check verifies convergence.
+        run: |
+          npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE research_facts ADD COLUMN contact_id TEXT" 2>&1 | grep -q 'duplicate column name' && echo "research_facts.contact_id already exists" || true
+          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('research_facts') WHERE name = 'contact_id'")"
+          echo "research_facts contact_id columns: $info"
+          echo "$info" | grep -q '"n": 1' || { echo "Migration failed: research_facts.contact_id missing after ALTER"; exit 1; }
+
       - name: Typecheck
         run: npm run typecheck
 

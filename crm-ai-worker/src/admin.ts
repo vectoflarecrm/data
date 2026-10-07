@@ -2581,7 +2581,25 @@ async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthCo
         // Stage 15: both quality axes on one response — fit (lead_score) and
         // data completeness are separate metrics (spec §16), never derived
         // from each other.
-        return jsonResponse({ ...customer, contacts, evidence, signals, personas, data_completeness_score: await getCustomerCompleteness(env, id) });
+        // Phase 4 Stage 42: linked facts — the current email/phone facts
+        // that entity resolution tied to a contacts row, served with the
+        // contact's name so the panel's evidence section answers "这个
+        // 邮箱是谁" at a glance. Fail-open like every typed reader.
+        let linkedFacts: Array<{ fact_type: string; fact_value: string; source_type: string | null; fetched_at: string; contact_id: string; first_name: string | null; last_name: string | null; title: string | null }> = [];
+        try {
+          const linkedRows = await env.DB.prepare(
+            `SELECT f.fact_type, f.fact_value, f.source_type, f.fetched_at, f.contact_id,
+                    c.first_name, c.last_name, c.title
+             FROM research_facts f
+             LEFT JOIN contacts c ON c.contact_id = f.contact_id AND c.company_id = f.customer_id
+             WHERE f.customer_id = ? AND f.is_current = 1 AND f.contact_id IS NOT NULL
+             ORDER BY f.id`,
+          ).bind(customer.company_id).all<{ fact_type: string; fact_value: string; source_type: string | null; fetched_at: string; contact_id: string; first_name: string | null; last_name: string | null; title: string | null }>();
+          linkedFacts = linkedRows.results ?? [];
+        } catch {
+          // pre-migration window / bare test fixture — no section
+        }
+        return jsonResponse({ ...customer, contacts, evidence, signals, personas, linked_facts: linkedFacts, data_completeness_score: await getCustomerCompleteness(env, id) });
       }
       if (request.method === "PATCH") return await updateCustomer(request, env, id, auth);
     }
@@ -3629,7 +3647,8 @@ const ADMIN_PANEL_HTML = `<!doctype html>
     +(e.source_url?'<a href="'+esc(e.source_url)+'" target="_blank" class="s-fs11-c1677d2-wbba">'+esc(e.source_url.slice(0,90))+'</a>':'')
     +'</div>'});h+='</div>';return h};
   var renderSignals=function(sv){if(!sv||!sv.length)return'';var h='<div class="section-title">🚨 采购信号 (Buying Signals)</div><div class="s-dfx-fxdcol-g8">';sv.forEach(function(s){h+='<div class="s-bgf8fafc-bd1 ol e2e8f0-br8-p10 12 s-fs13">'+esc(s.signal_text)+'</div>'});h+='</div>';return h};
-  window.openDetail=function(id){api('/admin/api/customers/'+id).then(function(c){state.selected=id;state.dirty={};$('modalTitle').textContent='客户详情 — '+esc(c.company_name||c.domain||'');var body=buildModal(c);body+=renderSignals(c.signals);body+=renderEvidence(c.evidence);body+=renderVerifiedSocial(c.social_accounts_verified);body+='<div class="section-title">👥 联系人列表</div>';body+='<div id="contactsArea"></div>';$('modalBody').innerHTML=body;var ca=document.getElementById('contactsArea');if(ca)ca.innerHTML=renderContacts(c.contacts);$('modalMsg').classList.add('hidden');$('modal').classList.add('active');document.body.style.overflow='hidden';
+  var renderLinkedFacts=function(lf){if(!lf||!lf.length)return'';var h='<div class="section-title">🔗 联系方式归属（实体关联）</div><div class="s-dfx-fxdcol-g8">';lf.forEach(function(f){var nm=([f.first_name,f.last_name].filter(Boolean).join(' ')||f.contact_id);var ttl=f.title?'（'+f.title+'）':'';var icon=f.fact_type==='phone'?'📞':'✉️';var src=f.source_type?(' · '+esc(f.source_type)):'';h+='<div class="s-bgf8fafc-bd1 ol e2e8f0-br8-p10 14-dfx-aic-g8"><span class="s-fs18">'+icon+'</span><div><div class="s-fw600-fs13 wbba">'+esc(f.fact_value)+'</div><div class="s-fs12-c475569">→ '+esc(nm)+esc(ttl)+src+' · '+esc((f.fetched_at||'').slice(0,10))+'</div></div></div>'});h+='</div>';return h};
+  window.openDetail=function(id){api('/admin/api/customers/'+id).then(function(c){state.selected=id;state.dirty={};$('modalTitle').textContent='客户详情 — '+esc(c.company_name||c.domain||'');var body=buildModal(c);body+=renderSignals(c.signals);body+=renderEvidence(c.evidence);body+=renderLinkedFacts(c.linked_facts);body+=renderVerifiedSocial(c.social_accounts_verified);body+='<div class="section-title">👥 联系人列表</div>';body+='<div id="contactsArea"></div>';$('modalBody').innerHTML=body;var ca=document.getElementById('contactsArea');if(ca)ca.innerHTML=renderContacts(c.contacts);$('modalMsg').classList.add('hidden');$('modal').classList.add('active');document.body.style.overflow='hidden';
       document.querySelectorAll('.edit-btn').forEach(function(btn){btn.onclick=function(){var key=btn.getAttribute('data-key');var row=btn.closest('.field-row');row.classList.add('editing');state.dirty[key]=true;var inp=document.getElementById('inp_'+key);if(inp&&inp.focus)inp.focus()}})}).catch(function(e){showMsg('listMessage',e.message,false)})};
   var closeModal=function(){$('modal').classList.remove('active');document.body.style.overflow='';state.selected=null;state.dirty={}};
   $('closeModal').onclick=closeModal;

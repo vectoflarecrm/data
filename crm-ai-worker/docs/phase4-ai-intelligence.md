@@ -1,11 +1,12 @@
 # Phase 4 — AI Intelligence: design
 
-Status: stages 40/41 shipped (research_signals + panel reader;
-research_personas + persona-aware outreach — reports in
-`docs/stages/stage-40-research-signals.md` /
-`docs/stages/stage-41-research-personas.md`); stage 42 pending. Same
-rules as Phase 3 — additive migrations, fail-open provenance, every
-stage green on the full suite before commit.
+Status: phases shipped in full — stages 40/41/42 done (research_signals
++ panel reader; research_personas + persona-aware outreach;
+research_profiles + research_facts.contact_id entity linkage —
+reports in `docs/stages/stage-40-research-signals.md` /
+`stage-41-research-personas.md` / `stage-42-research-profiles.md`).
+Deferred items keep their triggers: contact merge (§4.4), campaign
+targeting over signals, cache-column deprecation (§3.4).
 
 Source requirements: 建议.txt §二十一 (the layer pipeline), §十四
 (provenance questions — answered by runs/evidence/facts since Stage 14/36/37),

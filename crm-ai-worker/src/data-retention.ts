@@ -33,6 +33,10 @@
  *                         Same superseded-only policy: the current persona
  *                         set survives for the outreach prompt and the
  *                         panel; expired history is cut.
+ *   - research_profiles   profile/strategy layer, one row per run (Phase 4
+ *                         Stage 42). Same superseded-only policy: the
+ *                         current profile survives (strategy material for
+ *                         the outreach prompt); expired history is cut.
  *   - customer_imports    the raw import layer (docx 建议三). Written on
  *                         every CSV import, read by nothing today; rows carry
  *                         the full raw_json so this is the heaviest table
@@ -216,6 +220,23 @@ export async function pruneSupersededResearchPersonas(
   return pruneBefore(
     env,
     "DELETE FROM research_personas WHERE is_current = 0 AND COALESCE(valid_until, created_at) < ?",
+    cutoff,
+  );
+}
+
+/** Superseded research profiles only (is_current = 0): the current profile
+ * row of every company survives (the outreach prompt's strategy material);
+ * expired history is cut with the same policy and fallback timestamp as
+ * evidence/sources/facts/signals/personas (Phase 4 Stage 42). */
+export async function pruneSupersededResearchProfiles(
+  env: { DB: D1Database },
+  days: number,
+  now: Date = new Date(),
+): Promise<number> {
+  const cutoff = toSqlUtc(new Date(now.getTime() - days * 86_400_000));
+  return pruneBefore(
+    env,
+    "DELETE FROM research_profiles WHERE is_current = 0 AND COALESCE(valid_until, created_at) < ?",
     cutoff,
   );
 }

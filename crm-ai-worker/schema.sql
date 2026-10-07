@@ -347,13 +347,20 @@ CREATE TABLE IF NOT EXISTS research_sources (
 -- Extraction → …): one row per distinct rule-mined fact per run
 -- (fact_type 'email' | 'phone' | 'whatsapp' | 'social'). Append + supersede
 -- like evidence/sources; Phase 4 (entity resolution, personas, signals)
--- consumes this instead of re-grepping raw prose.
+-- consumes this instead of re-grepping raw prose. Stage 42 (design §4.4)
+-- adds the entity dimension: contact_id links an email/phone fact to the
+-- contacts row whose value it matches (existing databases get the column
+-- via the CI ALTER step, not a table rebuild).
 CREATE TABLE IF NOT EXISTS research_facts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   research_run_id TEXT,
   customer_id TEXT NOT NULL,
   fact_type TEXT NOT NULL,
   fact_value TEXT NOT NULL,
+  -- Phase 4 Stage 42 (§4.4): light entity resolution — the matching
+  -- contact of the SAME company (contacts.contact_id). NULL = unlinked
+  -- (no value match, or the row predates Stage 42).
+  contact_id TEXT,
   source_type TEXT,
   occurrence_count INTEGER NOT NULL DEFAULT 1,
   confidence REAL,
@@ -404,6 +411,32 @@ CREATE TABLE IF NOT EXISTS research_personas (
   valid_from TEXT,
   valid_until TEXT
 );
+
+-- Profile + strategy layer (Phase 4 Stage 42, design §4.3): one row per
+-- research run — the company_profile / outreach_context / solutions
+-- payloads that used to live only in one-shot cache columns
+-- (customers.company_profile, customers.outreach_context, and the
+-- solutions array inside personas_and_solutions), now versioned. Append +
+-- supersede like evidence/sources/facts/signals/personas: re-research
+-- keeps every version (the 3b review's documented outreach_profiles
+-- trigger — one run = one row). The cache columns stay the "latest"
+-- snapshot for readers (dual-write, §3.4); these rows keep the history.
+CREATE TABLE IF NOT EXISTS research_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  research_run_id TEXT,
+  customer_id TEXT NOT NULL,
+  company_profile_json TEXT CHECK (company_profile_json IS NULL OR json_valid(company_profile_json)),
+  strategy_json TEXT CHECK (strategy_json IS NULL OR json_valid(strategy_json)),
+  solutions_json TEXT CHECK (solutions_json IS NULL OR json_valid(solutions_json)),
+  parser_version TEXT,
+  created_at TEXT NOT NULL,
+  is_current INTEGER NOT NULL DEFAULT 1,
+  valid_from TEXT,
+  valid_until TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_research_profiles_customer ON research_profiles (customer_id, is_current);
+CREATE INDEX IF NOT EXISTS idx_research_profiles_run ON research_profiles (research_run_id);
 
 -- Raw import layer (docx 建议三): original uploaded rows are immutable; the
 -- normalized/enriched customer rows reference back to them. Re-importing the

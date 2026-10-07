@@ -196,16 +196,16 @@ describe("scheduled cron tick hosts the data prune (fail-open)", () => {
   const ctx = { waitUntil: () => {} } as unknown as ExecutionContext;
   const controller = { cron: "*/5 * * * *", scheduledTime: 0 } as unknown as ScheduledController;
 
-  it("prunes all eight tables and writes a DATA_PRUNE row with per-table counts", async () => {
+  it("prunes all nine tables and writes a DATA_PRUNE row with per-table counts", async () => {
     const db = makeDb();
     insertSendLog(db, "old@x.com", toSqlUtc(new Date(Date.now() - 40 * DAY)));
     insertSendLog(db, "new@x.com", toSqlUtc(new Date()));
     insertRun(db, "r-old", toSqlUtc(new Date(Date.now() - 40 * DAY)));
     insertEvidence(db, 1, 0, toSqlUtc(new Date(Date.now() - 40 * DAY)), toSqlUtc(new Date(Date.now() - 35 * DAY)));
     insertImport(db, "imp-old", toSqlUtc(new Date(Date.now() - 40 * DAY)));
-    // Phase 3 Stage 36/37 + Phase 4 Stage 40/41: superseded raw sources,
-    // typed facts, buying signals and buyer personas prune like superseded
-    // evidence; the current sets survive regardless of age.
+    // Phase 3 Stage 36/37 + Phase 4 Stage 40/41/42: superseded raw sources,
+    // typed facts, buying signals, buyer personas and profile rows prune
+    // like superseded evidence; the current sets survive regardless of age.
     db.exec(`
       INSERT INTO research_sources (customer_id, source_type, raw_text, fetched_at, is_current, valid_until) VALUES
         ('c1', 'website', 'superseded old', '${toSqlUtc(new Date(Date.now() - 40 * DAY))}', 0, '${toSqlUtc(new Date(Date.now() - 35 * DAY))}'),
@@ -219,6 +219,9 @@ describe("scheduled cron tick hosts the data prune (fail-open)", () => {
       INSERT INTO research_personas (research_run_id, customer_id, persona_name, persona_role, needs_json, pain_points_json, parser_version, created_at, is_current, valid_from, valid_until) VALUES
         (NULL, 'c1', 'superseded old persona', NULL, '[]', '[]', 'personas-v1', '${toSqlUtc(new Date(Date.now() - 40 * DAY))}', 0, '${toSqlUtc(new Date(Date.now() - 40 * DAY))}', '${toSqlUtc(new Date(Date.now() - 35 * DAY))}'),
         (NULL, 'c1', 'current old persona',    NULL, '[]', '[]', 'personas-v1', '${toSqlUtc(new Date(Date.now() - 40 * DAY))}', 1, '${toSqlUtc(new Date(Date.now() - 40 * DAY))}', NULL);
+      INSERT INTO research_profiles (research_run_id, customer_id, company_profile_json, strategy_json, solutions_json, parser_version, created_at, is_current, valid_from, valid_until) VALUES
+        (NULL, 'c1', '{"old":1}', NULL, '[]', 'profiles-v1', '${toSqlUtc(new Date(Date.now() - 40 * DAY))}', 0, '${toSqlUtc(new Date(Date.now() - 40 * DAY))}', '${toSqlUtc(new Date(Date.now() - 35 * DAY))}'),
+        (NULL, 'c1', '{"cur":1}',  NULL, '[]', 'profiles-v1', '${toSqlUtc(new Date(Date.now() - 40 * DAY))}', 1, '${toSqlUtc(new Date(Date.now() - 40 * DAY))}', NULL);
     `);
     const env: any = { DB: new FakeD1(db), DATA_RETENTION_DAYS: "30", GEMINI_API_KEY: "x" };
     await worker.scheduled!(controller, env, ctx);
@@ -230,6 +233,7 @@ describe("scheduled cron tick hosts the data prune (fail-open)", () => {
     expect(db.prepare("SELECT fact_value FROM research_facts").all().map((r: any) => r.fact_value)).toEqual(["current@old.io"]);
     expect(db.prepare("SELECT signal_text FROM research_signals").all().map((r: any) => r.signal_text)).toEqual(["current old signal"]);
     expect(db.prepare("SELECT persona_name FROM research_personas").all().map((r: any) => r.persona_name)).toEqual(["current old persona"]);
+    expect(db.prepare("SELECT company_profile_json FROM research_profiles").all().map((r: any) => r.company_profile_json)).toEqual(['{"cur":1}']);
     const prune = db.prepare("SELECT metadata_json FROM audit_logs WHERE action = 'DATA_PRUNE'").get() as any;
     expect(prune).toBeTruthy();
     expect(JSON.parse(prune.metadata_json)).toEqual({
@@ -241,6 +245,7 @@ describe("scheduled cron tick hosts the data prune (fail-open)", () => {
       research_facts_superseded: 1,
       research_signals_superseded: 1,
       research_personas_superseded: 1,
+      research_profiles_superseded: 1,
       customer_imports: 1,
     });
   });
@@ -259,6 +264,8 @@ describe("scheduled cron tick hosts the data prune (fail-open)", () => {
         (NULL, 'c1', 'superseded but kept signal', 'signals-v1', '${toSqlUtc(new Date(Date.now() - 400 * DAY))}', 0, '${toSqlUtc(new Date(Date.now() - 400 * DAY))}', '${toSqlUtc(new Date(Date.now() - 399 * DAY))}');
       INSERT INTO research_personas (research_run_id, customer_id, persona_name, persona_role, needs_json, pain_points_json, parser_version, created_at, is_current, valid_from, valid_until) VALUES
         (NULL, 'c1', 'superseded but kept persona', NULL, '[]', '[]', 'personas-v1', '${toSqlUtc(new Date(Date.now() - 400 * DAY))}', 0, '${toSqlUtc(new Date(Date.now() - 400 * DAY))}', '${toSqlUtc(new Date(Date.now() - 399 * DAY))}');
+      INSERT INTO research_profiles (research_run_id, customer_id, company_profile_json, strategy_json, solutions_json, parser_version, created_at, is_current, valid_from, valid_until) VALUES
+        (NULL, 'c1', '{"kept":1}', NULL, '[]', 'profiles-v1', '${toSqlUtc(new Date(Date.now() - 400 * DAY))}', 0, '${toSqlUtc(new Date(Date.now() - 400 * DAY))}', '${toSqlUtc(new Date(Date.now() - 399 * DAY))}');
     `);
     const env: any = { DB: new FakeD1(db), DATA_RETENTION_DAYS: "0", GEMINI_API_KEY: "x" };
     await worker.scheduled!(controller, env, ctx);
@@ -268,6 +275,7 @@ describe("scheduled cron tick hosts the data prune (fail-open)", () => {
     expect(db.prepare("SELECT COUNT(*) AS n FROM research_facts").get().n).toBe(1);
     expect(db.prepare("SELECT COUNT(*) AS n FROM research_signals").get().n).toBe(1);
     expect(db.prepare("SELECT COUNT(*) AS n FROM research_personas").get().n).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM research_profiles").get().n).toBe(1);
     expect(db.prepare("SELECT COUNT(*) AS n FROM admin_login_attempts").get().n).toBe(0);
     expect(db.prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'DATA_PRUNE'").get().n).toBe(0);
   });

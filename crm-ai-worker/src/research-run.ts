@@ -511,11 +511,149 @@ export async function appendResearchPersonas(env: ResearchRunEnv, params: Append
           `INSERT INTO research_personas
              (research_run_id, customer_id, persona_name, persona_role, needs_json, pain_points_json,
               parser_version, created_at, is_current, valid_from)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
         ).bind(runId, companyId, b.name, b.role, JSON.stringify(b.needs), JSON.stringify(b.painPoints), PERSONAS_PARSER_VERSION, sqlUtc(now), sqlUtc(now)),
       );
     }
     await env.DB.batch(stmts);
+  } catch (e) {
+    warnSkip(e);
+  }
+}
+
+// ── Phase 4 Stage 42: profile/strategy layer (research_profiles) ──
+// The company_profile / outreach_context / solutions payloads lived
+// only in one-shot cache columns on customers — overwritten per run,
+// history destroyed (the 3b review's documented outreach_profiles
+// trigger). One profile row per run keeps every version; the cache
+// columns stay the "latest" snapshot (dual-write, §3.4). Same stage:
+// light entity resolution — research_facts.contact_id links a run's
+// email/phone facts to the contacts its analysis found (§4.4).
+
+/** One recommended solution as returned by the AI analysis (the
+ * solutions array inside personas_and_solutions). */
+export interface ResearchSolutionEntry {
+  name: string;
+  value?: string | null;
+  target_persona?: string | null;
+}
+
+/** Writer-side bounds (defensive, same spirit as personas): at most 10
+ * solutions per run, each field capped at 200 chars. */
+export const SOLUTIONS_PER_RUN_CAP = 10;
+export const SOLUTION_FIELD_CAP = 200;
+
+/** Defensive bound for the opaque profile/strategy JSON strings: they
+ * are our own serializations of contract-bounded payloads, so anything
+ * over this cap is dropped to NULL rather than truncated — a sliced
+ * JSON string would violate the json_valid guard. */
+export const PROFILE_JSON_CAP = 20_000;
+export const PROFILES_PARSER_VERSION = "profiles-v1";
+
+export interface AppendProfileParams {
+  companyId: string;
+  runId: string | null;
+  /** Serialized customers.company_profile snapshot (null = none). */
+  companyProfileJson: string | null;
+  /** Serialized customers.outreach_context snapshot (null = none). */
+  strategyJson: string | null;
+  /** The solutions array from personas_and_solutions (bounded here). */
+  solutions: ResearchSolutionEntry[];
+  now?: Date;
+}
+
+/** Append THIS run's profile row (1:1 per run, design §4.3). The previous
+ * current row for the company is superseded (is_current = 0,
+ * valid_until = now) — never deleted — and the new row lands with
+ * is_current = 1 in one D1 batch (atomic supersede + append). The row
+ * lands even when all three payloads are empty: one run = one row is the
+ * grain — a run that produced nothing is still history. Solutions are
+ * bounded like personas (dedup by name, first occurrence wins, AI order
+ * preserved); profile/strategy JSON that exceeds PROFILE_JSON_CAP is
+ * dropped to NULL, never sliced (json_valid). Fail-open like every
+ * provenance writer. */
+export async function appendResearchProfile(env: ResearchRunEnv, params: AppendProfileParams): Promise<void> {
+  const { companyId, runId } = params;
+  const now = params.now ?? new Date();
+  const seenSolutions = new Set<string>();
+  const boundedSolutions: Array<{ name: string; value: string | null; target_persona: string | null }> = [];
+  for (const s of params.solutions) {
+    const name = (s?.name ?? "").trim().slice(0, SOLUTION_FIELD_CAP);
+    if (!name || seenSolutions.has(name)) continue;
+    seenSolutions.add(name);
+    boundedSolutions.push({
+      name,
+      value: s.value ? s.value.trim().slice(0, SOLUTION_FIELD_CAP) || null : null,
+      target_persona: s.target_persona ? s.target_persona.trim().slice(0, SOLUTION_FIELD_CAP) || null : null,
+    });
+    if (boundedSolutions.length >= SOLUTIONS_PER_RUN_CAP) break;
+  }
+  const capJson = (v: string | null): string | null =>
+    v && v.length > PROFILE_JSON_CAP ? null : v;
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE research_profiles SET is_current = 0, valid_until = ?
+         WHERE customer_id = ? AND is_current = 1`,
+      ).bind(sqlUtc(now), companyId),
+      env.DB.prepare(
+        `INSERT INTO research_profiles
+           (research_run_id, customer_id, company_profile_json, strategy_json, solutions_json,
+            parser_version, created_at, is_current, valid_from)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      ).bind(runId, companyId, capJson(params.companyProfileJson), capJson(params.strategyJson),
+        JSON.stringify(boundedSolutions), PROFILES_PARSER_VERSION, sqlUtc(now), sqlUtc(now)),
+    ]);
+  } catch (e) {
+    warnSkip(e);
+  }
+}
+
+export interface LinkFactsParams {
+  companyId: string;
+  runId: string | null;
+}
+
+/** Light entity resolution (design §4.4): link THIS run's current
+ * email/phone facts to the company's contacts by value match — emails
+ * compare case-insensitively after TRIM, phones after also stripping
+ * separators (space, hyphen, parens, dot) via nested REPLACE (SQLite's
+ * TRANSLATE is 3.47+ and absent from node:sqlite, so it cannot gate
+ * the linkage). Strictly scoped: only this run's rows
+ * (research_run_id), only contacts of the same company, never
+ * overwriting an existing link (contact_id IS NULL guard). A null run
+ * id skips linkage entirely — an unscoped UPDATE would reach other
+ * runs' orphan rows. Fail-open like every provenance writer. */
+export async function linkResearchFactsToContacts(env: ResearchRunEnv, params: LinkFactsParams): Promise<void> {
+  const { companyId, runId } = params;
+  if (!runId) return;
+  const stripSeparators = (expr: string) =>
+    `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LOWER(TRIM(${expr})), ' ', ''), '-', ''), '(', ''), ')', ''), '.', '')`;
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE research_facts SET contact_id = (
+           SELECT c.contact_id FROM contacts c
+           WHERE c.company_id = research_facts.customer_id
+             AND c.email IS NOT NULL
+             AND LOWER(TRIM(c.email)) = LOWER(TRIM(research_facts.fact_value))
+           LIMIT 1
+         )
+         WHERE research_run_id = ? AND customer_id = ? AND fact_type = 'email'
+           AND is_current = 1 AND contact_id IS NULL`,
+      ).bind(runId, companyId),
+      env.DB.prepare(
+        `UPDATE research_facts SET contact_id = (
+           SELECT c.contact_id FROM contacts c
+           WHERE c.company_id = research_facts.customer_id
+             AND c.cellphone IS NOT NULL
+             AND ${stripSeparators("c.cellphone")} = ${stripSeparators("research_facts.fact_value")}
+           LIMIT 1
+         )
+         WHERE research_run_id = ? AND customer_id = ? AND fact_type = 'phone'
+           AND is_current = 1 AND contact_id IS NULL`,
+      ).bind(runId, companyId),
+    ]);
   } catch (e) {
     warnSkip(e);
   }

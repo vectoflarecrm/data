@@ -17,10 +17,11 @@ import {
   pruneSupersededResearchFacts,
   pruneSupersededResearchSignals,
   pruneSupersededResearchPersonas,
+  pruneSupersededResearchProfiles,
   resolveDataRetentionDays,
 } from "./data-retention";
 import { cleanupExpiredChallenges } from "./auth/webauthn";
-import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, appendResearchSignals, appendResearchPersonas, hasCurrentResearchFacts, capResearchSourcesToBudget, readSavedResearchText, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, type ResearchPersonaEntry, FACTS_PER_RUN_CAP } from "./research-run";
+  import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, appendResearchSignals, appendResearchPersonas, appendResearchProfile, linkResearchFactsToContacts, hasCurrentResearchFacts, capResearchSourcesToBudget, readSavedResearchText, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, type ResearchPersonaEntry, type ResearchSolutionEntry, FACTS_PER_RUN_CAP } from "./research-run";
 
 export interface CustomerRow {
   id: number;
@@ -965,6 +966,30 @@ function extractPersonaEntries(payload: unknown): ResearchPersonaEntry[] {
       persona_role: typeof rec.role === "string" ? rec.role.trim() || null : null,
       needs: strList(rec.needs),
       pain_points: strList(rec.pain_points),
+    });
+  }
+  return out;
+}
+
+/** Phase 4 Stage 42: pull the solutions array out of the raw
+ * personas_and_solutions payload (same unknown-typed contract as
+ * extractPersonaEntries — the JSON contract is enforced by the AI
+ * response schema). Blank names drop; the profile writer applies its
+ * own dedup + caps (solutions_json is its 1:1 row's payload). */
+function extractSolutionEntries(payload: unknown): ResearchSolutionEntry[] {
+  if (typeof payload !== "object" || payload === null) return [];
+  const solutions = (payload as Record<string, unknown>).solutions;
+  if (!Array.isArray(solutions)) return [];
+  const out: ResearchSolutionEntry[] = [];
+  for (const s of solutions) {
+    if (typeof s !== "object" || s === null) continue;
+    const rec = s as Record<string, unknown>;
+    const name = typeof rec.name === "string" ? rec.name.trim() : "";
+    if (!name) continue;
+    out.push({
+      name,
+      value: typeof rec.value === "string" ? rec.value.trim() || null : null,
+      target_persona: typeof rec.target_persona === "string" ? rec.target_persona.trim() || null : null,
     });
   }
   return out;
@@ -2312,6 +2337,18 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
       }
     }
 
+    // Phase 4 Stage 42 (design §4.4): light entity resolution — this run's
+    // email/phone facts get their entity dimension. The facts were written
+    // pre-AI from the raw segments; the contacts just persisted above carry
+    // the AI-found people. linkResearchFactsToContacts matches by value
+    // (email exact, phone separator-insensitive), strictly scoped to this
+    // run's rows and this company's contacts, and never overwrites an
+    // existing link. Fail-open end to end.
+    await linkResearchFactsToContacts(env, {
+      companyId: customer.company_id,
+      runId: researchRunId,
+    });
+
     // Field-level evidence trail (docx 建议七, Stage 14 spec §15): append-only.
     // New rows supersede per field via is_current/valid_from/valid_until — the
     // previous verification pass stays queryable — and carry the run id plus
@@ -2346,6 +2383,21 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
       companyId: customer.company_id,
       runId: researchRunId,
       personas: extractPersonaEntries(analysis.personas_and_solutions),
+    });
+
+    // Phase 4 Stage 42 (design §4.3): the three outreach payloads get a
+    // versioned home — one research_profiles row per run (the 3b review's
+    // documented outreach_profiles trigger). Dual-write: the customers
+    // cache columns above stay the "latest" snapshot; these rows keep
+    // every version. The row always lands, even with all payloads
+    // absent — a run that produced nothing is still history. Fail-open
+    // end to end.
+    await appendResearchProfile(env, {
+      companyId: customer.company_id,
+      runId: researchRunId,
+      companyProfileJson,
+      strategyJson: outreachContextJson,
+      solutions: extractSolutionEntries(analysis.personas_and_solutions),
     });
 
     await completeResearchRun(env, researchRunId, provenance);
@@ -2483,8 +2535,9 @@ export default {
         const researchFactsSuperseded = await pruneSupersededResearchFacts(env, dataDays);
         const researchSignalsSuperseded = await pruneSupersededResearchSignals(env, dataDays);
         const researchPersonasSuperseded = await pruneSupersededResearchPersonas(env, dataDays);
+        const researchProfilesSuperseded = await pruneSupersededResearchProfiles(env, dataDays);
         const customerImports = await pruneCustomerImports(env, dataDays);
-        const total = gmailSendLog + researchRuns + evidenceSuperseded + researchSourcesSuperseded + researchFactsSuperseded + researchSignalsSuperseded + researchPersonasSuperseded + customerImports;
+        const total = gmailSendLog + researchRuns + evidenceSuperseded + researchSourcesSuperseded + researchFactsSuperseded + researchSignalsSuperseded + researchPersonasSuperseded + researchProfilesSuperseded + customerImports;
         if (total > 0) {
           await writeAuditLog(env, null, {
             actorUserId: null,
@@ -2501,6 +2554,7 @@ export default {
               research_facts_superseded: researchFactsSuperseded,
               research_signals_superseded: researchSignalsSuperseded,
               research_personas_superseded: researchPersonasSuperseded,
+              research_profiles_superseded: researchProfilesSuperseded,
               customer_imports: customerImports,
             },
           });
