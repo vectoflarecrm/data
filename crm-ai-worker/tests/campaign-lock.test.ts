@@ -72,7 +72,7 @@ function makeDb(): any {
     CREATE TABLE outreach_campaign_members (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       campaign_id INTEGER NOT NULL, customer_id INTEGER NOT NULL,
-      outreach_email_id INTEGER, status TEXT NOT NULL DEFAULT 'pending',
+      contact_id INTEGER, outreach_email_id INTEGER, status TEXT NOT NULL DEFAULT 'pending',
       error TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE outreach_campaigns (

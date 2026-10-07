@@ -7,6 +7,7 @@ import {
   setCampaignStatus,
   deleteCampaign,
   listCampaigns,
+  listCampaignMembers,
   getCampaign,
   createGroup,
   listGroups,
@@ -101,8 +102,12 @@ async function makeDb() {
     CREATE TABLE outreach_campaigns (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, brand_name TEXT,
       group_id INTEGER, filters TEXT, total INTEGER, status TEXT, last_error TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
-    CREATE TABLE outreach_campaign_members (campaign_id INTEGER, customer_id INTEGER, status TEXT,
+    CREATE TABLE outreach_campaign_members (campaign_id INTEGER, customer_id INTEGER, contact_id INTEGER, status TEXT,
       outreach_email_id INTEGER, error TEXT, PRIMARY KEY (campaign_id, customer_id));
+    CREATE TABLE contacts (
+      id INTEGER PRIMARY KEY, contact_id TEXT UNIQUE, company_id TEXT, seq INTEGER NOT NULL DEFAULT 1,
+      first_name TEXT, last_name TEXT, title TEXT, email TEXT
+    );
     CREATE TABLE gmail_send_log (id INTEGER PRIMARY KEY AUTOINCREMENT, outreach_email_id INTEGER,
       recipient TEXT, status TEXT, sent_at TEXT);
   `);
@@ -649,5 +654,215 @@ describe("deleteCampaign", () => {
   it("errors on an unknown campaign id", async () => {
     const { env } = await makeDb();
     await expect(runCampaignSend(env, 999, 5, sendDeps(async () => ({ ok: true })))).rejects.toThrow(/不存在/);
+  });
+});
+
+/* ── Phase 8 Stage 50: per-person campaigns (docs/phase8-persona-campaigns.md §2.2/§2.5) ──
+ * The members PK stays (campaign_id, customer_id), so a per-person snapshot
+ * takes exactly ONE email-bearing contact per matched company — lowest seq,
+ * ties by id. Generation routes through the contact generator (Stage 49)
+ * with (brand, customer, contact) dedup. */
+
+function seedContact(id: number, companyId: string, seq: number, email: string | null, first = "A") {
+  return `INSERT INTO contacts (id, contact_id, company_id, seq, first_name, email)
+          VALUES (${id}, 'p${id}', '${companyId}', ${seq}, '${first}', ${email === null ? "NULL" : `'${email}'`})`;
+}
+
+type ContactGenerateFn = CampaignDeps["generateContacts"];
+
+function contactDraftWriter(db: any): ContactGenerateFn {
+  return async (_env, _brand, pairs) => {
+    const drafts = pairs.map((p) => {
+      const r = db
+        .prepare(
+          "INSERT INTO outreach_emails (customer_id, brand_name, subject, body, status, contact_id) VALUES (?,?,?,?,'draft',?)",
+        )
+        .run(p.customer_id, "Afarer", "S" + p.contact_id, "B" + p.contact_id, p.contact_id);
+      return { customer_id: p.customer_id, contact_id: p.contact_id, email_id: Number(r.lastInsertRowid) };
+    });
+    return { generated: drafts.length, already: [], drafts, errors: [] };
+  };
+}
+
+function contactAdoptingWriter(db: any): ContactGenerateFn {
+  return async (_env, _brand, pairs) => {
+    const already = pairs.flatMap((p) => {
+      const row = db
+        .prepare(
+          "SELECT id, status FROM outreach_emails WHERE customer_id = ? AND brand_name = ? AND contact_id = ? ORDER BY id LIMIT 1",
+        )
+        .get(p.customer_id, "Afarer", p.contact_id) as { id: number; status: string } | undefined;
+      return row
+        ? [{ customer_id: p.customer_id, contact_id: p.contact_id, email_id: row.id, status: row.status }]
+        : [];
+    });
+    return { generated: 0, already, drafts: [], errors: [] };
+  };
+}
+
+function contactFailingWriter(message: (p: { customer_id: number; contact_id: number }) => string): ContactGenerateFn {
+  return async (_env, _brand, pairs) => ({
+    generated: 0,
+    already: [],
+    drafts: [],
+    errors: pairs.map((p) => ({ customer_id: p.customer_id, contact_id: p.contact_id, message: message(p) })),
+  });
+}
+
+const companyGeneratorMustNotRun: GenerateFn = async () => {
+  throw new Error("company generator must not run for a per-person campaign");
+};
+
+describe("createCampaign: per-person snapshot", () => {
+  it("takes the lowest-seq email-bearing contact per company, ties by id", async () => {
+    const { db, env } = await makeDb();
+    // c1 has NO company mailbox (per-person must not require one) and two
+    // email contacts: seq 2 (id 11) and seq 1 (id 12) → picks 12.
+    db.exec(seedCustomer(1, "Spain", null));
+    db.exec(seedContact(11, "c1", 2, "a2@x.com"));
+    db.exec(seedContact(12, "c1", 1, "a1@x.com"));
+    // c2's only contact has no email → the company drops out.
+    db.exec(seedCustomer(2, "Spain", "b@x.com"));
+    db.exec(seedContact(21, "c2", 1, null));
+    // c3 has no contacts at all → drops out.
+    db.exec(seedCustomer(3, "France", "c@x.com"));
+    // c4 has a seq tie (both seq 1): lower id wins.
+    db.exec(seedCustomer(4, "France", "d@x.com"));
+    db.exec(seedContact(41, "c4", 1, "d1@x.com"));
+    db.exec(seedContact(42, "c4", 1, "d2@x.com"));
+
+    const created = await createCampaign(env, {
+      brandName: "Afarer",
+      filters: parseSegmentFilters({ per_person: true, has_email: false }),
+    });
+    // companies = matched companies; total = members with a usable contact.
+    expect(created.companies).toBe(4);
+    expect(created.total).toBe(2);
+    const members = db
+      .prepare("SELECT customer_id, contact_id FROM outreach_campaign_members ORDER BY customer_id")
+      .all() as Array<{ customer_id: number; contact_id: number | null }>;
+    expect(members).toEqual([
+      { customer_id: 1, contact_id: 12 },
+      { customer_id: 4, contact_id: 41 },
+    ]);
+    // The grain travels with the campaign via its filters JSON (§2.2).
+    const row = db.prepare("SELECT filters FROM outreach_campaigns WHERE id = ?").get(created.id) as { filters: string };
+    const stored = JSON.parse(row.filters) as { per_person: boolean; has_email: boolean };
+    expect(stored.per_person).toBe(true);
+    expect(stored.has_email).toBe(false);
+  });
+
+  it("refuses an all-ineligible segment instead of creating an empty campaign", async () => {
+    const { db, env } = await makeDb();
+    db.exec(seedCustomer(1, "Spain", "a@x.com"));
+    db.exec(seedContact(11, "c1", 1, null)); // contact without an email
+    await expect(
+      createCampaign(env, { brandName: "Afarer", filters: parseSegmentFilters({ per_person: true }) }),
+    ).rejects.toThrow(/没有可发送的联系人/);
+  });
+});
+
+describe("runCampaignGenerate: per-person dispatch", () => {
+  it("routes per-person members to the contact generator and never the company one", async () => {
+    const { db, env } = await makeDb();
+    db.exec(seedCustomer(1, "Spain", null));
+    db.exec(seedContact(12, "c1", 1, "a1@x.com"));
+    const created = await createCampaign(env, {
+      brandName: "Afarer",
+      filters: parseSegmentFilters({ per_person: true, has_email: false }),
+    });
+
+    const r = await runCampaignGenerate(env, created.id, 10, {
+      generate: companyGeneratorMustNotRun,
+      generateContacts: contactDraftWriter(db),
+    });
+    expect(r.generated).toBe(1);
+    expect(r.processed).toBe(1);
+
+    const member = db
+      .prepare("SELECT status, outreach_email_id, contact_id FROM outreach_campaign_members")
+      .get() as { status: string; outreach_email_id: number; contact_id: number };
+    expect(member.status).toBe("generated");
+    expect(member.contact_id).toBe(12);
+    const email = db
+      .prepare("SELECT contact_id FROM outreach_emails WHERE id = ?")
+      .get(member.outreach_email_id) as { contact_id: number };
+    expect(email.contact_id).toBe(12);
+  });
+
+  it("adopts THIS contact's existing draft, never the company mailbox's", async () => {
+    const { db, env } = await makeDb();
+    db.exec(seedCustomer(1, "Spain", "company@x.com"));
+    db.exec(seedContact(12, "c1", 1, "a1@x.com"));
+    // Company-grain draft (contact_id NULL): must NOT be adopted for the
+    // per-person member — that would email the wrong recipient.
+    db.exec("INSERT INTO outreach_emails (customer_id, brand_name, status, contact_id) VALUES (1,'Afarer','draft',NULL)");
+    const contactDraft = db
+      .prepare("INSERT INTO outreach_emails (customer_id, brand_name, status, contact_id) VALUES (1,'Afarer','draft',12)")
+      .run();
+    const contactDraftId = Number(contactDraft.lastInsertRowid);
+    const created = await createCampaign(env, {
+      brandName: "Afarer",
+      filters: parseSegmentFilters({ per_person: true, has_email: true }),
+    });
+
+    const r = await runCampaignGenerate(env, created.id, 10, {
+      generate: companyGeneratorMustNotRun,
+      generateContacts: contactAdoptingWriter(db),
+    });
+    expect(r.skipped).toBe(1);
+    const member = db
+      .prepare("SELECT status, outreach_email_id FROM outreach_campaign_members")
+      .get() as { status: string; outreach_email_id: number };
+    expect(member.status).toBe("generated");
+    expect(member.outreach_email_id).toBe(contactDraftId);
+  });
+
+  it("splits a terminal pair failure from a retryable one", async () => {
+    const { db, env } = await makeDb();
+    db.exec(seedCustomer(1, "Spain", null));
+    db.exec(seedContact(11, "c1", 1, "a1@x.com"));
+    db.exec(seedCustomer(2, "Spain", null));
+    db.exec(seedContact(21, "c2", 1, "b1@x.com"));
+    const created = await createCampaign(env, {
+      brandName: "Afarer",
+      filters: parseSegmentFilters({ per_person: true, has_email: false }),
+    });
+
+    const r = await runCampaignGenerate(env, created.id, 10, {
+      generate: companyGeneratorMustNotRun,
+      generateContacts: contactFailingWriter((p) => (p.contact_id === 11 ? "该联系人没有邮箱" : "429 rate limit")),
+    });
+    // Terminal pair failure is recorded; the rate-limited pair stays pending.
+    expect(r.failed).toBe(1);
+    const rows = db
+      .prepare("SELECT customer_id, status, error FROM outreach_campaign_members ORDER BY customer_id")
+      .all() as Array<{ customer_id: number; status: string; error: string | null }>;
+    expect(rows[0]).toMatchObject({ customer_id: 1, status: "failed", error: "该联系人没有邮箱" });
+    expect(rows[1]).toMatchObject({ customer_id: 2, status: "pending", error: null });
+    expect((await getCampaign(env, created.id))!.last_error).toMatch(/该联系人没有邮箱/);
+  });
+
+  it("listCampaignMembers exposes the contact columns for the panel", async () => {
+    const { db, env } = await makeDb();
+    db.exec(seedCustomer(1, "Spain", null));
+    db.exec(
+      `INSERT INTO contacts (id, contact_id, company_id, seq, first_name, last_name, title, email)
+       VALUES (12, 'p12', 'c1', 1, 'Ana', 'López', 'Buyer', 'ana@x.com')`,
+    );
+    const created = await createCampaign(env, {
+      brandName: "Afarer",
+      filters: parseSegmentFilters({ per_person: true, has_email: false }),
+    });
+    const result = await listCampaignMembers(env, created.id, { limit: 50, offset: 0 });
+    const item = (result.items as Array<Record<string, unknown>>)[0];
+    expect(item.contact_id).toBe(12);
+    expect(item.contact_ref).toBe("p12");
+    expect(item.contact_first_name).toBe("Ana");
+    expect(item.contact_last_name).toBe("López");
+    expect(item.contact_title).toBe("Buyer");
+    expect(item.contact_email).toBe("ana@x.com");
+    // Company columns still come through for the shared table.
+    expect(item.company_name).toBe("Co 1");
   });
 });

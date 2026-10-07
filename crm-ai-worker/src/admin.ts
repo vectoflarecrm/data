@@ -1066,6 +1066,10 @@ async function preFilterCustomers(request: Request, env: AdminEnv, auth: AdminAu
     // Phase 6 (design §4): the pre-filter narrows by current buying signals
     // too — useful for counting and for the action=queue re-research path.
     has_buying_signal: url.searchParams.get("has_buying_signal") === "1",
+    // Phase 8 (design §2.1): persona targeting shares this builder, so the
+    // 海选 screen can count and re-queue by the same persona_role values the
+    // campaign screen will use.
+    persona_roles: url.searchParams.get("persona_roles") ?? "",
   });
   const action = url.searchParams.get("action") ?? "count";
   const { clause, binds } = segmentClause(filters, { requireCompleted: true, requireEmail: hasEmail });
@@ -2449,7 +2453,9 @@ async function handleCampaignApi(request: Request, env: AdminEnv, auth: AdminAut
         brand: brandName,
         group_id: groupId,
         members: created.total,
+        companies: created.companies,
         capped: created.capped,
+        per_person: filters.perPerson,
       });
       return jsonResponse({ ok: true, ...created });
     }
