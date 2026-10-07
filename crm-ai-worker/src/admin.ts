@@ -1063,6 +1063,9 @@ async function preFilterCustomers(request: Request, env: AdminEnv, auth: AdminAu
     products: url.searchParams.get("products") ?? "",
     min_lead_score: url.searchParams.get("min_lead_score") ?? 0,
     has_email: hasEmail,
+    // Phase 6 (design §4): the pre-filter narrows by current buying signals
+    // too — useful for counting and for the action=queue re-research path.
+    has_buying_signal: url.searchParams.get("has_buying_signal") === "1",
   });
   const action = url.searchParams.get("action") ?? "count";
   const { clause, binds } = segmentClause(filters, { requireCompleted: true, requireEmail: hasEmail });

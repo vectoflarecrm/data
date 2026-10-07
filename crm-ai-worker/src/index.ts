@@ -1,4 +1,5 @@
 import { handleAdminRequest } from "./admin";
+import { LEAD_SCORE_WEIGHTS } from "./lead-score-dims";
 import { rpmLimitFor, acquireRpmSlot, rpmEnvOverride } from "./rate-limit";
 import { collectKeyPool, buildKeyOrder } from "./key-pool";
 import { getProviderState, isProviderUsable, noteProviderKeyError, noteProviderKeySuccess, noteKeyUsage, keyHealthName } from "./provider-keys";
@@ -1974,6 +1975,7 @@ export {
   buildUserPrompt,
   AI_SYSTEM_PROMPT,
   RELEVANCE_PRECHECK_SYSTEM,
+  LEAD_SCORE_WEIGHTS,
 };
 
 // Exported for unit tests (tests/concurrency/research-claim.test.ts): the
@@ -2018,16 +2020,11 @@ export interface LeadScoreBreakdown {
   strategic_value: number;
 }
 
-// §十八 dimension weights — pinned in the phase 5 design (§4); they sum to
-// 100 exactly, which tests/lead-score-v2.test.ts asserts.
-export const LEAD_SCORE_WEIGHTS = {
-  icp_fit: 30,
-  product_fit: 20,
-  buyer_role: 10,
-  buying_signal: 15,
-  reachability: 15,
-  strategic_value: 10,
-};
+// §十八 dimension weights live in ./lead-score-dims (Phase 6 Stage 45: a
+// leaf module — campaign targeting validates dimension floors against them
+// and cannot import the worker entry, index → admin → campaigns). Imported
+// for the engine here and re-exported below so tests/lead-score-v2.test.ts
+// keeps importing from this module unchanged.
 
 export function computeLeadScoreV2(a: CustomerAnalysis): LeadScoreBreakdown {
   // Irrelevant companies are worthless by definition — the AI precheck marks

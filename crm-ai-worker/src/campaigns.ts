@@ -1,4 +1,5 @@
 import { AdminEnv } from "./admin";
+import { LEAD_SCORE_DIMENSIONS, LEAD_SCORE_WEIGHTS, type LeadScoreDimension } from "./lead-score-dims";
 import { generateOutreachForCustomerIds, attachmentLangForCountry } from "./outreach";
 import { getQuota, sendOutreachEmail, sendDelayMs, GmailConfigError } from "./gmail";
 import { sendWithStateMachine, type StateSendResult } from "./outreach-send";
@@ -38,6 +39,13 @@ export interface SegmentFilters {
   excludeSent: boolean;
   /** Manual pick from the customer list; AND-ed with the filters above. */
   customerIds: number[];
+  /** Phase 6 (design §2.1): only companies whose CURRENT research run
+   * produced buying signals (EXISTS over research_signals, is_current = 1). */
+  hasBuyingSignal: boolean;
+  /** Phase 6 (design §2.2): per-dimension minimums over the six lead-score
+   * dimensions (json_extract on customers.lead_score_breakdown). A NULL
+   * breakdown reads as 0 — a floor asserts knowledge. */
+  dimensionFloors: Partial<Record<LeadScoreDimension, number>>;
 }
 
 export const EMPTY_FILTERS: SegmentFilters = {
@@ -49,6 +57,8 @@ export const EMPTY_FILTERS: SegmentFilters = {
   hasEmail: true,
   excludeSent: true,
   customerIds: [],
+  hasBuyingSignal: false,
+  dimensionFloors: {},
 };
 
 function sanitizeList(value: unknown, max: number, label: string): string[] {
@@ -79,6 +89,32 @@ function sanitizeIds(value: unknown): number[] {
   return [...new Set(ids)];
 }
 
+/** Phase 6 (design §2.2): validate per-dimension floors against the pinned
+ * Phase 5 weights (single server-side home: lead-score-dims). Unknown keys
+ * are typos — rejected, not ignored; zero floors are dropped (no-op);
+ * out-of-range values are rejected like min_lead_score. */
+function sanitizeDimensionFloors(value: unknown): Partial<Record<LeadScoreDimension, number>> {
+  if (value === undefined || value === null) return {};
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("dimension_floors 必须是 JSON 对象");
+  }
+  const raw = value as Record<string, unknown>;
+  const floors: Partial<Record<LeadScoreDimension, number>> = {};
+  for (const key of Object.keys(raw)) {
+    if (!(LEAD_SCORE_DIMENSIONS as readonly string[]).includes(key)) {
+      throw new Error(`dimension_floors 未知维度: ${key.slice(0, 50)}`);
+    }
+    const dim = key as LeadScoreDimension;
+    const num = Number(raw[key]);
+    const max = LEAD_SCORE_WEIGHTS[dim];
+    if (!Number.isInteger(num) || num < 0 || num > max) {
+      throw new Error(`${dim} 门槛必须在 0-${max} 之间`);
+    }
+    if (num > 0) floors[dim] = num;
+  }
+  return floors;
+}
+
 /** Parse + validate an untrusted filter payload (API body or stored JSON). */
 export function parseSegmentFilters(input: unknown): SegmentFilters {
   if (input === undefined || input === null) return { ...EMPTY_FILTERS };
@@ -99,6 +135,10 @@ export function parseSegmentFilters(input: unknown): SegmentFilters {
     hasEmail: raw.has_email === undefined ? true : raw.has_email !== false && raw.has_email !== 0,
     excludeSent: raw.exclude_sent === undefined ? true : raw.exclude_sent !== false && raw.exclude_sent !== 0,
     customerIds: sanitizeIds(raw.customer_ids ?? raw.customerIds),
+    hasBuyingSignal: raw.has_buying_signal === undefined
+      ? false
+      : raw.has_buying_signal !== false && raw.has_buying_signal !== 0,
+    dimensionFloors: sanitizeDimensionFloors(raw.dimension_floors ?? raw.dimensionFloors),
   };
 }
 
@@ -112,6 +152,8 @@ export function serializeFilters(f: SegmentFilters): string {
     has_email: f.hasEmail,
     exclude_sent: f.excludeSent,
     customer_ids: f.customerIds,
+    has_buying_signal: f.hasBuyingSignal,
+    dimension_floors: f.dimensionFloors,
   });
 }
 
@@ -168,6 +210,33 @@ export function buildSegmentWhere(
   if (filters.minLeadScore > 0) {
     where.push(`${t}lead_score >= ?`);
     binds.push(filters.minLeadScore);
+  }
+  // Phase 6 (design §2.1): only companies whose CURRENT research run
+  // produced buying signals. The outer reference MUST be explicitly
+  // qualified — inside the EXISTS an unqualified customer_id would resolve
+  // to the inner research_signals column (always-true self-comparison,
+  // matching every company as soon as any signal row exists anywhere).
+  // Bare mode uses the original table name (no alias to shadow it);
+  // aliased mode must use the alias (SQLite forbids the original name
+  // once aliased).
+  if (filters.hasBuyingSignal) {
+    const outer = opts.table ? `${opts.table}.company_id` : `customers.company_id`;
+    where.push(
+      `EXISTS (SELECT 1 FROM research_signals rs WHERE rs.customer_id = ${outer} AND rs.is_current = 1)`,
+    );
+  }
+  // Phase 6 (design §2.2): per-dimension floors in the pinned dimension
+  // order — deterministic SQL shape. COALESCE reads a NULL breakdown
+  // (pre-Stage-43 rows, precheck skips) as 0: a floor asserts knowledge,
+  // so unscored rows are excluded, never silently passed.
+  for (const dim of LEAD_SCORE_DIMENSIONS) {
+    const floor = filters.dimensionFloors[dim];
+    if (floor !== undefined && floor > 0) {
+      where.push(
+        `COALESCE(CAST(json_extract(${t}lead_score_breakdown, '$.${dim}') AS INTEGER), 0) >= ?`,
+      );
+      binds.push(floor);
+    }
   }
   if (filters.customerIds.length) {
     where.push(`${t}id IN (${filters.customerIds.map(() => "?").join(",")})`);
