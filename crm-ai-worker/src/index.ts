@@ -16,10 +16,11 @@ import {
   pruneSupersededResearchSources,
   pruneSupersededResearchFacts,
   pruneSupersededResearchSignals,
+  pruneSupersededResearchPersonas,
   resolveDataRetentionDays,
 } from "./data-retention";
 import { cleanupExpiredChallenges } from "./auth/webauthn";
-import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, appendResearchSignals, hasCurrentResearchFacts, capResearchSourcesToBudget, readSavedResearchText, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, FACTS_PER_RUN_CAP } from "./research-run";
+import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, appendResearchSignals, appendResearchPersonas, hasCurrentResearchFacts, capResearchSourcesToBudget, readSavedResearchText, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, type ResearchPersonaEntry, FACTS_PER_RUN_CAP } from "./research-run";
 
 export interface CustomerRow {
   id: number;
@@ -939,6 +940,34 @@ async function fetchAdditionalSources(companyName: string, domain: string, env: 
   return sources.length > 0
     ? `\n\n--- 额外信息来源 (${sourceLabels.join(", ")}) ---\n${sources.join("\n")}`
     : "";
+}
+
+/** Phase 4 Stage 41: pull the personas array out of the raw
+ * personas_and_solutions payload (typed `unknown` in CustomerAnalysis —
+ * the JSON contract is enforced by the AI response schema, not the TS
+ * type). Blank names drop; the writer applies its own dedup + caps. */
+function extractPersonaEntries(payload: unknown): ResearchPersonaEntry[] {
+  if (typeof payload !== "object" || payload === null) return [];
+  const personas = (payload as Record<string, unknown>).personas;
+  if (!Array.isArray(personas)) return [];
+  const strList = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? value.filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim())
+      : [];
+  const out: ResearchPersonaEntry[] = [];
+  for (const p of personas) {
+    if (typeof p !== "object" || p === null) continue;
+    const rec = p as Record<string, unknown>;
+    const name = typeof rec.name === "string" ? rec.name.trim() : "";
+    if (!name) continue;
+    out.push({
+      persona_name: name,
+      persona_role: typeof rec.role === "string" ? rec.role.trim() || null : null,
+      needs: strList(rec.needs),
+      pain_points: strList(rec.pain_points),
+    });
+  }
+  return out;
 }
 
 function parseAnalysis(content: string): CustomerAnalysis {
@@ -2308,6 +2337,17 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
       signals: analysis.buying_signals.map((s) => ({ signal_text: s })),
     });
 
+    // Phase 4 Stage 41: buyer personas become typed rows with history; the
+    // outreach prompt (rows first, cache-column fallback) and the panel
+    // read the current set. Dual-write — the cache column stays the
+    // "latest" snapshot. Supersedes even for an empty set: the cache
+    // column always stores the full object, empty arrays included.
+    await appendResearchPersonas(env, {
+      companyId: customer.company_id,
+      runId: researchRunId,
+      personas: extractPersonaEntries(analysis.personas_and_solutions),
+    });
+
     await completeResearchRun(env, researchRunId, provenance);
     return {
       update: env.DB.prepare(`
@@ -2442,8 +2482,9 @@ export default {
         const researchSourcesSuperseded = await pruneSupersededResearchSources(env, dataDays);
         const researchFactsSuperseded = await pruneSupersededResearchFacts(env, dataDays);
         const researchSignalsSuperseded = await pruneSupersededResearchSignals(env, dataDays);
+        const researchPersonasSuperseded = await pruneSupersededResearchPersonas(env, dataDays);
         const customerImports = await pruneCustomerImports(env, dataDays);
-        const total = gmailSendLog + researchRuns + evidenceSuperseded + researchSourcesSuperseded + researchFactsSuperseded + researchSignalsSuperseded + customerImports;
+        const total = gmailSendLog + researchRuns + evidenceSuperseded + researchSourcesSuperseded + researchFactsSuperseded + researchSignalsSuperseded + researchPersonasSuperseded + customerImports;
         if (total > 0) {
           await writeAuditLog(env, null, {
             actorUserId: null,
@@ -2459,6 +2500,7 @@ export default {
               research_sources_superseded: researchSourcesSuperseded,
               research_facts_superseded: researchFactsSuperseded,
               research_signals_superseded: researchSignalsSuperseded,
+              research_personas_superseded: researchPersonasSuperseded,
               customer_imports: customerImports,
             },
           });

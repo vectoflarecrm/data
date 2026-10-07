@@ -2564,10 +2564,24 @@ async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthCo
         } catch {
           // pre-migration window / bare test fixture — no section
         }
+        // Phase 4 Stage 41: current buyer personas from the typed layer.
+        // The panel prefers these rows and falls back to the
+        // personas_and_solutions JSON (pre-stage snapshots); the outreach
+        // prompt reads them through loadPersonasForOutreach. Fail-open.
+        let personas: Array<{ persona_name: string; persona_role: string | null; needs_json: string | null; pain_points_json: string | null }> = [];
+        try {
+          const personaRows = await env.DB.prepare(
+            `SELECT persona_name, persona_role, needs_json, pain_points_json
+             FROM research_personas WHERE customer_id = ? AND is_current = 1 ORDER BY id`,
+          ).bind(customer.company_id).all<{ persona_name: string; persona_role: string | null; needs_json: string | null; pain_points_json: string | null }>();
+          personas = personaRows.results ?? [];
+        } catch {
+          // pre-migration window / bare test fixture — JSON fallback only
+        }
         // Stage 15: both quality axes on one response — fit (lead_score) and
         // data completeness are separate metrics (spec §16), never derived
         // from each other.
-        return jsonResponse({ ...customer, contacts, evidence, signals, data_completeness_score: await getCustomerCompleteness(env, id) });
+        return jsonResponse({ ...customer, contacts, evidence, signals, personas, data_completeness_score: await getCustomerCompleteness(env, id) });
       }
       if (request.method === "PATCH") return await updateCustomer(request, env, id, auth);
     }
@@ -3579,11 +3593,16 @@ const ADMIN_PANEL_HTML = `<!doctype html>
       else if(f.key==='is_manufacturer'||f.key==='is_importer'||f.key==='is_distributor'||f.key==='is_wholesaler'||f.key==='is_retailer'||f.key==='is_ecommerce'||f.key==='is_rental'||f.key==='is_oem'){h+=(val==1||val==='1'?'✅ 是':'❌ 否')}
       else if(f.key==='social_accounts'&&val){var sa=null;try{sa=JSON.parse(val)}catch(e){}
         if(sa&&sa.length>0){sa.forEach(function(a){h+='<div class="s-mb4">🔗 '+esc(a.platform||'')+': '+(a.username?'@'+esc(a.username):'')+(a.url?' <a href="'+esc(a.url)+'" target="_blank">'+esc(a.url)+'</a>':'')+'</div>'})}else{h+='<em class="s-faint">暂无社交账号</em>'}}
-      else if(f.key==='personas_and_solutions'&&val){var parsed=null;try{parsed=JSON.parse(val)}catch(e){}
-        if(parsed){var pl=parsed.personas||[];var sl=parsed.solutions||[];
-          if(pl.length>0){h+='<div class="section-title">👤 客户画像</div>';pl.forEach(function(p){h+='<div class="persona-card"><h4>'+esc(p.name||'未知角色')+'</h4><ul>';(p.needs||[]).forEach(function(n){h+='<li>'+esc(n)+'</li>'});h+='</ul></div>'})}
+      else if(f.key==='personas_and_solutions'&&(val||(c.personas&&c.personas.length))){var parsed=null;if(val){try{parsed=JSON.parse(val)}catch(e){}}
+        var pl=[];var sl=[];
+        if(c.personas&&c.personas.length){c.personas.forEach(function(p){var pn=null,pp=null;try{pn=JSON.parse(p.needs_json||'[]')}catch(e){}try{pp=JSON.parse(p.pain_points_json||'[]')}catch(e){}
+          pl.push({name:p.persona_name,role:p.persona_role,needs:pn||[],pain_points:pp||[]})});sl=(parsed&&parsed.solutions)||[]}
+        else if(parsed){pl=parsed.personas||[];sl=parsed.solutions||[]}
+        if(!parsed&&(!c.personas||!c.personas.length)){h+='<pre class="s-wspw-fs12">'+esc(val)+'</pre>'}
+        else{
+          if(pl.length>0){h+='<div class="section-title">👤 客户画像</div>';pl.forEach(function(p){h+='<div class="persona-card"><h4>'+esc(p.name||'未知角色')+(p.role?' — '+esc(p.role):'')+'</h4>';if(p.needs&&p.needs.length){h+='<ul>';p.needs.forEach(function(n){h+='<li>需求: '+esc(n)+'</li>'});h+='</ul>'}if(p.pain_points&&p.pain_points.length){h+='<ul>';p.pain_points.forEach(function(n){h+='<li>痛点: '+esc(n)+'</li>'});h+='</ul>'}h+='</div>')}
           if(sl.length>0){h+='<div class="section-title">💡 解决方案</div>';sl.forEach(function(s){h+='<div class="solution-card"><h4>'+esc(s.name||'')+'</h4><p>'+esc(s.value||'')+'</p></div>'})}
-          if(pl.length===0&&sl.length===0){h+='<em class="s-faint">暂无数据</em>'}}else{h+='<pre class="s-wspw-fs12">'+esc(val)+'</pre>'}}
+          if(pl.length===0&&sl.length===0){h+='<em class="s-faint">暂无数据</em>'}}}
       else if(f.key==='remarks'){h+='<div class="s-wspw-lh16">'+(esc(val)||'<em class="s-faint">暂无备注</em>')+'</div>'}
       else if(isReadonly&&f.type==='textarea'){h+='<pre class="s-wspw-fs12">'+(esc(val)||'<em class="s-faint">-</em>')+'</pre>'}
       else{h+=esc(val)||'<em class="s-faint">-</em>'}

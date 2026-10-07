@@ -47,6 +47,9 @@ export const FACTS_PARSER_VERSION = "facts-v1";
 /** Version of the buying-signal writer (research_signals rows). */
 export const SIGNALS_PARSER_VERSION = "signals-v1";
 
+/** Version of the buyer-persona writer (research_personas rows). */
+export const PERSONAS_PARSER_VERSION = "personas-v1";
+
 /** Which provider/model actually produced an analysis. Stamped by the
  * analyzeWithX callers in index.ts at their single success return point. */
 export interface AnalysisProvenance {
@@ -418,6 +421,98 @@ export async function appendResearchSignals(env: ResearchRunEnv, params: AppendS
              (research_run_id, customer_id, signal_text, parser_version, created_at, is_current, valid_from)
            VALUES (?, ?, ?, ?, ?, 1, ?)`,
         ).bind(runId, companyId, text, SIGNALS_PARSER_VERSION, sqlUtc(now), sqlUtc(now)),
+      );
+    }
+    await env.DB.batch(stmts);
+  } catch (e) {
+    warnSkip(e);
+  }
+}
+
+// ── Phase 4 Stage 41: buyer-persona layer (research_personas) ──
+// Personas lived only in the customers.personas_and_solutions JSON cache
+// — overwritten per run and consumed solely by the panel's JSON renderer;
+// the outreach prompt never saw them. Typed rows keep the history
+// (append + supersede, never delete) and feed the persona-aware outreach
+// prompt and the panel's persona section.
+
+/** One buyer persona as returned by the AI analysis. */
+export interface ResearchPersonaEntry {
+  persona_name: string;
+  persona_role?: string | null;
+  needs?: string[];
+  pain_points?: string[];
+}
+
+/** Writer-side bounds (defensive, same spirit as signals/facts): at most
+ * 10 personas per run, name/role capped at 120 chars, at most 6
+ * needs/pain points per persona, each capped at 200 chars. */
+export const PERSONAS_PER_RUN_CAP = 10;
+export const PERSONA_NAME_CAP = 120;
+export const PERSONA_LIST_CAP = 6;
+export const PERSONA_ITEM_CAP = 200;
+
+export interface AppendPersonasParams {
+  companyId: string;
+  runId: string | null;
+  personas: ResearchPersonaEntry[];
+  now?: Date;
+}
+
+function boundPersonaList(values: string[] | undefined): string[] {
+  const out: string[] = [];
+  if (!values) return out;
+  for (const v of values) {
+    const text = (v ?? "").trim().slice(0, PERSONA_ITEM_CAP);
+    if (!text) continue;
+    out.push(text);
+    if (out.length >= PERSONA_LIST_CAP) break;
+  }
+  return out;
+}
+
+/** Append one attempt's buyer personas. The previous current set for the
+ * company is superseded (is_current = 0, valid_until = now) — never
+ * deleted — and the new rows land with is_current = 1 in one D1 batch
+ * (atomic supersede + append). Duplicates collapse by persona_name
+ * (first occurrence wins, AI order preserved); entries without a name
+ * are dropped before the caps apply. needs/pain_points are stored as
+ * JSON string arrays.
+ *
+ * Like appendResearchSignals, the supersede runs even for an EMPTY
+ * input: the current set must always mirror the latest run's judgment,
+ * exactly like the cache column (which always stores the full
+ * personas_and_solutions object, empty arrays included) — anything else
+ * would resurface personas from an older run as if this run had
+ * confirmed them. Fail-open like every provenance writer. */
+export async function appendResearchPersonas(env: ResearchRunEnv, params: AppendPersonasParams): Promise<void> {
+  const { companyId, runId } = params;
+  const now = params.now ?? new Date();
+  const seen = new Set<string>();
+  const bounded: Array<{ name: string; role: string | null; needs: string[]; painPoints: string[] }> = [];
+  for (const p of params.personas) {
+    const name = (p?.persona_name ?? "").trim().slice(0, PERSONA_NAME_CAP);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const role = p.persona_role ? p.persona_role.trim().slice(0, PERSONA_NAME_CAP) || null : null;
+    bounded.push({ name, role, needs: boundPersonaList(p.needs), painPoints: boundPersonaList(p.pain_points) });
+    if (bounded.length >= PERSONAS_PER_RUN_CAP) break;
+  }
+  try {
+    const stmts: D1PreparedStatement[] = [
+      env.DB.prepare(
+        `UPDATE research_personas SET is_current = 0, valid_until = ?
+         WHERE customer_id = ? AND is_current = 1`,
+      ).bind(sqlUtc(now), companyId),
+    ];
+    for (const b of bounded) {
+      stmts.push(
+        env.DB.prepare(
+          `INSERT INTO research_personas
+             (research_run_id, customer_id, persona_name, persona_role, needs_json, pain_points_json,
+              parser_version, created_at, is_current, valid_from)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+        ).bind(runId, companyId, b.name, b.role, JSON.stringify(b.needs), JSON.stringify(b.painPoints), PERSONAS_PARSER_VERSION, sqlUtc(now), sqlUtc(now)),
       );
     }
     await env.DB.batch(stmts);

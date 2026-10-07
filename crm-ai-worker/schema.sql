@@ -382,6 +382,29 @@ CREATE TABLE IF NOT EXISTS research_signals (
   valid_until TEXT
 );
 
+-- Buyer-persona layer (Phase 4 Stage 41, 建议 §二十一): one row per
+-- persona per research run, typed from the AI analysis instead of living
+-- only in the customers.personas_and_solutions JSON cache (overwritten
+-- per run; consumed solely by the panel's JSON renderer — the outreach
+-- prompt never saw it). Append + supersede like evidence/sources/facts/
+-- signals — re-research keeps persona history; the current set feeds the
+-- persona-aware outreach prompt (Stage 41) and the panel (which falls
+-- back to the JSON column for pre-stage snapshots).
+CREATE TABLE IF NOT EXISTS research_personas (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  research_run_id TEXT,
+  customer_id TEXT NOT NULL,
+  persona_name TEXT NOT NULL,
+  persona_role TEXT,
+  needs_json TEXT CHECK (needs_json IS NULL OR json_valid(needs_json)),
+  pain_points_json TEXT CHECK (pain_points_json IS NULL OR json_valid(pain_points_json)),
+  parser_version TEXT,
+  created_at TEXT NOT NULL,
+  is_current INTEGER NOT NULL DEFAULT 1,
+  valid_from TEXT,
+  valid_until TEXT
+);
+
 -- Raw import layer (docx 建议三): original uploaded rows are immutable; the
 -- normalized/enriched customer rows reference back to them. Re-importing the
 -- same file never destroys original data.
@@ -688,6 +711,9 @@ CREATE INDEX IF NOT EXISTS idx_research_facts_run ON research_facts(research_run
 -- the per-run history slice.
 CREATE INDEX IF NOT EXISTS idx_research_signals_customer ON research_signals(customer_id, is_current);
 CREATE INDEX IF NOT EXISTS idx_research_signals_run ON research_signals(research_run_id);
+
+CREATE INDEX IF NOT EXISTS idx_research_personas_customer ON research_personas(customer_id, is_current);
+CREATE INDEX IF NOT EXISTS idx_research_personas_run ON research_personas(research_run_id);
 
 -- The §18.1 UNIQUE indexes — customers(domain), api_configs(provider,
 -- key_fingerprint), contacts.contact_id and contacts(company_id, seq) — are

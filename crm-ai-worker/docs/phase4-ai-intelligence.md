@@ -1,7 +1,9 @@
 # Phase 4 — AI Intelligence: design
 
-Status: stage 40 shipped (research_signals + panel reader, report in
-`docs/stages/stage-40-research-signals.md`); stages 41/42 pending. Same
+Status: stages 40/41 shipped (research_signals + panel reader;
+research_personas + persona-aware outreach — reports in
+`docs/stages/stage-40-research-signals.md` /
+`docs/stages/stage-41-research-personas.md`); stage 42 pending. Same
 rules as Phase 3 — additive migrations, fail-open provenance, every
 stage green on the full suite before commit.
 
