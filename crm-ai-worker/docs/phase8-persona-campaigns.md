@@ -48,14 +48,24 @@ for existing payloads.
 
 `outreach_campaign_members` gains `contact_id INTEGER NULL` — NULL means
 company grain (every existing row; existing campaigns untouched),
-non-NULL means "this member is (customer, contact)". Snapshot for a
-per-person campaign = every EMAIL-BEARING contact of every matched
-company (contacts.email non-empty; a company with no such contact simply
-contributes no members — the create response reports the count). New
-unique index `UNIQUE (campaign_id, customer_id, contact_id)` + INSERT OR
-IGNORE (the existing PK already guarantees company-grain uniqueness; the
-index extends it to the pair grain; SQLite treats NULL as distinct so the
-index never conflicts with legacy rows).
+non-NULL means "this member sends to that contact". The table's PK
+`(campaign_id, customer_id)` pins the grain: **one member row per
+company either way**, so a per-person snapshot takes exactly ONE
+email-bearing contact per matched company (lowest seq — the first
+contact the research found; a company with no email-bearing contact
+contributes no member, and the create response reports the count). No
+new unique index needed — the PK already guarantees it.
+
+"Send to SEVERAL contacts of the same company in one campaign" is
+deliberately out of scope: it would require rebuilding the members PK
+(the 0019 FK-rebuild precedent exists, but the business case is thin —
+one brand mailing two mailboxes at the same company in one sweep looks
+like spam, not personalization). Deferred with a trigger: an operator
+actually asking for it. The (brand, customer, contact) dedup (§2.3) is
+what keeps the door open — a LATER campaign can target a different
+contact at the same company, while the same contact never gets the same
+brand twice. That is the per-person dedup phase4 §4.4 armed, and it is
+exactly what Phase 7's merged contact rows make reliable.
 
 ### 2.3 Email grain: `outreach_emails.contact_id`
 
@@ -111,9 +121,9 @@ inter-call delay, one AI call per draft, key rotation — all unchanged.
 
 ## 3. Migration (additive only)
 
-- `schema.sql`: the two nullable columns inside the CREATEs + the new
-  unique index + `idx_outreach_contact (brand_name, customer_id,
-  contact_id)` for the dedup lookups.
+- `schema.sql`: the two nullable columns inside the CREATEs +
+  `idx_outreach_contact (brand_name, customer_id, contact_id)` for the
+  dedup lookups. No members index/PK change (§2.2).
 - `migrations/0027_campaign_contact_grain.sql`: change record; existing
   databases get the columns/indexes via the operator's idempotent ALTER
   block (Stage 17+ precedent — nullable columns, no rebuild).
@@ -133,8 +143,14 @@ inter-call delay, one AI call per draft, key rotation — all unchanged.
 
 ## 5. Out of scope
 
+- Several contacts of the SAME company in one campaign (needs a members
+  PK rebuild — §2.2's deferred trigger; the triple-grain dedup already
+  supports a later campaign choosing a different contact).
 - Automatic persona↔contact role matching beyond the AI's prompt-level
   matching (no new heuristic machinery — the prompt rule suffices).
+- "Best contact" selection beyond lowest-seq (e.g. role-priority
+  picking) — an input UI question, deferred with the first operator
+  feedback.
 - Per-person excludeSent browsing UI, contact-grain quota views.
 - Sending to contact cellphone/whatsapp channels (email only).
 - Cross-campaign per-person suppression lists (the triple-grain dedup is
