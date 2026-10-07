@@ -79,6 +79,15 @@ CREATE TABLE IF NOT EXISTS customers (
   buying_signals TEXT,
   source_import_id TEXT,
   data_completeness_score INTEGER,
+  -- Phase 5 (建议 §十八): six-dimension decomposition of lead_score —
+  -- {version, icp_fit, product_fit, buyer_role, buying_signal,
+  -- reachability, strategic_value} JSON, weights pinned in
+  -- docs/phase5-lead-score-v2.md §4. Latest-snapshot cache written in the
+  -- same UPDATE as lead_score (one writer per fact; no total inside — the
+  -- integer column stays the total's only home). NULL on rows that predate
+  -- Stage 43 or were skipped by the relevance precheck. Existing databases
+  -- get the column via the CI ALTER step (deploy-worker.yml).
+  lead_score_breakdown TEXT,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

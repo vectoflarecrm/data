@@ -1964,7 +1964,7 @@ async function runRelevancePrecheck(
 }
 
 // Exported for unit tests (tests/relevance.test.ts, tests/prompt-injection.test.ts,
-// tests/score-separation.test.ts).
+// tests/score-separation.test.ts, tests/lead-score-v2.test.ts).
 export {
   parseRelevanceVerdict,
   isRelevancePrecheckEnabled,
@@ -2001,37 +2001,95 @@ function isRetryableAiError(error: unknown): boolean {
 // Lead score (docx 建议二/九): SQL-targetable 0-100 score so the panel can
 // filter "only research/contact the best" without re-running AI. Deterministic
 // rules over already-verified facts — no extra AI cost.
-function computeLeadScore(a: CustomerAnalysis): number {
+//
+// Phase 5 (建议 §十八, design docs/phase5-lead-score-v2.md): the score is
+// decomposed into six named dimensions — ICP fit / product fit / buyer role /
+// buying signal / reachability / strategic value. The total contract is
+// frozen (0-100, same consumers); the breakdown is cached on
+// customers.lead_score_breakdown beside the total. Pure over the analysis
+// object — no AI calls, no DB reads.
+export interface LeadScoreBreakdown {
+  version: "lead-score-v2";
+  icp_fit: number;
+  product_fit: number;
+  buyer_role: number;
+  buying_signal: number;
+  reachability: number;
+  strategic_value: number;
+}
+
+// §十八 dimension weights — pinned in the phase 5 design (§4); they sum to
+// 100 exactly, which tests/lead-score-v2.test.ts asserts.
+export const LEAD_SCORE_WEIGHTS = {
+  icp_fit: 30,
+  product_fit: 20,
+  buyer_role: 10,
+  buying_signal: 15,
+  reachability: 15,
+  strategic_value: 10,
+};
+
+export function computeLeadScoreV2(a: CustomerAnalysis): LeadScoreBreakdown {
   // Irrelevant companies are worthless by definition — the AI precheck marks
   // them segment=不相关 with score 0, so the SQL-based histogram/filter can
   // never surface one as a lead regardless of which fields were populated.
-  if (a.customer_segment.includes("不相关")) return 0;
-  let score = 0;
-  // Segment value: wholesale buyers outweigh end users.
+  if (a.customer_segment.includes("不相关")) {
+    return {
+      version: "lead-score-v2",
+      icp_fit: 0,
+      product_fit: 0,
+      buyer_role: 0,
+      buying_signal: 0,
+      reachability: 0,
+      strategic_value: 0,
+    };
+  }
+  // ICP fit: wholesale buyers outweigh end users (V1 segment tiering).
+  let icpFit = 0;
   const seg = a.customer_segment.toLowerCase();
-  if (seg.includes("distributor")) score += 30;
-  else if (seg.includes("dealer")) score += 25;
-  else if (seg.includes("oem")) score += 25;
-  else if (seg.includes("wholesaler")) score += 25;
-  else if (seg.includes("e-commerce")) score += 15;
-  else if (seg.includes("retailer")) score += 10;
-  else if (seg.includes("user") || seg.includes("service")) score += 5;
-  // Product relevance: matches our catalogue.
+  if (seg.includes("distributor")) icpFit = LEAD_SCORE_WEIGHTS.icp_fit;
+  else if (seg.includes("dealer") || seg.includes("oem") || seg.includes("wholesaler")) icpFit = 25;
+  else if (seg.includes("e-commerce")) icpFit = 15;
+  else if (seg.includes("retailer")) icpFit = 10;
+  else if (seg.includes("user") || seg.includes("service")) icpFit = 5;
+  // Product fit: matches our catalogue.
   const cats = (a.product_categories ?? "").toLowerCase();
-  if (cats && !cats.includes("信息不足")) score += 20;
-  // Reachability: an email is the strongest outreach channel.
-  const hasEmail = a.found_contacts.some((c) => c.email);
-  if (hasEmail) score += 20;
-  else if (a.found_contacts.length > 0) score += 10;
-  // Decision-maker quality: named contacts beat generic inboxes.
-  const named = a.found_contacts.filter((c) => c.first_name || c.last_name).length;
-  if (named > 0) score += 10;
-  // Signals of active buying intent.
-  if (a.buying_signals.length > 0) score += 10;
-  // Data completeness proxy: verified coverage/size fields.
-  if (a.company_size && !a.company_size.includes("信息不足")) score += 5;
-  if (a.geographic_coverage && !a.geographic_coverage.includes("信息不足")) score += 5;
-  return Math.min(100, score);
+  const productFit = cats && !cats.includes("信息不足") ? LEAD_SCORE_WEIGHTS.product_fit : 0;
+  // Buyer role: a named decision-maker beats role-only personas.
+  const hasNamedContact = a.found_contacts.some((c) => c.first_name || c.last_name);
+  const hasRolePersona = extractPersonaEntries(a.personas_and_solutions).some((p) => p.persona_role);
+  const buyerRole = hasNamedContact ? LEAD_SCORE_WEIGHTS.buyer_role : hasRolePersona ? 5 : 0;
+  // Buying signal: active purchase intent.
+  const buyingSignal = a.buying_signals.length > 0 ? LEAD_SCORE_WEIGHTS.buying_signal : 0;
+  // Reachability: an email is the strongest outreach channel, phone/WhatsApp
+  // the runner-up, any other contact a weak signal.
+  let reachability = 0;
+  if (a.found_contacts.some((c) => c.email)) reachability = LEAD_SCORE_WEIGHTS.reachability;
+  else if (a.found_contacts.some((c) => c.cellphone || c.whatsapp)) reachability = 8;
+  else if (a.found_contacts.length > 0) reachability = 4;
+  // Strategic value: verified coverage/size fields.
+  let strategicValue = 0;
+  if (a.company_size && !a.company_size.includes("信息不足")) strategicValue += 5;
+  if (a.geographic_coverage && !a.geographic_coverage.includes("信息不足")) strategicValue += 5;
+  return {
+    version: "lead-score-v2",
+    icp_fit: icpFit,
+    product_fit: productFit,
+    buyer_role: buyerRole,
+    buying_signal: buyingSignal,
+    reachability,
+    strategic_value: strategicValue,
+  };
+}
+
+function computeLeadScore(a: CustomerAnalysis): number {
+  // Total contract frozen (design §3.2): the V2 dimension sum, capped at 100
+  // (the weights sum to exactly 100; the clamp is belt-and-braces).
+  const b = computeLeadScoreV2(a);
+  return Math.min(
+    100,
+    b.icp_fit + b.product_fit + b.buyer_role + b.buying_signal + b.reachability + b.strategic_value,
+  );
 }
 
 // Stage 15 (spec §16): data completeness is a SEPARATE quality axis from the
@@ -2262,7 +2320,7 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
       return {
         update: env.DB.prepare(`
           UPDATE customers
-          SET status = 'completed', customer_segment = '不相关', lead_score = 0, remarks = ?, updated_at = CURRENT_TIMESTAMP
+          SET status = 'completed', customer_segment = '不相关', lead_score = 0, lead_score_breakdown = NULL, remarks = ?, updated_at = CURRENT_TIMESTAMP
           WHERE id = ? AND status = 'processing'
         `).bind(skipRemarks, customer.id),
         outcome: "completed",
@@ -2279,6 +2337,10 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
     const outreachContextJson = analysis.outreach_context ? JSON.stringify(analysis.outreach_context) : null;
     const buyingSignalsJson = analysis.buying_signals.length ? JSON.stringify(analysis.buying_signals) : null;
     const leadScore = computeLeadScore(analysis);
+    // Phase 5 (建议 §十八): six-dimension decomposition cached beside the
+    // total — dual-write in the same UPDATE, one writer per fact (the total
+    // stays lead_score's; the JSON carries no total, design §4.1).
+    const leadScoreBreakdownJson = JSON.stringify(computeLeadScoreV2(analysis));
     // Stage 15 (spec §16): independent quality axis — separate formula,
     // separate column; neither score influences or overwrites the other.
     const completenessScore = computeCompletenessScore(customer, analysis, verifiedSocial.length);
@@ -2404,9 +2466,9 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
     return {
       update: env.DB.prepare(`
         UPDATE customers
-        SET status = 'completed', customer_segment = ?, product_categories = ?, company_size = ?, geographic_coverage = ?, personas_and_solutions = ?, company_profile = ?, outreach_context = ?, buying_signals = ?, lead_score = ?, data_completeness_score = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
+        SET status = 'completed', customer_segment = ?, product_categories = ?, company_size = ?, geographic_coverage = ?, personas_and_solutions = ?, company_profile = ?, outreach_context = ?, buying_signals = ?, lead_score = ?, lead_score_breakdown = ?, data_completeness_score = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ? AND status = 'processing'
-      `).bind(analysis.customer_segment, analysis.product_categories, analysis.company_size, analysis.geographic_coverage, personas, companyProfileJson, outreachContextJson, buyingSignalsJson, leadScore, completenessScore, remarks, customer.id),
+      `).bind(analysis.customer_segment, analysis.product_categories, analysis.company_size, analysis.geographic_coverage, personas, companyProfileJson, outreachContextJson, buyingSignalsJson, leadScore, leadScoreBreakdownJson, completenessScore, remarks, customer.id),
       outcome: "completed",
     };
   } catch (error) {

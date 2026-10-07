@@ -1,0 +1,34 @@
+-- Phase 5 Stage 43 — customers.lead_score_breakdown (建议 §十八).
+--
+-- The lead score's six-dimension decomposition (docs/phase5-lead-score-v2.md
+-- §4): {version, icp_fit, product_fit, buyer_role, buying_signal,
+-- reachability, strategic_value}, weights pinned there (30/20/10/15/15/10,
+-- summing to exactly 100 — asserted in tests/lead-score-v2.test.ts).
+--
+-- Storage shape: a LATEST-SNAPSHOT CACHE column, not a history table. The
+-- engine (computeLeadScoreV2 in src/index.ts) is pure over the analysis
+-- object; the breakdown is serialized next to the total in the SAME
+-- processCustomer UPDATE — one writer per fact, no drift window, and no
+-- total inside the JSON (customers.lead_score stays the total's only
+-- home). A per-run lead_scores history table (建议 §十三's future shape)
+-- is deferred with a trigger: score-trend display or dimension-level
+-- campaign filters wanting history. Rows researched before this stage keep
+-- their V1 total with a NULL breakdown; the panel degrades to total-only
+-- display. No backfill — the breakdown accumulates from the next research
+-- run, exactly like the Phase 4 layers (Stage 37 precedent).
+--
+-- Paths writing it:
+--   completed analysis  lead_score_breakdown = <V2 JSON>
+--   relevance skip      lead_score_breakdown = NULL (segment 不相关,
+--                       lead_score = 0 — no dimensions for a precheck
+--                       verdict)
+--
+-- JSON validity is guarded writer-side (engine-generated, fixed shape,
+-- < 200 chars — no writer cap needed, unlike admin-editable JSON columns).
+--
+-- Existing databases: the column arrives via the dedicated CI step in
+-- deploy-worker.yml (single ALTER, duplicate-column tolerant like every
+-- Stage 17+ ALTER); fresh installs get it inside the schema.sql CREATE
+-- directly. Plain TEXT without a table-level CHECK — SQLite does not
+-- retro-apply CREATE constraints to ALTERed-in columns anyway, and the
+-- guard would only ever protect the single engine writer.
