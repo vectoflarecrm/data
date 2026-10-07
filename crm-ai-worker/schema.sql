@@ -161,6 +161,12 @@ CREATE TABLE IF NOT EXISTS outreach_emails (
   -- Post-V2 Stage 33: the admin request (X-Request-ID) that generated this
   -- draft — shortens the traceability chain (audit row ↔ business row).
   request_id TEXT,
+  -- Phase 8 Stage 49: contact grain for per-person campaigns. NULL = the
+  -- company mailbox (every pre-Phase-8 row — semantics unchanged); non-NULL
+  -- = the draft goes to that contact's own address. The brand dedup key
+  -- becomes (brand_name, customer_id, contact_id) — company-grain lookups
+  -- filter contact_id IS NULL, per-person lookups match it exactly.
+  contact_id INTEGER,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (customer_id) REFERENCES customers(id)
 );
@@ -174,6 +180,11 @@ ON outreach_emails(idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_outreach_send_lock
 ON outreach_emails(status, locked_at);
+
+-- Phase 8 Stage 49: backs the (brand, customer, contact) dedup lookups of
+-- both grains (company queries filter contact_id IS NULL on this index).
+CREATE INDEX IF NOT EXISTS idx_outreach_contact
+ON outreach_emails(brand_name, customer_id, contact_id);
 
 -- API key health tracking (anti-ban: a key that returns 429/quota-exhausted is
 -- disabled until its cooldown expires, so we never hammer an exhausted key)
@@ -517,6 +528,12 @@ CREATE INDEX IF NOT EXISTS idx_campaigns_brand ON outreach_campaigns(brand_name,
 CREATE TABLE IF NOT EXISTS outreach_campaign_members (
   campaign_id INTEGER NOT NULL,
   customer_id INTEGER NOT NULL,
+  -- Phase 8 Stage 49: per-person campaigns — the contact this member's
+  -- draft goes to. NULL = company grain (all pre-Phase-8 campaigns). The
+  -- PK pins one row per company either way, so a per-person snapshot takes
+  -- exactly one email-bearing contact per matched company (lowest seq,
+  -- docs/phase8 §2.2).
+  contact_id INTEGER,
   -- pending | generated | sent | skipped | failed
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'generated', 'sent', 'skipped', 'failed')),

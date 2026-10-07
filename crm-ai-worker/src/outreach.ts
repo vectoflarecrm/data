@@ -385,6 +385,18 @@ export interface OutreachPersona {
 /** Prompt-side bound: at most 5 personas ground one email. */
 export const PERSONAS_PROMPT_CAP = 5;
 
+/* Phase 8 Stage 49: the concrete contact a per-person draft goes to.
+ * When present it overrides the company-level first_name/last_name/
+ * title/email in the prompt — the persona-angle rule then matches the
+ * recipient's own title against the persona list. */
+export interface OutreachRecipient {
+  contact_id: number;
+  first_name: string | null;
+  last_name: string | null;
+  title: string | null;
+  email: string;
+}
+
 function parseStringArray(raw: string | null): string[] {
   if (!raw) return [];
   try {
@@ -453,10 +465,17 @@ function personasFromCacheColumn(raw: string | null): OutreachPersona[] {
 export function buildOutreachPrompt(
   brand: BrandConfig,
   company: OutreachCompany,
-  personas: OutreachPersona[] = []
+  personas: OutreachPersona[] = [],
+  recipient: OutreachRecipient | null = null,
 ): string {
-  const contactName = [company.first_name, company.last_name].filter(Boolean).join(" ") || "Sir/Madam";
-  const firstName = company.first_name || "there";
+  // Stage 49: per-person drafts address the contact, not the company
+  // mailbox — the same prompt shape, recipient fields overridden.
+  const contactName = recipient
+    ? [recipient.first_name, recipient.last_name].filter(Boolean).join(" ") || "Sir/Madam"
+    : [company.first_name, company.last_name].filter(Boolean).join(" ") || "Sir/Madam";
+  const firstName = (recipient ? recipient.first_name : company.first_name) || "there";
+  const contactTitle = (recipient ? recipient.title : company.title) || "职位未知";
+  const contactEmail = recipient ? recipient.email : (company.email || "未知");
   const language = getCountryLanguage(company.country);
   const isEnglish = language.startsWith("English");
   // Structured, AI-distilled profile beats raw page dumps: short, factual and
@@ -509,8 +528,8 @@ ${brand.signature}` : ""}
 - 公司名称：${company.company_name || "未知"}
 - 客户ID：${company.display_id || company.company_id}
 - 网站：${company.domain || "未知"}
-- 联系人：${contactName}（${company.title || "职位未知"}）
-- 邮箱：${company.email || "未知"}
+- 联系人：${contactName}（${contactTitle}）
+- 邮箱：${contactEmail}
 - 国家：${company.country || "未知"}
 - 客户所在国家官方语言：**${language}**
 - 经营产品：${company.products_services || "未知"}
@@ -520,6 +539,9 @@ ${brand.signature}` : ""}
 ${profileSection}
 ${outreachSection}
 ${personaSection}
+${recipient ? `## 本封邮件的收件人
+这封邮件直接发送给联系人本人：${contactName}（${contactTitle}，邮箱 ${contactEmail}），不是泛泛的公司邮箱。请以该联系人的职位与职责视角组织卖点切入，并在可用时匹配上方画像中对应角色的关心点与痛点。
+` : ""}
 
 ## 写作要求
 
@@ -595,18 +617,22 @@ async function loadBrandForOutreach(env: AdminEnv, brandName: string): Promise<B
 /* Generate and persist one draft. Throws on AI/DB failure so both the
  * brand-keyword sweep and the targeted campaign path report per-customer
  * errors the same way. requestId (Stage 33) lands on the row so the draft
- * traces straight to the admin request (and its GENERATE_EMAIL audit row). */
+ * traces straight to the admin request (and its GENERATE_EMAIL audit row).
+ * recipient (Stage 49, per-person campaigns): when set, the draft goes to
+ * that contact's own address and the row records contact_id — the
+ * (brand, customer, contact) dedup key's third leg. */
 async function generateDraftForCustomer(
   env: AdminEnv,
   brand: BrandConfig,
   customer: OutreachCustomer,
   requestId: string | null = null,
+  recipient: OutreachRecipient | null = null,
 ): Promise<number> {
   // Stage 41: persona grounding — current research_personas rows, cache
   // column fallback. One extra indexed read per draft; fail-open to no
   // section (the pre-Stage-41 prompt shape) when neither source has data.
   const personas = await loadPersonasForOutreach(env, customer.company_id, customer.personas_and_solutions);
-  const prompt = buildOutreachPrompt(brand, customer, personas);
+  const prompt = buildOutreachPrompt(brand, customer, personas, recipient);
   // Deterministic key per company: customer.id picks the start key so load
   // spreads across the Gemini pool; rotation only happens on failure.
   const result = await callAiForOutreach(env, prompt, customer.id);
@@ -615,8 +641,8 @@ async function generateDraftForCustomer(
   // Enforce the {subject, body} string contract here — anything else a
   // hijacked or injected reply carries (a different "to", instructions,
   // exotic value types) is structurally ignored: the recipient below is
-  // always the customer's own address from our database, never a value
-  // taken from the model output.
+  // always an address from our own database (company row or contact row),
+  // never a value taken from the model output.
   const subject = typeof result.subject === "string" ? result.subject.trim() : "";
   const body = typeof result.body === "string" ? result.body.trim() : "";
   if (!subject || !body) throw new Error("AI 返回缺少有效的 subject/body");
@@ -624,20 +650,21 @@ async function generateDraftForCustomer(
   const inserted = await env.DB.prepare(`
     INSERT INTO outreach_emails
       (customer_id, company_id, display_id, company_name, email_to,
-       product_category, brand_name, subject, body, status, request_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)
+       product_category, brand_name, subject, body, status, request_id, contact_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
   `)
     .bind(
       customer.id,
       customer.company_id,
       customer.display_id,
       customer.company_name,
-      customer.email,
+      recipient ? recipient.email : customer.email,
       brand.product_category,
       brand.brand_name,
       subject,
       body,
-      requestId
+      requestId,
+      recipient ? recipient.contact_id : null
     )
     .run();
 
@@ -677,7 +704,7 @@ export async function generateOutreachEmails(
       AND (${keywordClauses.join(" OR ")})
       AND id NOT IN (
         SELECT customer_id FROM outreach_emails
-        WHERE brand_name = ? AND customer_id IS NOT NULL
+        WHERE brand_name = ? AND customer_id IS NOT NULL AND contact_id IS NULL
       )
     ORDER BY id
     LIMIT ?
@@ -721,13 +748,15 @@ export async function generateOutreachForCustomerIds(
   if (unique.length === 0) return { generated: 0, already: [], drafts: [], errors: [] };
 
   // D1 caps a bound IN list; chunk so a large campaign member set still works.
+  // contact_id IS NULL (Stage 49): company grain only — a per-person draft
+  // must not suppress the company draft, and vice versa.
   const placeholders = (n: number) => Array(n).fill("?").join(",");
   const existing: Array<{ customer_id: number; email_id: number; status: string }> = [];
   for (let i = 0; i < unique.length; i += 100) {
     const chunk = unique.slice(i, i + 100);
     const rows = await env.DB.prepare(
       `SELECT customer_id, id AS email_id, status FROM outreach_emails
-       WHERE brand_name = ? AND customer_id IN (${placeholders(chunk.length)})
+       WHERE brand_name = ? AND contact_id IS NULL AND customer_id IN (${placeholders(chunk.length)})
        ORDER BY id`,
     )
       .bind(brandName, ...chunk)
@@ -762,6 +791,141 @@ export async function generateOutreachForCustomerIds(
   }
 
   return { generated: drafts.length, already: [...existingByCustomer.values()], drafts, errors };
+}
+
+/* ── Per-person generation (Phase 8 Stage 49, 定向到联系人) ──
+ * Same contract as generateOutreachForCustomerIds but the unit is a
+ * (customer, contact) pair: the draft goes to the contact's own address,
+ * the row records contact_id, and the dedup key is (brand, customer,
+ * contact) — company drafts never interfere in either direction. Pairs
+ * whose contact has no usable email are terminal errors (the campaign
+ * member turns 'failed'), not silent skips: the operator asked for that
+ * PERSON, so "we couldn't reach them" must be visible. */
+export interface OutreachContactPair {
+  customer_id: number;
+  contact_id: number;
+}
+
+interface ContactRowForOutreach {
+  id: number;
+  /** Foreign key into customers.company_id (TEXT), not customers.id. */
+  company_id: string;
+  first_name: string | null;
+  last_name: string | null;
+  title: string | null;
+  email: string | null;
+}
+
+export async function generateOutreachForContactIds(
+  env: AdminEnv,
+  brandName: string,
+  pairs: OutreachContactPair[],
+  requestId: string | null = null,
+): Promise<{
+  generated: number;
+  already: Array<{ customer_id: number; contact_id: number; email_id: number; status: string }>;
+  drafts: Array<{ customer_id: number; contact_id: number; email_id: number }>;
+  errors: Array<{ customer_id: number; contact_id: number; message: string }>;
+}> {
+  const brand = await loadBrandForOutreach(env, brandName);
+  const seen = new Set<string>();
+  const unique = pairs.filter((p) => {
+    if (!Number.isSafeInteger(p.customer_id) || p.customer_id <= 0) return false;
+    if (!Number.isSafeInteger(p.contact_id) || p.contact_id <= 0) return false;
+    const key = `${p.customer_id}:${p.contact_id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (unique.length === 0) {
+    return { generated: 0, already: [], drafts: [], errors: [] };
+  }
+
+  // Existing drafts at contact grain only (contact_id IS NOT NULL) — a
+  // company-grain draft for the same brand never suppresses a per-person
+  // one. Earliest per pair wins, mirroring the company path.
+  const placeholders = (n: number) => Array(n).fill("?").join(",");
+  const customerIds = [...new Set(unique.map((p) => p.customer_id))];
+  const existing: Array<{ customer_id: number; contact_id: number; email_id: number; status: string }> = [];
+  for (let i = 0; i < customerIds.length; i += 100) {
+    const chunk = customerIds.slice(i, i + 100);
+    const rows = await env.DB.prepare(
+      `SELECT customer_id, contact_id, id AS email_id, status FROM outreach_emails
+       WHERE brand_name = ? AND contact_id IS NOT NULL AND customer_id IN (${placeholders(chunk.length)})
+       ORDER BY id`,
+    )
+      .bind(brandName, ...chunk)
+      .all<{ customer_id: number; contact_id: number; email_id: number; status: string }>();
+    existing.push(...rows.results);
+  }
+  const existingByPair = new Map<string, { customer_id: number; contact_id: number; email_id: number; status: string }>();
+  for (const row of existing) {
+    const key = `${row.customer_id}:${row.contact_id}`;
+    if (!existingByPair.has(key)) existingByPair.set(key, row);
+  }
+
+  const todo = unique.filter((p) => !existingByPair.has(`${p.customer_id}:${p.contact_id}`));
+
+  // Load the pairs' contact rows and customer rows (chunked IN lists).
+  const contacts = new Map<number, ContactRowForOutreach>();
+  const contactIds = [...new Set(todo.map((p) => p.contact_id))];
+  for (let i = 0; i < contactIds.length; i += 100) {
+    const chunk = contactIds.slice(i, i + 100);
+    const rows = await env.DB.prepare(
+      `SELECT id, company_id, first_name, last_name, title, email FROM contacts WHERE id IN (${placeholders(chunk.length)})`,
+    )
+      .bind(...chunk)
+      .all<ContactRowForOutreach>();
+    for (const row of rows.results) contacts.set(row.id, row);
+  }
+  const customers = new Map<number, OutreachCustomer>();
+  const neededCustomerIds = [...new Set(todo.map((p) => p.customer_id))];
+  if (neededCustomerIds.length > 0) {
+    const rows = await env.DB.prepare(
+      `SELECT ${OUTREACH_CUSTOMER_COLUMNS} FROM customers WHERE id IN (${placeholders(neededCustomerIds.length)}) ORDER BY id`,
+    )
+      .bind(...neededCustomerIds)
+      .all<OutreachCustomer>();
+    for (const row of rows.results) customers.set(row.id, row);
+  }
+
+  const drafts: Array<{ customer_id: number; contact_id: number; email_id: number }> = [];
+  const errors: Array<{ customer_id: number; contact_id: number; message: string }> = [];
+  for (const pair of todo) {
+    const contact = contacts.get(pair.contact_id);
+    const customer = customers.get(pair.customer_id);
+    // Terminal, not retryable: the snapshot referenced rows that are gone
+    // (or a contact that does not belong to this customer — contacts hang
+    // off customers.company_id, the TEXT key) — no later click can fix that.
+    if (!customer || !contact || contact.company_id !== customer.company_id) {
+      errors.push({ customer_id: pair.customer_id, contact_id: pair.contact_id, message: "客户或联系人记录可能已被删除" });
+      continue;
+    }
+    const email = contact.email?.trim() ?? "";
+    if (!email) {
+      errors.push({ customer_id: pair.customer_id, contact_id: pair.contact_id, message: "该联系人没有邮箱" });
+      continue;
+    }
+    const recipient: OutreachRecipient = {
+      contact_id: contact.id,
+      first_name: contact.first_name,
+      last_name: contact.last_name,
+      title: contact.title,
+      email,
+    };
+    try {
+      const emailId = await generateDraftForCustomer(env, brand, customer, requestId, recipient);
+      drafts.push({ customer_id: pair.customer_id, contact_id: pair.contact_id, email_id: emailId });
+    } catch (e) {
+      errors.push({
+        customer_id: pair.customer_id,
+        contact_id: pair.contact_id,
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  return { generated: drafts.length, already: [...existingByPair.values()], drafts, errors };
 }
 
 /* ── Call AI to generate outreach email ── */

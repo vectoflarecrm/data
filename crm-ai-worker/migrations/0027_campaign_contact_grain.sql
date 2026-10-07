@@ -1,0 +1,34 @@
+-- Phase 8 Stage 49 — campaign contact grain (docs/phase8-persona-campaigns.md).
+--
+-- Two additive nullable columns + one index; no table rebuild, no data
+-- change, no backfill. Existing databases get them via the deploy
+-- workflow's per-statement ALTER step (Stage 17+ precedent, duplicate-
+-- column tolerant); fresh installs get them inside schema.sql directly.
+--
+-- 1) outreach_emails.contact_id INTEGER NULL
+--    NULL = the company mailbox — every pre-Phase-8 row, semantics
+--    byte-identical. non-NULL = the draft goes to that contact's own
+--    address. The brand dedup key widens from (brand, customer) to
+--    (brand, customer, contact): company-grain lookups
+--    (generateOutreachEmails sweep, generateOutreachForCustomerIds,
+--    the shared segment builder's excludeSent) now filter
+--    contact_id IS NULL, per-person lookups match contact_id exactly.
+--    A per-person draft therefore never suppresses the company draft
+--    and vice versa — that independence is the point (§2.3).
+--
+-- 2) outreach_campaign_members.contact_id INTEGER NULL
+--    NULL = company grain (all existing campaigns). non-NULL = this
+--    member sends to that contact. The table PK (campaign_id,
+--    customer_id) pins one row per company either way — §2.2: a
+--    per-person snapshot takes exactly ONE email-bearing contact per
+--    matched company (lowest seq); several contacts of the same company
+--    in one campaign is out of scope (would need a PK rebuild).
+--
+-- 3) idx_outreach_contact ON outreach_emails(brand_name, customer_id,
+--    contact_id) — backs both dedup lookups.
+--
+-- The per-person generator (generateOutreachForContactIds in
+-- src/outreach.ts) is the only writer of non-NULL contact_id in this
+-- stage; campaigns wire it up in Stage 50. email_to still comes from
+-- the database row (contact.email), never from model output — the
+-- Stage 13 rule is unchanged.

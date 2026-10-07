@@ -93,7 +93,8 @@ async function makeDb() {
     CREATE TABLE outreach_emails (
       id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER, company_id TEXT, display_id TEXT,
       company_name TEXT, email_to TEXT, product_category TEXT, brand_name TEXT,
-      subject TEXT, body TEXT, status TEXT DEFAULT 'draft', sent_at TEXT, created_at TEXT
+      subject TEXT, body TEXT, status TEXT DEFAULT 'draft', sent_at TEXT, created_at TEXT,
+      contact_id INTEGER
     );
     CREATE TABLE outreach_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, description TEXT,
       filters TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);

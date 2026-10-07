@@ -179,14 +179,14 @@ describe("generated SQL runs on sqlite", () => {
         customer_segment TEXT, product_categories TEXT, products_services TEXT,
         company_name TEXT, description TEXT, business_tag TEXT, lead_score INTEGER
       );
-      CREATE TABLE outreach_emails (id INTEGER PRIMARY KEY, customer_id INTEGER, brand_name TEXT, status TEXT);
+      CREATE TABLE outreach_emails (id INTEGER PRIMARY KEY, customer_id INTEGER, brand_name TEXT, status TEXT, contact_id INTEGER);
       INSERT INTO customers VALUES
         (1,'completed','a@es.com','Spain','Dealer','SUP',NULL,'Aqua Co','paddleboards','Retailer',90),
         (2,'completed','b@fr.com','France','Distributor','RIB',NULL,'Boat SAR','rib boats',NULL,75),
         (3,'completed',NULL,'Spain','Dealer','SUP',NULL,'NoMail','x',NULL,88),
         (4,'pending','d@de.com','Germany','Dealer','SUP',NULL,'Pending','x',NULL,99),
         (5,'completed','e@es.com','Spain','Retailer','SUP',NULL,'Sent Co','x',NULL,80);
-      INSERT INTO outreach_emails VALUES (1,5,'Afarer','sent');
+      INSERT INTO outreach_emails (id, customer_id, brand_name, status) VALUES (1,5,'Afarer','sent');
     `);
 
     const run = (filters: unknown, brandName: string | null = "Afarer") => {

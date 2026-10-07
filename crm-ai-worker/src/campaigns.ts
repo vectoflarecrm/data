@@ -243,11 +243,13 @@ export function buildSegmentWhere(
     filters.customerIds.forEach((id) => binds.push(id));
   }
   // Dedup per brand: a customer already emailed with this brand must not be
-  // mailed again by a second campaign.
+  // mailed again by a second campaign. contact_id IS NULL (Phase 8 Stage 49):
+  // company grain only — a per-person draft (or send) belongs to the
+  // (brand, customer, contact) key, not this one.
   if (filters.excludeSent && opts.brandName) {
     where.push(
       `${t}id NOT IN (SELECT customer_id FROM outreach_emails
-                      WHERE brand_name = ? AND status = 'sent' AND customer_id IS NOT NULL)`,
+                      WHERE brand_name = ? AND status = 'sent' AND customer_id IS NOT NULL AND contact_id IS NULL)`,
     );
     binds.push(opts.brandName);
   }
