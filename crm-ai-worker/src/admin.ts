@@ -1093,6 +1093,110 @@ async function preFilterCustomers(request: Request, env: AdminEnv, auth: AdminAu
   return jsonResponse({ matching: count?.n ?? 0, sample: sample.results });
 }
 
+/* Phase 7 Stage 48 (docs/phase7-contact-merge.md §4): manual merge for the
+ * duplicates the conservative write-time rule (Stage 47) refuses to guess
+ * — a shared info@ mailbox fronting two people, name-only twins, and every
+ * row accumulated before Phase 7. The operator picks the survivor; the
+ * merge itself is mechanical:
+ *   - fill-NULL-only across the mergeable fields (never overwrites),
+ *   - repoint research_facts.contact_id + evidence.contact_id to the
+ *     survivor, then delete the merged rows — ONE D1 batch, so there is
+ *     no window with dangling references,
+ *   - audited as CONTACT_MERGE with the ids and which fields got filled
+ *     (no raw contact data in the audit trail).
+ * RBAC needs no change: any POST under /admin/api/customers… already maps
+ * to customers.write (rbac.ts). */
+const CONTACT_MERGE_FIELDS = [
+  "first_name", "last_name", "full_name", "title", "department",
+  "email", "cellphone", "tel", "whatsapp", "linkedin_url", "social_accounts",
+] as const;
+
+async function mergeCustomerContacts(
+  request: Request,
+  env: AdminEnv,
+  id: number,
+  auth: AdminAuthContext,
+): Promise<Response> {
+  const customer = await getCustomer(env, id);
+  if (!customer) return jsonResponse({ detail: "Customer not found" }, 404);
+
+  let payload: Record<string, unknown>;
+  try {
+    const body: unknown = await request.json();
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return jsonResponse({ detail: "JSON object required" }, 400);
+    }
+    payload = body as Record<string, unknown>;
+  } catch {
+    return jsonResponse({ detail: "JSON object required" }, 400);
+  }
+
+  const survivor = typeof payload.survivor_contact_id === "string"
+    ? payload.survivor_contact_id.trim().slice(0, 100) : "";
+  if (!survivor) return jsonResponse({ detail: "survivor_contact_id 不能为空" }, 400);
+  const mergedRaw = Array.isArray(payload.merged_contact_ids) ? payload.merged_contact_ids : [];
+  const merged = [...new Set(
+    mergedRaw.map((v) => (typeof v === "string" ? v.trim().slice(0, 100) : "")).filter(Boolean),
+  )];
+  if (merged.length === 0) return jsonResponse({ detail: "merged_contact_ids 不能为空" }, 400);
+  if (merged.length > 10) return jsonResponse({ detail: "一次最多合并 10 个联系人" }, 400);
+  if (merged.includes(survivor)) {
+    return jsonResponse({ detail: "主行不能同时出现在合并列表中" }, 400);
+  }
+
+  // Every id must be a contact of THIS company — a foreign id (another
+  // company, a typo) is a 404, never a silent cross-company merge.
+  const contacts = await getCustomerContacts(env, customer.company_id);
+  const byId = new Map(contacts.map((c) => [c.contact_id, c] as const));
+  const survivorRow = byId.get(survivor);
+  if (!survivorRow) return jsonResponse({ detail: "Contact not found" }, 404);
+  const mergedRows = merged.map((cid) => byId.get(cid));
+  if (mergedRows.some((r) => !r)) return jsonResponse({ detail: "Contact not found" }, 404);
+
+  // Fill-NULL merge: the survivor keeps every non-null field; NULL fields
+  // fill from the merged rows in the order the operator listed them.
+  const filled: string[] = [];
+  const values: Record<string, string | null> = {};
+  for (const field of CONTACT_MERGE_FIELDS) {
+    let value = survivorRow[field];
+    for (const row of mergedRows) {
+      if (row && value == null && row[field] != null) {
+        value = row[field];
+        if (!filled.includes(field)) filled.push(field);
+      }
+    }
+    values[field] = value;
+  }
+
+  const placeholders = merged.map(() => "?").join(",");
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE contacts SET ${CONTACT_MERGE_FIELDS.map((f) => `${f} = ?`).join(", ")}
+       WHERE contact_id = ? AND company_id = ?`,
+    ).bind(
+      ...CONTACT_MERGE_FIELDS.map((f) => values[f]),
+      survivor,
+      customer.company_id,
+    ),
+    env.DB.prepare(
+      `UPDATE research_facts SET contact_id = ? WHERE customer_id = ? AND contact_id IN (${placeholders})`,
+    ).bind(survivor, customer.company_id, ...merged),
+    env.DB.prepare(
+      `UPDATE evidence SET contact_id = ? WHERE company_id = ? AND contact_id IN (${placeholders})`,
+    ).bind(survivor, customer.company_id, ...merged),
+    env.DB.prepare(
+      `DELETE FROM contacts WHERE company_id = ? AND contact_id IN (${placeholders})`,
+    ).bind(customer.company_id, ...merged),
+  ]);
+
+  await auditAdminAction(env, request, auth, "CONTACT_MERGE", "customer", String(id), {
+    survivor_contact_id: survivor,
+    merged_contact_ids: merged,
+    filled_fields: filled,
+  });
+  return jsonResponse({ survivor_contact_id: survivor, merged: merged.length, filled_fields: filled });
+}
+
 async function updateCustomer(request: Request, env: AdminEnv, id: number, auth: AdminAuthContext): Promise<Response> {
   const existing = await getCustomer(env, id);
   if (!existing) return jsonResponse({ detail: "Customer not found" }, 404);
@@ -2556,6 +2660,15 @@ async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthCo
       const nextBefore = logs.length === limit ? logs[logs.length - 1].created_at : null;
       return jsonResponse({ logs, next_before: nextBefore });
     }
+    // Phase 7 Stage 48: manual contact merge (design §4). Checked before
+    // parseCustomerId — that one only matches the bare /customers/:id.
+    const mergeMatch = url.pathname.match(/^\/admin\/api\/customers\/(\d+)\/contacts\/merge$/);
+    if (mergeMatch && request.method === "POST") {
+      const mergeId = Number(mergeMatch[1]);
+      if (Number.isSafeInteger(mergeId) && mergeId > 0) {
+        return await mergeCustomerContacts(request, env, mergeId, auth);
+      }
+    }
     const id = parseCustomerId(url.pathname);
     if (id !== null) {
       if (request.method === "GET") {
@@ -3665,12 +3778,36 @@ const ADMIN_PANEL_HTML = `<!doctype html>
         h+='<button class="button secondary small edit-btn" data-key="'+f.key+'">修改</button>'}
       h+='</div></div>'});
     return h};
-  var renderContacts=function(contacts){if(!contacts||contacts.length===0)return'<div class="s-c94a3b8-p12">暂无联系人数据</div>';var h='<div class="section-title">👥 联系人列表 ('+contacts.length+'人)</div>';contacts.forEach(function(ct,idx){h+='<div class="persona-card s-bdl3 ol 1677d2" >';h+='<div class="s-dfx-jcb-aic-mb8">';h+='<h4 class="s-m0">'+esc(ct.contact_id||'')+' — '+esc((ct.first_name||'')+' '+(ct.last_name||''))+'</h4>';h+='<span class="badge">#'+esc(String(ct.seq))+'</span></div>';
+  // Phase 7 Stage 48: manual contact merge support. 疑似重复 is pure
+  // client-side key counting (same normalized email / phone / whatsapp /
+  // name as another card); the actual merge decision stays with the
+  // operator — the server re-validates everything anyway.
+  var lastContacts=[];
+  var ctNorm=function(v){return String(v||'').trim().toLowerCase()};
+  var ctPhone=function(v){return ctNorm(v).replace(/[ \-().]/g,'')};
+  var ctName=function(ct){return ctNorm(((ct.first_name||'')+' '+(ct.last_name||'')).trim().replace(/\s+/g,' '))};
+  var ctKeys=function(ct){return [ctNorm(ct.email),ctPhone(ct.cellphone),ctPhone(ct.whatsapp),ctName(ct)].filter(Boolean)};
+  var renderContacts=function(contacts){lastContacts=contacts||[];if(!contacts||contacts.length===0)return'<div class="s-c94a3b8-p12">暂无联系人数据</div>';
+    var kc={};contacts.forEach(function(ct){ctKeys(ct).forEach(function(k){kc[k]=(kc[k]||0)+1})});
+    var h='<div class="section-title">👥 联系人列表 ('+contacts.length+'人)</div>';contacts.forEach(function(ct,idx){
+      var dup=ctKeys(ct).some(function(k){return kc[k]>1});
+      h+='<div class="persona-card s-bdl3 ol 1677d2" >';h+='<div class="s-dfx-jcb-aic-mb8">';h+='<h4 class="s-m0">'+esc(ct.contact_id||'')+' — '+esc((ct.first_name||'')+' '+(ct.last_name||''))+'</h4>';h+='<span class="badge">#'+esc(String(ct.seq))+'</span>'+(dup?'<span class="badge" style="background:#d97706;color:#fff">疑似重复</span>':'')+'<label class="s-chiprow"><input type="checkbox" class="ct-merge-cb" data-cid="'+esc(ct.contact_id||'')+'" data-seq="'+esc(String(ct.seq))+'"> 选择</label></div>';
       h+='<div class="s-dgrid-gridtemplatecolumns1fr 1fr-g4 16-fs13">';
       var pairs=[['职位',ct.title],['全名',ct.full_name],['部门',ct.department],['邮箱',ct.email],['手机',ct.cellphone],['电话',ct.tel],['WhatsApp',ct.whatsapp],['LinkedIn',ct.linkedin_url]];
       pairs.forEach(function(p){if(p[1])h+='<div><strong>'+esc(p[0])+':</strong> '+esc(p[1])+'</div>'});
       if(ct.social_accounts){try{var sa=JSON.parse(ct.social_accounts);if(sa.length>0){h+='<div class="s-gc11"><strong>社交账号:</strong> ';sa.forEach(function(a){h+=esc(a.platform)+': '+(a.username?'@'+esc(a.username):'')+' '});h+='</div>'}}catch(e){}}
-      h+='</div></div>'});return h};
+      h+='</div></div>'});
+    if(contacts.length>1)h+='<div class="s-mt8"><button class="button secondary small" id="ctMergeBtn">合并所选联系人</button><span class="s-fs12-c475569" style="margin-left:8px">勾选 ≥2 行后合并：序号最早的行是主行，空字段由其余行填充，关联证据自动重指向。</span></div>';
+    return h};
+  var wireMergeButton=function(){var mb=document.getElementById('ctMergeBtn');if(!mb)return;mb.onclick=function(){
+    var cbs=[].slice.call(document.querySelectorAll('.ct-merge-cb:checked'));
+    if(cbs.length<2){alert('请至少勾选 2 个联系人');return}
+    var picked=cbs.map(function(cb){return{cid:cb.getAttribute('data-cid'),seq:Number(cb.getAttribute('data-seq'))||0}}).sort(function(a,b){return a.seq-b.seq});
+    var survivor=picked[0].cid,mergedIds=picked.slice(1).map(function(p){return p.cid});
+    var nm=function(cid){var c=null;for(var i=0;i<lastContacts.length;i++){if(lastContacts[i].contact_id===cid)c=lastContacts[i]}return c?((((c.first_name||'')+' '+(c.last_name||'')).trim())||cid):cid};
+    if(!confirm('将把 '+mergedIds.length+' 个联系人合并进主行 '+nm(survivor)+'（'+survivor+'，勾选中序号最早的一行）。\n主行已有字段不会被覆盖，空字段由其余行填充，关联的联系方式证据会重指向主行。确定？'))return;
+    mb.disabled=true;
+    api('/admin/api/customers/'+state.selected+'/contacts/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({survivor_contact_id:survivor,merged_contact_ids:mergedIds})}).then(function(){openDetail(state.selected)}).catch(function(e){alert('❌ '+e.message);mb.disabled=false})}};
   var renderVerifiedSocial=function(sv){if(!sv)return'';var social=null;try{social=JSON.parse(sv)}catch(e){}if(!social||!social.length)return'';var h='<div class="section-title">📱 已验证社交媒体</div><div class="s-dfx-fxww-g8">';social.forEach(function(s){var icon=s.platform==='LinkedIn'?'🔗':s.platform==='Facebook'?'📘':s.platform==='Instagram'?'📷':s.platform==='Twitter'?'🐦':s.platform==='YouTube'?'📺':s.platform==='TikTok'?'🎵':'🌐';var statusCls=s.verified?'sv-ok':'sv-bad';var statusText=s.verified?'已验证':'未验证';h+='<div class="s-bgf8fafc-bd1 ol e2e8f0-br8-p10 14-dfx-aic-g8"><span class="s-fs18">'+icon+'</span><div><div class="s-fw600-fs13">'+esc(s.platform)+'</div><a href="'+esc(s.url)+'" target="_blank" class="s-fs12-c1677d2-wbba">'+esc(s.url)+'</a></div><span class="'+statusCls+'">'+statusText+'</span></div>'});h+='</div>';return h};
   var renderEvidence=function(ev){if(!ev||!ev.length)return'';var h='<div class="section-title">🔍 证据链（AI 判断的来源依据）</div><div class="s-dfx-fxdcol-g8">';ev.forEach(function(e){var pct=e.confidence!=null?Math.round(e.confidence*100)+'%':'—';var cCls=e.confidence>=0.8?'ev-hi':e.confidence>=0.5?'ev-mid':'ev-lo';h+='<div class="s-bgf8fafc-bd1 ol e2e8f0-br8-p10 12">'
     +'<div class="s-dfx-jcb-g8-mb4"><strong class="s-fs13">'+esc(e.field_name)+'</strong><span class="'+cCls+'">置信度 '+pct+'</span></div>'
@@ -3694,7 +3831,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
       h+='<div><div class="s-dfx-jcb-g8-mb4"><span class="s-fw600-fs13">'+esc(d[0])+'</span><span class="s-fs12-c475569">'+v+' / '+d[2]+'</span></div>'
       +'<div class="s-bge2e8f0-br4-h8-ovh"><div class="score-fill '+fill+'" data-w="'+pct+'"></div></div></div>'});
     h+='</div>';return h};
-  window.openDetail=function(id){api('/admin/api/customers/'+id).then(function(c){state.selected=id;state.dirty={};$('modalTitle').textContent='客户详情 — '+esc(c.company_name||c.domain||'');var body=buildModal(c);body+=renderLeadScoreBreakdown(c);body+=renderSignals(c.signals);body+=renderEvidence(c.evidence);body+=renderLinkedFacts(c.linked_facts);body+=renderVerifiedSocial(c.social_accounts_verified);body+='<div class="section-title">👥 联系人列表</div>';body+='<div id="contactsArea"></div>';$('modalBody').innerHTML=body;$('modalBody').querySelectorAll('.score-fill').forEach(function(el){el.style.width=el.getAttribute('data-w')+'%'});var ca=document.getElementById('contactsArea');if(ca)ca.innerHTML=renderContacts(c.contacts);$('modalMsg').classList.add('hidden');$('modal').classList.add('active');document.body.style.overflow='hidden';
+  window.openDetail=function(id){api('/admin/api/customers/'+id).then(function(c){state.selected=id;state.dirty={};$('modalTitle').textContent='客户详情 — '+esc(c.company_name||c.domain||'');var body=buildModal(c);body+=renderLeadScoreBreakdown(c);body+=renderSignals(c.signals);body+=renderEvidence(c.evidence);body+=renderLinkedFacts(c.linked_facts);body+=renderVerifiedSocial(c.social_accounts_verified);body+='<div class="section-title">👥 联系人列表</div>';body+='<div id="contactsArea"></div>';$('modalBody').innerHTML=body;$('modalBody').querySelectorAll('.score-fill').forEach(function(el){el.style.width=el.getAttribute('data-w')+'%'});var ca=document.getElementById('contactsArea');if(ca)ca.innerHTML=renderContacts(c.contacts);wireMergeButton();$('modalMsg').classList.add('hidden');$('modal').classList.add('active');document.body.style.overflow='hidden';
       document.querySelectorAll('.edit-btn').forEach(function(btn){btn.onclick=function(){var key=btn.getAttribute('data-key');var row=btn.closest('.field-row');row.classList.add('editing');state.dirty[key]=true;var inp=document.getElementById('inp_'+key);if(inp&&inp.focus)inp.focus()}})}).catch(function(e){showMsg('listMessage',e.message,false)})};
   var closeModal=function(){$('modal').classList.remove('active');document.body.style.overflow='';state.selected=null;state.dirty={}};
   $('closeModal').onclick=closeModal;

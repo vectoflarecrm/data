@@ -4,6 +4,8 @@ import {
   normalizePhone,
   type ExistingContact,
 } from "../src/contact-merge";
+import { handleAdminRequest } from "../src/admin";
+import type { AdminEnv } from "../src/admin";
 
 /* Phase 7 Stage 47 (docs/phase7-contact-merge.md §2/§4): the pure
  * write-time dedup planner. Contract:
@@ -237,6 +239,181 @@ describe("planned statements run on sqlite", () => {
       { contact_id: "ACME_001", seq: 1, cellphone: "+34 600 111 222" },
       { contact_id: "ACME_002", seq: 2, cellphone: null },
     ]);
+    db.close();
+  });
+});
+
+/* Stage 48 (design §4): the manual merge endpoint, end to end through
+ * handleAdminRequest. One atomic batch: fill-NULL merge into the survivor,
+ * repoint research_facts + evidence, delete the merged rows — plus the
+ * audit trail. Cross-company ids are a 404, never a silent merge. */
+class FakeD1 {
+  constructor(private db: any) {}
+
+  prepare(sql: string) {
+    const db = this.db;
+    let bound: unknown[] = [];
+    return {
+      bind(...args: unknown[]) {
+        bound = args;
+        return this;
+      },
+      async all<T>() {
+        return { results: db.prepare(sql).all(...bound) as T[], success: true };
+      },
+      async first<T>() {
+        return (db.prepare(sql).get(...bound) ?? undefined) as T | undefined;
+      },
+      async run() {
+        const info = db.prepare(sql).run(...bound);
+        return { success: true, meta: { changes: info.changes, last_row_id: Number(info.lastInsertRowid) } };
+      },
+    };
+  }
+
+  async batch(stmts: any[]) {
+    for (const s of stmts) await s.run();
+    return [];
+  }
+}
+
+describe("POST /admin/api/customers/:id/contacts/merge", () => {
+  const BASE = "https://worker.example";
+  const TOKEN = "correct-horse-battery-staple";
+
+  async function makeDb() {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(":memory:");
+    db.exec(`
+      CREATE TABLE customers (
+        id INTEGER PRIMARY KEY, company_id TEXT, display_id TEXT, domain TEXT, status TEXT,
+        company_name TEXT, legal_name TEXT, trading_name TEXT, normalized_domain TEXT,
+        first_name TEXT, last_name TEXT, full_name TEXT, title TEXT, department TEXT, linkedin_url TEXT,
+        street_address TEXT, zip_city TEXT, country TEXT, country_code TEXT, region TEXT, city TEXT, postal_code TEXT,
+        tel TEXT, email TEXT, cellphone TEXT, whatsapp TEXT, products_services TEXT, business_tag TEXT,
+        industry TEXT, company_type TEXT, business_model TEXT, founded_year TEXT, employee_range TEXT,
+        description TEXT, target_markets TEXT, is_manufacturer TEXT, is_importer TEXT, is_distributor TEXT,
+        is_wholesaler TEXT, is_retailer TEXT, is_ecommerce TEXT, is_rental TEXT, is_oem TEXT, social_accounts TEXT,
+        full_research_text TEXT, social_accounts_verified TEXT, customer_segment TEXT,
+        product_categories TEXT, company_size TEXT, geographic_coverage TEXT,
+        personas_and_solutions TEXT, remarks TEXT, updated_at TEXT,
+        company_profile TEXT, outreach_context TEXT, buying_signals TEXT, lead_score INTEGER,
+        source_import_id TEXT
+      );
+      CREATE TABLE contacts (
+        id INTEGER PRIMARY KEY, contact_id TEXT NOT NULL, company_id TEXT NOT NULL, seq INTEGER NOT NULL,
+        first_name TEXT, last_name TEXT, full_name TEXT, title TEXT, department TEXT,
+        email TEXT, cellphone TEXT, tel TEXT, whatsapp TEXT, linkedin_url TEXT, social_accounts TEXT
+      );
+      CREATE TABLE research_facts (id INTEGER PRIMARY KEY, customer_id TEXT, contact_id TEXT, is_current INTEGER);
+      CREATE TABLE evidence (id INTEGER PRIMARY KEY, company_id TEXT, contact_id TEXT);
+      CREATE TABLE audit_logs (
+        id TEXT PRIMARY KEY, actor_user_id TEXT, actor_role TEXT, action TEXT, resource_type TEXT,
+        resource_id TEXT, request_id TEXT, metadata_json TEXT, ip_hash TEXT, user_agent_hash TEXT, created_at TEXT
+      );
+      INSERT INTO customers (id, company_id, display_id, status, company_name, email)
+        VALUES (1, 'c1', 'ACME', 'completed', 'Acme', 'info@acme.com');
+      INSERT INTO contacts (contact_id, company_id, seq, first_name, last_name, title, email, cellphone, whatsapp, linkedin_url)
+        VALUES ('ACME_001', 'c1', 1, 'John', 'Doe', 'CEO', 'john@acme.com', NULL, NULL, NULL),
+               ('ACME_002', 'c1', 2, NULL, NULL, 'Sales', NULL, '+34 600 111 222', '+34 611 111 111', 'https://linkedin.com/in/johndoe');
+      INSERT INTO research_facts (customer_id, contact_id, is_current) VALUES
+        ('c1', 'ACME_002', 1),
+        ('other_co', 'ACME_002', 1);
+      INSERT INTO evidence (company_id, contact_id) VALUES
+        ('c1', 'ACME_002'),
+        ('other_co', 'ACME_002');
+    `);
+    return db;
+  }
+
+  function call(env: AdminEnv, path: string, body: unknown): Promise<Response> {
+    return handleAdminRequest(
+      new Request(`${BASE}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify(body),
+      }),
+      env,
+    ) as Promise<Response>;
+  }
+
+  it("merges fill-NULL, repoints both reference tables, deletes, audits", async () => {
+    const db = await makeDb();
+    const env = { DB: new FakeD1(db), ADMIN_PANEL_TOKEN: TOKEN } as unknown as AdminEnv;
+
+    const res = await call(env, "/admin/api/customers/1/contacts/merge", {
+      survivor_contact_id: "ACME_001",
+      merged_contact_ids: ["ACME_002"],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { survivor_contact_id: string; merged: number; filled_fields: string[] };
+    expect(body.merged).toBe(1);
+    expect(body.filled_fields).toEqual(["cellphone", "whatsapp", "linkedin_url"]);
+
+    const survivor = db.prepare("SELECT * FROM contacts").get() as Record<string, unknown>;
+    expect(survivor.contact_id).toBe("ACME_001");
+    expect(survivor.title).toBe("CEO");          // non-null kept, 'Sales' never overwrote
+    expect(survivor.email).toBe("john@acme.com");
+    expect(survivor.cellphone).toBe("+34 600 111 222");   // NULL filled
+    expect(survivor.whatsapp).toBe("+34 611 111 111");
+    expect(survivor.linkedin_url).toBe("https://linkedin.com/in/johndoe");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM contacts").get()).toEqual({ n: 1 }); // merged row gone
+
+    // Repointed within the company, never across companies.
+    const facts = db.prepare("SELECT customer_id, contact_id FROM research_facts ORDER BY customer_id").all() as Array<{ customer_id: string; contact_id: string }>;
+    expect(facts).toEqual([
+      { customer_id: "c1", contact_id: "ACME_001" },
+      { customer_id: "other_co", contact_id: "ACME_002" }, // untouched
+    ]);
+    const ev = db.prepare("SELECT company_id, contact_id FROM evidence ORDER BY company_id").all() as Array<{ company_id: string; contact_id: string }>;
+    expect(ev).toEqual([
+      { company_id: "c1", contact_id: "ACME_001" },
+      { company_id: "other_co", contact_id: "ACME_002" },
+    ]);
+
+    const audit = db.prepare("SELECT action, resource_id, metadata_json FROM audit_logs").get() as { action: string; resource_id: string; metadata_json: string };
+    expect(audit.action).toBe("CONTACT_MERGE");
+    expect(audit.resource_id).toBe("1");
+    const meta = JSON.parse(audit.metadata_json) as { survivor_contact_id: string; merged_contact_ids: string[]; filled_fields: string[] };
+    expect(meta.survivor_contact_id).toBe("ACME_001");
+    expect(meta.merged_contact_ids).toEqual(["ACME_002"]);
+
+    db.close();
+  });
+
+  it("rejects a foreign contact id with 404 (cross-company guard)", async () => {
+    const db = await makeDb();
+    const env = { DB: new FakeD1(db), ADMIN_PANEL_TOKEN: TOKEN } as unknown as AdminEnv;
+    const res = await call(env, "/admin/api/customers/1/contacts/merge", {
+      survivor_contact_id: "ACME_001",
+      merged_contact_ids: ["OTHER_CO_001"],
+    });
+    expect(res.status).toBe(404);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM contacts").get()).toEqual({ n: 2 });
+    db.close();
+  });
+
+  it("rejects survivor inside the merged list, empty lists and oversized lists", async () => {
+    const db = await makeDb();
+    const env = { DB: new FakeD1(db), ADMIN_PANEL_TOKEN: TOKEN } as unknown as AdminEnv;
+    const post = (body: unknown) => call(env, "/admin/api/customers/1/contacts/merge", body);
+
+    expect((await post({ survivor_contact_id: "ACME_001", merged_contact_ids: ["ACME_001", "ACME_002"] })).status).toBe(400);
+    expect((await post({ survivor_contact_id: "ACME_001", merged_contact_ids: [] })).status).toBe(400);
+    expect((await post({ survivor_contact_id: "", merged_contact_ids: ["ACME_002"] })).status).toBe(400);
+    expect((await post({ survivor_contact_id: "ACME_001", merged_contact_ids: Array.from({ length: 11 }, (_, i) => `X_${i}`) })).status).toBe(400);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM contacts").get()).toEqual({ n: 2 });
+    db.close();
+  });
+
+  it("404s for an unknown customer", async () => {
+    const db = await makeDb();
+    const env = { DB: new FakeD1(db), ADMIN_PANEL_TOKEN: TOKEN } as unknown as AdminEnv;
+    const res = await call(env, "/admin/api/customers/999/contacts/merge", {
+      survivor_contact_id: "ACME_001",
+      merged_contact_ids: ["ACME_002"],
+    });
+    expect(res.status).toBe(404);
     db.close();
   });
 });

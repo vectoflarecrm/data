@@ -1,6 +1,9 @@
 # Phase 7 — Contact merge: design
 
-Status: design committed — stages 47/48 pending.
+Status: shipped in full — stages 47/48 done (write-time dedup planner +
+manual merge endpoint + panel wiring; evidence in
+docs/stages/stage-47-write-time-merge.md and
+docs/stages/stage-48-manual-contact-merge.md).
 
 Source requirements: phase4 §4.4's deferred item ("contact MERGE (same
 person, new channel → one row) needs dedup keys, merge semantics and a
