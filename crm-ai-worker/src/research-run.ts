@@ -44,6 +44,9 @@ export const SOURCES_PARSER_VERSION = "sources-v1";
 /** Version of the typed-fact writer (research_facts rows). */
 export const FACTS_PARSER_VERSION = "facts-v1";
 
+/** Version of the buying-signal writer (research_signals rows). */
+export const SIGNALS_PARSER_VERSION = "signals-v1";
+
 /** Which provider/model actually produced an analysis. Stamped by the
  * analyzeWithX callers in index.ts at their single success return point. */
 export interface AnalysisProvenance {
@@ -350,6 +353,76 @@ export async function hasCurrentResearchFacts(env: ResearchRunEnv, companyId: st
   } catch (e) {
     warnSkip(e);
     return false;
+  }
+}
+
+// ── Phase 4 Stage 40: buying-signal layer (research_signals) ──
+// Signals lived only in the customers.buying_signals JSON cache —
+// overwritten per run and read by nothing. Typed rows keep the history
+// (append + supersede, never delete) and serve the panel's new signal
+// section; campaign targeting follows later.
+
+/** One concrete purchase signal as returned by the AI analysis. */
+export interface ResearchSignalEntry {
+  signal_text: string;
+}
+
+/** Writer-side bounds (defensive, same spirit as facts): at most 20
+ * signals per run, each capped at 500 chars. */
+export const SIGNALS_PER_RUN_CAP = 20;
+export const SIGNAL_TEXT_CAP = 500;
+
+export interface AppendSignalsParams {
+  companyId: string;
+  runId: string | null;
+  signals: ResearchSignalEntry[];
+  now?: Date;
+}
+
+/** Append one attempt's buying signals. The previous current set for the
+ * company is superseded (is_current = 0, valid_until = now) — never
+ * deleted — and the new rows land with is_current = 1 in one D1 batch
+ * (atomic supersede + append). Duplicates within the run collapse (first
+ * occurrence wins, AI order preserved); blanks are dropped before the
+ * caps apply.
+ *
+ * Unlike appendResearchFacts, the supersede runs even for an EMPTY input:
+ * the current set must always mirror the latest run's judgment, exactly
+ * like the cache column (customers.buying_signals gets NULL when the
+ * analysis returns no signals) — anything else would show stale signals
+ * from an older run as if this run had confirmed them. Fail-open like
+ * every provenance writer. */
+export async function appendResearchSignals(env: ResearchRunEnv, params: AppendSignalsParams): Promise<void> {
+  const { companyId, runId } = params;
+  const now = params.now ?? new Date();
+  const seen = new Set<string>();
+  const bounded: string[] = [];
+  for (const s of params.signals) {
+    const text = (s?.signal_text ?? "").trim().slice(0, SIGNAL_TEXT_CAP);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    bounded.push(text);
+    if (bounded.length >= SIGNALS_PER_RUN_CAP) break;
+  }
+  try {
+    const stmts: D1PreparedStatement[] = [
+      env.DB.prepare(
+        `UPDATE research_signals SET is_current = 0, valid_until = ?
+         WHERE customer_id = ? AND is_current = 1`,
+      ).bind(sqlUtc(now), companyId),
+    ];
+    for (const text of bounded) {
+      stmts.push(
+        env.DB.prepare(
+          `INSERT INTO research_signals
+             (research_run_id, customer_id, signal_text, parser_version, created_at, is_current, valid_from)
+           VALUES (?, ?, ?, ?, ?, 1, ?)`,
+        ).bind(runId, companyId, text, SIGNALS_PARSER_VERSION, sqlUtc(now), sqlUtc(now)),
+      );
+    }
+    await env.DB.batch(stmts);
+  } catch (e) {
+    warnSkip(e);
   }
 }
 

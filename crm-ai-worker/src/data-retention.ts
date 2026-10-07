@@ -25,6 +25,10 @@
  *                         superseded-only policy: the current facts of
  *                         every company survive for Phase 4 consumers;
  *                         expired history is cut.
+ *   - research_signals    buying-signal layer per run (Phase 4 Stage 40).
+ *                         Same superseded-only policy: the current signal
+ *                         set survives for the panel (and later campaign
+ *                         targeting); expired history is cut.
  *   - customer_imports    the raw import layer (docx 建议三). Written on
  *                         every CSV import, read by nothing today; rows carry
  *                         the full raw_json so this is the heaviest table
@@ -173,6 +177,23 @@ export async function pruneSupersededResearchFacts(
   return pruneBefore(
     env,
     "DELETE FROM research_facts WHERE is_current = 0 AND COALESCE(valid_until, fetched_at) < ?",
+    cutoff,
+  );
+}
+
+/** Superseded buying signals only (is_current = 0): the current signal set
+ * of every company survives for the panel's signal section (and later
+ * campaign targeting); expired history is cut with the same policy and
+ * fallback timestamp as evidence/sources/facts (Phase 4 Stage 40). */
+export async function pruneSupersededResearchSignals(
+  env: { DB: D1Database },
+  days: number,
+  now: Date = new Date(),
+): Promise<number> {
+  const cutoff = toSqlUtc(new Date(now.getTime() - days * 86_400_000));
+  return pruneBefore(
+    env,
+    "DELETE FROM research_signals WHERE is_current = 0 AND COALESCE(valid_until, created_at) < ?",
     cutoff,
   );
 }

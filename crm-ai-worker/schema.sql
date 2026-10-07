@@ -364,6 +364,24 @@ CREATE TABLE IF NOT EXISTS research_facts (
   valid_until TEXT
 );
 
+-- Buying-signal layer (Phase 4 Stage 40, 建议 §二十一): one row per
+-- concrete purchase signal per research run, typed from the AI analysis
+-- instead of living only in the customers.buying_signals JSON cache
+-- (which is overwritten per run and read by nothing). Append + supersede
+-- like evidence/sources/facts — re-research keeps signal history, the
+-- current set serves the panel (and later campaign targeting).
+CREATE TABLE IF NOT EXISTS research_signals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  research_run_id TEXT,
+  customer_id TEXT NOT NULL,
+  signal_text TEXT NOT NULL,
+  parser_version TEXT,
+  created_at TEXT NOT NULL,
+  is_current INTEGER NOT NULL DEFAULT 1,
+  valid_from TEXT,
+  valid_until TEXT
+);
+
 -- Raw import layer (docx 建议三): original uploaded rows are immutable; the
 -- normalized/enriched customer rows reference back to them. Re-importing the
 -- same file never destroys original data.
@@ -665,6 +683,11 @@ CREATE INDEX IF NOT EXISTS idx_research_sources_run ON research_sources(research
 -- and the per-run history slice.
 CREATE INDEX IF NOT EXISTS idx_research_facts_customer ON research_facts(customer_id, is_current);
 CREATE INDEX IF NOT EXISTS idx_research_facts_run ON research_facts(research_run_id);
+
+-- Signal-layer lookups: current signals per customer (panel detail) and
+-- the per-run history slice.
+CREATE INDEX IF NOT EXISTS idx_research_signals_customer ON research_signals(customer_id, is_current);
+CREATE INDEX IF NOT EXISTS idx_research_signals_run ON research_signals(research_run_id);
 
 -- The §18.1 UNIQUE indexes — customers(domain), api_configs(provider,
 -- key_fingerprint), contacts.contact_id and contacts(company_id, seq) — are

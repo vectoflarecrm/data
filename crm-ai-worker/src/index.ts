@@ -15,10 +15,11 @@ import {
   pruneSupersededEvidence,
   pruneSupersededResearchSources,
   pruneSupersededResearchFacts,
+  pruneSupersededResearchSignals,
   resolveDataRetentionDays,
 } from "./data-retention";
 import { cleanupExpiredChallenges } from "./auth/webauthn";
-import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, hasCurrentResearchFacts, capResearchSourcesToBudget, readSavedResearchText, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, FACTS_PER_RUN_CAP } from "./research-run";
+import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, appendResearchSignals, hasCurrentResearchFacts, capResearchSourcesToBudget, readSavedResearchText, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, FACTS_PER_RUN_CAP } from "./research-run";
 
 export interface CustomerRow {
   id: number;
@@ -2296,6 +2297,17 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
       });
     }
 
+    // Phase 4 Stage 40: buying signals become typed rows — the panel (and
+    // later campaign targeting) reads research_signals instead of the
+    // one-shot JSON cache. The writer supersedes even for an empty set, so
+    // the current rows always mirror THIS run's judgment (the cache column
+    // gets NULL in the same case). Fail-open end to end.
+    await appendResearchSignals(env, {
+      companyId: customer.company_id,
+      runId: researchRunId,
+      signals: analysis.buying_signals.map((s) => ({ signal_text: s })),
+    });
+
     await completeResearchRun(env, researchRunId, provenance);
     return {
       update: env.DB.prepare(`
@@ -2429,8 +2441,9 @@ export default {
         const evidenceSuperseded = await pruneSupersededEvidence(env, dataDays);
         const researchSourcesSuperseded = await pruneSupersededResearchSources(env, dataDays);
         const researchFactsSuperseded = await pruneSupersededResearchFacts(env, dataDays);
+        const researchSignalsSuperseded = await pruneSupersededResearchSignals(env, dataDays);
         const customerImports = await pruneCustomerImports(env, dataDays);
-        const total = gmailSendLog + researchRuns + evidenceSuperseded + researchSourcesSuperseded + researchFactsSuperseded + customerImports;
+        const total = gmailSendLog + researchRuns + evidenceSuperseded + researchSourcesSuperseded + researchFactsSuperseded + researchSignalsSuperseded + customerImports;
         if (total > 0) {
           await writeAuditLog(env, null, {
             actorUserId: null,
@@ -2445,6 +2458,7 @@ export default {
               evidence_superseded: evidenceSuperseded,
               research_sources_superseded: researchSourcesSuperseded,
               research_facts_superseded: researchFactsSuperseded,
+              research_signals_superseded: researchSignalsSuperseded,
               customer_imports: customerImports,
             },
           });

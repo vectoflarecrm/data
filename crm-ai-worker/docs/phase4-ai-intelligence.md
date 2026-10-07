@@ -1,8 +1,9 @@
 # Phase 4 — AI Intelligence: design
 
-Status: design (stages follow after this lands; same rules as Phase 3 —
-additive migrations, fail-open provenance, every stage green on the full
-suite before commit).
+Status: stage 40 shipped (research_signals + panel reader, report in
+`docs/stages/stage-40-research-signals.md`); stages 41/42 pending. Same
+rules as Phase 3 — additive migrations, fail-open provenance, every
+stage green on the full suite before commit.
 
 Source requirements: 建议.txt §二十一 (the layer pipeline), §十四
 (provenance questions — answered by runs/evidence/facts since Stage 14/36/37),

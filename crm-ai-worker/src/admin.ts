@@ -2551,10 +2551,23 @@ async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthCo
         );
         const contacts = await getCustomerContacts(env, customer.company_id);
         const evidence = await getCustomerEvidence(env, customer.company_id);
+        // Phase 4 Stage 40: current buying signals from the typed layer —
+        // until now the panel showed NOTHING for buying_signals (the JSON
+        // cache column was selected but never rendered). Fail-open: a
+        // missing table renders no section, never a broken detail view.
+        let signals: Array<{ signal_text: string }> = [];
+        try {
+          const signalRows = await env.DB.prepare(
+            `SELECT signal_text FROM research_signals WHERE customer_id = ? AND is_current = 1 ORDER BY id`,
+          ).bind(customer.company_id).all<{ signal_text: string }>();
+          signals = signalRows.results ?? [];
+        } catch {
+          // pre-migration window / bare test fixture — no section
+        }
         // Stage 15: both quality axes on one response — fit (lead_score) and
         // data completeness are separate metrics (spec §16), never derived
         // from each other.
-        return jsonResponse({ ...customer, contacts, evidence, data_completeness_score: await getCustomerCompleteness(env, id) });
+        return jsonResponse({ ...customer, contacts, evidence, signals, data_completeness_score: await getCustomerCompleteness(env, id) });
       }
       if (request.method === "PATCH") return await updateCustomer(request, env, id, auth);
     }
@@ -3596,7 +3609,8 @@ const ADMIN_PANEL_HTML = `<!doctype html>
     +(e.evidence_text?'<div class="s-fs12-c6b7280-fstit-mb3">“'+esc(e.evidence_text)+'”</div>':'')
     +(e.source_url?'<a href="'+esc(e.source_url)+'" target="_blank" class="s-fs11-c1677d2-wbba">'+esc(e.source_url.slice(0,90))+'</a>':'')
     +'</div>'});h+='</div>';return h};
-  window.openDetail=function(id){api('/admin/api/customers/'+id).then(function(c){state.selected=id;state.dirty={};$('modalTitle').textContent='客户详情 — '+esc(c.company_name||c.domain||'');var body=buildModal(c);body+=renderEvidence(c.evidence);body+=renderVerifiedSocial(c.social_accounts_verified);body+='<div class="section-title">👥 联系人列表</div>';body+='<div id="contactsArea"></div>';$('modalBody').innerHTML=body;var ca=document.getElementById('contactsArea');if(ca)ca.innerHTML=renderContacts(c.contacts);$('modalMsg').classList.add('hidden');$('modal').classList.add('active');document.body.style.overflow='hidden';
+  var renderSignals=function(sv){if(!sv||!sv.length)return'';var h='<div class="section-title">🚨 采购信号 (Buying Signals)</div><div class="s-dfx-fxdcol-g8">';sv.forEach(function(s){h+='<div class="s-bgf8fafc-bd1 ol e2e8f0-br8-p10 12 s-fs13">'+esc(s.signal_text)+'</div>'});h+='</div>';return h};
+  window.openDetail=function(id){api('/admin/api/customers/'+id).then(function(c){state.selected=id;state.dirty={};$('modalTitle').textContent='客户详情 — '+esc(c.company_name||c.domain||'');var body=buildModal(c);body+=renderSignals(c.signals);body+=renderEvidence(c.evidence);body+=renderVerifiedSocial(c.social_accounts_verified);body+='<div class="section-title">👥 联系人列表</div>';body+='<div id="contactsArea"></div>';$('modalBody').innerHTML=body;var ca=document.getElementById('contactsArea');if(ca)ca.innerHTML=renderContacts(c.contacts);$('modalMsg').classList.add('hidden');$('modal').classList.add('active');document.body.style.overflow='hidden';
       document.querySelectorAll('.edit-btn').forEach(function(btn){btn.onclick=function(){var key=btn.getAttribute('data-key');var row=btn.closest('.field-row');row.classList.add('editing');state.dirty[key]=true;var inp=document.getElementById('inp_'+key);if(inp&&inp.focus)inp.focus()}})}).catch(function(e){showMsg('listMessage',e.message,false)})};
   var closeModal=function(){$('modal').classList.remove('active');document.body.style.overflow='';state.selected=null;state.dirty={}};
   $('closeModal').onclick=closeModal;
