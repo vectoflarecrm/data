@@ -3769,7 +3769,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
         else if(parsed){pl=parsed.personas||[];sl=parsed.solutions||[]}
         if(!parsed&&(!c.personas||!c.personas.length)){h+='<pre class="s-wspw-fs12">'+esc(val)+'</pre>'}
         else{
-          if(pl.length>0){h+='<div class="section-title">👤 客户画像</div>';pl.forEach(function(p){h+='<div class="persona-card"><h4>'+esc(p.name||'未知角色')+(p.role?' — '+esc(p.role):'')+'</h4>';if(p.needs&&p.needs.length){h+='<ul>';p.needs.forEach(function(n){h+='<li>需求: '+esc(n)+'</li>'});h+='</ul>'}if(p.pain_points&&p.pain_points.length){h+='<ul>';p.pain_points.forEach(function(n){h+='<li>痛点: '+esc(n)+'</li>'});h+='</ul>'}h+='</div>')}
+          if(pl.length>0){h+='<div class="section-title">👤 客户画像</div>';pl.forEach(function(p){h+='<div class="persona-card"><h4>'+esc(p.name||'未知角色')+(p.role?' — '+esc(p.role):'')+'</h4>';if(p.needs&&p.needs.length){h+='<ul>';p.needs.forEach(function(n){h+='<li>需求: '+esc(n)+'</li>'});h+='</ul>'}if(p.pain_points&&p.pain_points.length){h+='<ul>';p.pain_points.forEach(function(n){h+='<li>痛点: '+esc(n)+'</li>'});h+='</ul>'}h+='</div>'})}
           if(sl.length>0){h+='<div class="section-title">💡 解决方案</div>';sl.forEach(function(s){h+='<div class="solution-card"><h4>'+esc(s.name||'')+'</h4><p>'+esc(s.value||'')+'</p></div>'})}
           if(pl.length===0&&sl.length===0){h+='<em class="s-faint">暂无数据</em>'}}}
       else if(f.key==='remarks'){h+='<div class="s-wspw-lh16">'+(esc(val)||'<em class="s-faint">暂无备注</em>')+'</div>'}
