@@ -1,6 +1,9 @@
 # Phase 9 — 联系人多触点 (contact multi-touch campaigns)
 
-Status: in progress (design approved by operator sign-off 2026-10-09)
+Status: shipped in full — stages 52/53/54 done (role-priority picking,
+members grain rebuild + multi-contact snapshot via migration 0028,
+panel wiring + persona-roles endpoint). Tests 930/930; per-stage
+reports in docs/stages/stage-52/53/54.
 
 ## 0. Trigger
 

@@ -218,7 +218,7 @@ Origin 守卫              所有变更请求校验同源 Origin/Referer，403 �
 /admin/keys            动态 Key 池（D1，即时生效）/ 冷却监控 / 用量卡片 / 凭据加密与轮换
 /admin/outreach        开发信生成与 Gmail 发送（结构化档案驱动，按国家语言）
                        └─「🎯 定向群发」标签页：客群圈选 / 保存客群 / 分批续发 /
-                          按联系人发送（人物角色筛选，Phase 8）
+                          按联系人发送（人物角色筛选 + 角色优先多触点，Phase 8/9）
 /admin/audit           审计日志查看（只读，action 过滤 + 游标分页）
 /admin/sessions        活跃会话清单与吊销（super_admin）
 /admin/security        WebAuthn 通行密钥自助管理（注册/删除/恢复码重生成）
@@ -249,9 +249,10 @@ GET  /admin/api/outreach/emails|stats|quota 草稿列表 / 统计 / Gmail 配额
 POST /admin/api/outreach/send-batch         批量发送（状态机 + 幂等 + 配额预留）
 POST /admin/api/outreach/segment-preview    群发前预览（口径与创建完全一致）
 GET|POST /admin/api/outreach/groups         客群 CRUD（filters JSON round-trip）
-GET|POST /admin/api/outreach/campaigns      群发任务列表/创建（含 per_person + persona_roles）
+GET|POST /admin/api/outreach/campaigns      群发任务列表/创建（含 per_person / persona_roles / role_priority / contacts_per_company）
 GET  /admin/api/outreach/campaigns/:id/members   成员表（per-person 时含联系人列）
 POST /admin/api/outreach/campaigns/:id/generate|send   两步续跑
+GET  /admin/api/persona-roles               人物角色候选（当前轮 distinct persona_role + 客户数，表单 datalist 数据源；fail-open 返回空表）
 GET  /admin/api/audit-logs                  审计日志查询（audit.read，游标分页）
 POST /admin/api/auth/login|logout|revoke    会话生命周期
 GET  /admin/api/auth/me|sessions            当前身份 / 活跃会话清单
@@ -269,18 +270,22 @@ POST /admin/api/auth/webauthn/recovery/regenerate     重生成恢复码
 - **圈客**：复用 `/admin` 海选的同一套筛选条件（`buildSegmentWhere`），或手工勾选客户（≤500）；
   筛选后可选「排除已发送过的客户」。条件为下拉勾选（国家/细分/产品/关键词，
   选项旁的数字是该条件当前可发信的客户数），不再手填字符串。
-- **智能筛选维度**（Phase 6/8，默认全关）：`has_buying_signal`（只圈当前研究轮
+- **智能筛选维度**（Phase 6/8/9，默认全关）：`has_buying_signal`（只圈当前研究轮
   产出采购信号的公司）、`dimension_floors`（六维评分按维度设下限，如
   `{"icp_fit": 25}`、`{"reachability": 15}`，未评分行不通过——下限即主张）、
-  `persona_roles`（按研究产出的人物角色圈定，如「采购总监」）。
+  `persona_roles`（按研究产出的人物角色圈定，如「采购总监」）、
+  `role_priority`（联系人挑选的角色优先序，仅 per-person 生效，Phase 9）。
   三个入口（海选/预览/创建）共享同一个 SQL builder，口径不会漂移。
-- **快照**：创建任务时把命中的 customer id 写入 `outreach_campaign_members`，
-  之后每一步都按这份名单走。管道会持续改写 `customers`，若每步重跑筛选，
-  「预览 N 家」和「实际发出 N 家」会对不上。
-- **按联系人发送**（Phase 8，`per_person`）：勾选后每家公司快照**一个最早带邮箱的
-  联系人**（contacts.seq 升序），不再要求公司邮箱；返回值区分「匹配 N 家公司 /
-  定向 M 个联系人」，成员表带 contact_id 和联系人列。粒度由创建时的 filters 钉死，
-  后续步骤不会漂移。
+- **快照**：创建任务时把命中的 customer id（per-person 时为 customer+contact 对）
+  写入 `outreach_campaign_members`，之后每一步都按这份名单走。管道会持续改写
+  `customers`，若每一步重跑筛选，「预览 N 家」和「实际发出 N 家」会对不上。
+- **按联系人发送**（Phase 8/9，`per_person`）：勾选后每家公司快照**带邮箱的联系人**，
+  不再要求公司邮箱。挑选顺序（Phase 9）：`role_priority` 关键词命中靠前者优先
+  （职位 LIKE、操作者给定顺序、通配符转义），无关键词回退 contacts.seq 最早；
+  每公司默认 1 人，可选至多 3 人（`contacts_per_company` 多触点，服务端钳制）。
+  返回值区分「匹配 N 家公司 / 定向 M 个联系人」，预览含 slots / slots_covered
+  触点账目；成员表带 contact_id 和联系人列，同一公司多条触点行独立推进。
+  粒度由创建时的 filters 钉死，后续步骤不会漂移。
 - **两步续跑**：`生成草稿` 只处理 `pending` 成员，且只给「尚无该品牌开发信」的客户调 AI；
   `继续发送` 只处理 `generated` 成员。每步一批（1–50），关页面不丢进度。
 - **并发安全**（Security V2）：`campaign_locks` 单飞锁防两个 Cron 同时执行同一任务；
@@ -327,8 +332,8 @@ POST /admin/api/auth/webauthn/recovery/regenerate     重生成恢复码
 
 ```text
 src/index.ts            Cron 入口：认领 → 抓取 → 清洗 → AI 分析 → 回写（2457 行）
-src/admin.ts            面板路由与 7 个面板模板（5127 行）
-src/campaigns.ts        定向群发：筛选 DSL、客群 CRUD、生成/发送两步状态机、per-person 粒度
+src/admin.ts            面板路由与 7 个面板模板（5366 行）
+src/campaigns.ts        定向群发：筛选 DSL、客群 CRUD、生成/发送两步状态机、per-person 粒度、角色优先多触点
 src/research-run.ts     research_runs/sources/facts/signals/personas/profiles 写入（append+supersede）
 src/outreach.ts         开发信生成（结构化档案 → 按国家语言；支持联系人粒度）
 src/outreach-send.ts    发送状态机 draft→reserved→sending→sent/uncertain/failed
@@ -746,7 +751,8 @@ tests/security/         10 文件：经真实 handleAdminRequest 的安全验收
 tests/concurrency/      5 文件：10/50/100 并发风暴——配额预留、幂等、任务认领、
                         研究认领、三层限流
 顶层                     研究分层（research-text/sources/facts/signals/personas/
-                        profiles）、群发（campaign-steps/targeting/persona/lock）、
+                        profiles）、群发（campaign-steps/targeting/persona/
+                        multi-touch/grain-rebuild/persona-roles/lock）、
                         contact-merge、lead-score、评分分离、凭据加密端到端、
                         auth-sessions、webauthn 单元+流程、gmail-quota、
                         outreach-send、rate-limiter(-do)、facets、provider-keys、
@@ -896,11 +902,11 @@ outreach_settings: brand_name, product_category, company_intro, sender_email, se
 outreach_attachments: brand_name, filename, mime_type, size_bytes, content_base64, language（es/de/fr/… 或 all=通用）
 gmail_accounts: label, credential_type（oauth_refresh / service_account）, client_email, private_key（refresh_token 或 PEM，AES-GCM 加密存储 enc:v1:…，不回显；无前缀的存量明文行可读可用，用 POST /admin/api/gmail/encrypt-all 一键转换）, delegated_domain, daily_limit, enabled, last_error, cooldown_until
 outreach_emails: customer_id, contact_id（per-person 群发时的收件联系人，Phase 8）, email_to, brand_name, subject, body, status（draft/reserved/sending/sent/uncertain/failed，Security V2 发送状态机）, idempotency_key（唯一部分索引，防重发）, send_attempts, locked_at/locked_by（过期发送回收）, gmail_message_id, request_id, sent_at
-outreach_groups: name（唯一）, description, filters（SegmentFilters 的 JSON，含 has_buying_signal / dimension_floors / per_person / persona_roles）
+outreach_groups: name（唯一）, description, filters（SegmentFilters 的 JSON，含 has_buying_signal / dimension_floors / per_person / persona_roles / role_priority / contacts_per_company）
 outreach_campaigns: name, brand_name, group_id, filters, total（创建时的快照人数）, status（draft/paused/done）, last_error
-outreach_campaign_members: campaign_id + customer_id（联合主键）, contact_id（per-person 粒度钉死到具体联系人）, status（pending/generated/sent/failed）, outreach_email_id, error
+outreach_campaign_members: campaign_id + customer_id + contact_norm（COALESCE(contact_id,0) 生成列，三元 UNIQUE 索引钉死粒度——Phase 9 重建后无显式主键，同公司可多行联系人触点）, contact_id（per-person 粒度钉死到具体联系人，公司粒度为 NULL）, status（pending/generated/sent/failed）, outreach_email_id, error
 研究分层（Phase 3/4，均 append+supersede + is_current 版本链）: research_runs（每轮一行，含 parser_version/model_name/model_version）, research_sources（逐源 raw_text + content_hash）, research_facts（一行一事实，挂 contact_id）, research_signals（当前轮采购信号）, research_personas（人物画像）, research_profiles（公司画像）；evidence（字段级证据，版本化含完整溯源 source_id/source_hash/content_hash）
-contacts: contact_id（唯一）, company_id, seq（公司内唯一，per-person 群发按此取最早联系人）, 姓名/职位/部门/邮箱/手机/座机/whatsapp/linkedin/社交账号
+contacts: contact_id（唯一）, company_id, seq（公司内唯一，per-person 群发无角色优先序时的取人序）, 姓名/职位/部门/邮箱/手机/座机/whatsapp/linkedin/社交账号
 customer_imports: CSV 原始层（source_row + request_id）
 admin_users / admin_sessions: 会话认证（token 只存 SHA-256 哈希，1 小时过期，可吊销）
 webauthn_credentials / webauthn_challenges / webauthn_recovery_codes: 两步登录凭据、一次性挑战、恢复码（只存哈希）
@@ -931,8 +937,10 @@ gmail_send_log: outreach_email_id, recipient, status, detail, sender_client_emai
 | `0023`–`0025` | Phase 4：research_signals、research_personas、research_profiles + facts 挂 contact_id |
 | `0026_lead_score_breakdown.sql` | Phase 5：六维评分分解缓存列 |
 | `0027_campaign_contact_grain.sql` | Phase 8：outreach_emails / campaign_members 的 contact_id 联系人粒度 |
+| `0028_campaign_members_grain.sql` | Phase 9：campaign_members 粒度重建（contact_norm 生成列 + UNIQUE 索引，同公司多联系人触点） |
 
 `0006` 的两条 `ALTER TABLE ADD COLUMN` 必须**逐条**执行——D1 遇到重复列会整批失败。
 `0019` 的 FK 重建是单事务表重建（已声明 FK 时跳过；发现孤儿草稿行会拒绝执行并给出
-清理 SQL，绝不静默）。CI 每次部署都会自动跑这些升级（幂等，重复执行是 no-op），
-所以正常 push 即可，不需要手动执行。
+清理 SQL，绝不静默）。`0028` 的粒度重建同样是单事务表重建（`DROP …_new` 幂等头 +
+显式列清单 INSERT SELECT，重复执行是 no-op）。CI 每次部署都会自动跑这些升级
+（幂等，重复执行是 no-op），所以正常 push 即可，不需要手动执行。
