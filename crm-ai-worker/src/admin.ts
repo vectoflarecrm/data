@@ -2390,6 +2390,28 @@ async function handleCampaignApi(request: Request, env: AdminEnv, auth: AdminAut
       return jsonResponse(await previewSegment(env, filters, brand));
     }
 
+    // GET /admin/api/persona-roles — distinct buyer-persona roles across
+    // CURRENT research runs, with the count of distinct customers carrying
+    // each role. persona_roles and role_priority both match these values
+    // exactly, so the form's datalists must offer exactly what exists
+    // (Stage 51 leftover: the input shipped without its options source).
+    // Fail-open on a missing research_personas table (migration pending):
+    // an empty datalist is harmless, a 500 on panel load is not.
+    if (path === "/admin/api/persona-roles" && request.method === "GET") {
+      try {
+        const roles = await env.DB.prepare(
+          `SELECT rp.persona_role AS persona_role, COUNT(DISTINCT rp.customer_id) AS n
+           FROM research_personas rp
+           WHERE rp.is_current = 1 AND rp.persona_role IS NOT NULL AND rp.persona_role != ''
+           GROUP BY rp.persona_role ORDER BY n DESC, rp.persona_role LIMIT 100`,
+        ).all<{ persona_role: string; n: number }>();
+        return jsonResponse({ roles: roles.results });
+      } catch (e) {
+        safeLog("warn", "[admin:persona-roles] lookup failed, serving empty (fail-open)", e);
+        return jsonResponse({ roles: [] });
+      }
+    }
+
     // ── Saved groups (可复用客群) ──
     if (path === "/admin/api/outreach/groups" && request.method === "GET") {
       return jsonResponse({ groups: await listGroups(env) });
@@ -3518,6 +3540,7 @@ async function routeAdminRequest(
     // 定向群发 (segment-preview / groups / campaigns) is checked first because
     // handleCampaignApi owns those paths; everything else falls through.
     if (url.pathname.startsWith("/admin/api/outreach/segment-preview")
+      || url.pathname === "/admin/api/persona-roles"
       || url.pathname.startsWith("/admin/api/outreach/groups")
       || url.pathname.startsWith("/admin/api/outreach/campaigns")) {
       return await handleCampaignApi(request, env, auth);
@@ -4031,10 +4054,13 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 <label class="s-chiprow"><input type="checkbox" id="cgHasSignal"> 有购买信号</label>
 <label class="s-chiprow"><input type="checkbox" id="cgExcludeSent" checked> 排除本品牌已发送</label>
 <label class="s-chiprow"><input type="checkbox" id="cgPerPerson"> 按联系人发送</label>
-<input id="cgPersonaRoles" placeholder="人物角色筛选（逗号分隔，如：采购总监,门店老板）" class="s-p8-bd1 ol cbd5e1-br6-fs13-fx1-mw220">
+<input id="cgPersonaRoles" list="dlPersonaRoles" placeholder="人物角色筛选（逗号分隔，如：采购总监,门店老板）" class="s-p8-bd1 ol cbd5e1-br6-fs13-fx1-mw220">
+<input id="cgRolePriority" list="dlPersonaRoles" placeholder="角色优先级（逗号分隔，先匹配的先选）" class="s-p8-bd1 ol cbd5e1-br6-fs13-fx1-mw220">
+<select id="cgContactsPer" class="s-p8-bd1 ol cbd5e1-br6-fs13-w110"><option value="1">每公司 1 人</option><option value="2">每公司 2 人</option><option value="3">每公司 3 人</option></select>
+<datalist id="dlPersonaRoles"></datalist>
 <button class="btn btn-primary btn-sm" id="cgPreview">🔍 统计客群</button>
 </div>
-<p class="cp-hint">只统计已完成研究（<code>status=completed</code>）且<b>有邮箱</b>的客户——没有研究档案无法生成个性化开发信，没有邮箱无法发送。勾选「按联系人发送」后改为定向每家公司<b>最早发现的有邮箱联系人</b>，公司自身邮箱不再要求；没有带邮箱联系人的公司会被跳过。人物角色取自最新研究档案的买家画像（精确匹配）。手工勾选的客户会与其余条件取交集。下拉筛选项右侧的数字是该条件当前命中的<b>可发信</b>客户数（未扣除本品牌已发送）。关键词取自客户名称与描述中的高频业务词，最多可选 5 个。</p>
+<p class="cp-hint">只统计已完成研究（<code>status=completed</code>）且<b>有邮箱</b>的客户——没有研究档案无法生成个性化开发信，没有邮箱无法发送。勾选「按联系人发送」后改为定向联系人：每家公司按「角色优先级」排序取至多「每公司 N 人」个有邮箱联系人（不填优先级时取最早发现的），公司自身邮箱不再要求；没有带邮箱联系人的公司会被跳过。人物角色取自最新研究档案的买家画像（精确匹配）。手工勾选的客户会与其余条件取交集。下拉筛选项右侧的数字是该条件当前命中的<b>可发信</b>客户数（未扣除本品牌已发送）。关键词取自客户名称与描述中的高频业务词，最多可选 5 个。</p>
 <div id="cgPickedWrap" class="s-mt8">
 <div class="s-dfx-g8-aic-fxww"><span class="s-fs13">手工勾选：</span><span id="cgPicked" class="cp-chip"></span><button class="btn btn-sm btn-secondary" id="cgClearPicked">清空</button></div>
 <div class="s-dfx-g8-aic-mt8-fxww"><input id="cgPickSearch" placeholder="搜索公司名/网址/国家以勾选客户" class="s-p8-bd1 ol cbd5e1-br6-fs13-fx1-mw220"><button class="btn btn-sm btn-secondary" id="cgPickSearchBtn">🔎 搜索并勾选</button></div>
@@ -4081,7 +4107,7 @@ function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){retur
 function api(p,o){return fetch(p,o||{}).then(function(r){if(r.status===401){location='/admin/outreach';throw new Error('登录过期')}var ct=r.headers.get('content-type')||'';if(ct.indexOf('json')===-1){return r.text().then(function(t){throw new Error('非JSON响应: '+t.slice(0,100))})}return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||'请求失败');return d})})}
 
 // Tab switching
-document.querySelectorAll('.tab').forEach(function(tab){tab.onclick=function(){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tab-content').forEach(function(c){c.style.display='none'});tab.classList.add('active');document.getElementById('tab-'+tab.dataset.tab).style.display='block';if(tab.dataset.tab==='settings')loadBrands();if(tab.dataset.tab==='gmail')loadGmailAccounts();if(tab.dataset.tab==='campaign'){loadCampaignBrand();loadGroups();loadCampaigns();loadQuota();loadFilterOptions()}if(tab.dataset.tab==='emails'){loadStats();loadEmails();loadQuota()}}});
+document.querySelectorAll('.tab').forEach(function(tab){tab.onclick=function(){document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});document.querySelectorAll('.tab-content').forEach(function(c){c.style.display='none'});tab.classList.add('active');document.getElementById('tab-'+tab.dataset.tab).style.display='block';if(tab.dataset.tab==='settings')loadBrands();if(tab.dataset.tab==='gmail')loadGmailAccounts();if(tab.dataset.tab==='campaign'){loadCampaignBrand();loadGroups();loadCampaigns();loadQuota();loadFilterOptions();loadPersonaRoleOptions()}if(tab.dataset.tab==='emails'){loadStats();loadEmails();loadQuota()}}});
 
 // ── Gmail sender account pool ──
 var GA_TYPE_HINTS={
@@ -4349,7 +4375,7 @@ function loadFilterOptions(){
 function cgFilters(){
   var min=Number(document.getElementById('cgMinScore').value)||0;
   var icp=Number(document.getElementById('cgIcpFloor').value)||0;
-  return {countries:cgDDSel.countries.join(','),segments:cgDDSel.segments.join(','),products:cgDDSel.products.join(','),keywords:cgDDSel.keywords.join(','),min_lead_score:min,exclude_sent:document.getElementById('cgExcludeSent').checked,customer_ids:cgPickedIds,has_buying_signal:document.getElementById('cgHasSignal').checked,dimension_floors:icp>0?{icp_fit:icp}:{},per_person:document.getElementById('cgPerPerson').checked,persona_roles:document.getElementById('cgPersonaRoles').value.trim()};
+  return {countries:cgDDSel.countries.join(','),segments:cgDDSel.segments.join(','),products:cgDDSel.products.join(','),keywords:cgDDSel.keywords.join(','),min_lead_score:min,exclude_sent:document.getElementById('cgExcludeSent').checked,customer_ids:cgPickedIds,has_buying_signal:document.getElementById('cgHasSignal').checked,dimension_floors:icp>0?{icp_fit:icp}:{},per_person:document.getElementById('cgPerPerson').checked,persona_roles:document.getElementById('cgPersonaRoles').value.trim(),role_priority:document.getElementById('cgRolePriority').value.trim(),contacts_per_company:Number(document.getElementById('cgContactsPer').value)||1};
 }
 function cgSetFilters(f){
   f=f||{};
@@ -4360,6 +4386,10 @@ function cgSetFilters(f){
   document.getElementById('cgHasSignal').checked=f.has_buying_signal===true;
   document.getElementById('cgPerPerson').checked=f.per_person===true;
   document.getElementById('cgPersonaRoles').value=Array.isArray(f.persona_roles)?f.persona_roles.join(','):(typeof f.persona_roles==='string'?f.persona_roles:'');
+  document.getElementById('cgRolePriority').value=Array.isArray(f.role_priority)?f.role_priority.join(','):(typeof f.role_priority==='string'?f.role_priority:'');
+  var cp=document.getElementById('cgContactsPer'),cpv=String(f.contacts_per_company||1);
+  if(!cp.querySelector('option[value="'+cpv+'"]'))cpv='1';
+  cp.value=cpv;
   var icpf=document.getElementById('cgIcpFloor'),iv=String((f.dimension_floors&&f.dimension_floors.icp_fit)||'');
   if(iv&&!icpf.querySelector('option[value="'+iv+'"]')){var io=document.createElement('option');io.value=iv;io.textContent='ICP 匹配 ≥'+iv;icpf.appendChild(io)}
   icpf.value=iv;
@@ -4370,6 +4400,22 @@ function cgSetFilters(f){
 }
 function cgRenderPicked(){
   document.getElementById('cgPicked').textContent=cgPickedIds.length?('已选 '+cgPickedIds.length+' 家：'+cgPickedIds.slice(0,20).join(', ')+(cgPickedIds.length>20?' …':'')):'未勾选';
+}
+/* Persona-role datalist: persona_roles and role_priority both match the
+   stored persona_role values EXACTLY, so the inputs offer what exists
+   (counts included once a value is picked). Fail-soft: an empty datalist
+   just leaves free-text entry, which was the Stage 51 status quo. */
+function loadPersonaRoleOptions(){
+  api('/admin/api/persona-roles').then(function(d){
+    var dl=document.getElementById('dlPersonaRoles');
+    dl.innerHTML='';
+    (d.roles||[]).forEach(function(r){
+      var o=document.createElement('option');
+      o.value=r.persona_role;
+      o.textContent=r.n+' 家客户';
+      dl.appendChild(o);
+    });
+  }).catch(function(){});
 }
 function loadCampaignBrand(){
   api('/admin/api/outreach/settings').then(function(d){
@@ -4427,11 +4473,13 @@ document.getElementById('cgPreview').onclick=function(){
   api('/admin/api/outreach/segment-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:document.getElementById('cgBrand').value,filters:cgFilters()})})
     .then(function(d){
       var box=document.getElementById('cgPreviewBox');
+      var n=Number(document.getElementById('cgContactsPer').value)||1;
       var countries=(d.by_country||[]).map(function(c){return esc(c.country||'（未知国家）')+' ×'+c.n}).join('　');
       var rows=(d.sample||[]).map(function(c){return '<tr><td>'+esc(c.display_id||c.id)+'</td><td>'+esc(c.company_name||'-')+'</td><td>'+esc(c.country||'-')+'</td><td>'+(c.lead_score==null?'—':c.lead_score)+'</td><td>'+esc((c.customer_segment||'-').slice(0,26))+'</td><td>'+esc((c.email||'-').slice(0,30))+'</td><td>'+(c.has_draft?'📄 已有草稿':'待生成')+'</td></tr>'}).join('');
       box.innerHTML='<div class="s-bgf0fdfa-bd1 ol 99f6e4-br10-p14">'
         +'<div class="s-fs15-fw700-c0f766e">匹配 '+d.matching+' 家客户'+(pp?'（按联系人：只计有带邮箱联系人的公司）':'')+'</div>'
-        +'<div class="s-fs13-c475569-mt4">其中 <b>'+d.already+'</b> 家'+(pp?'的目标联系人':'')+'该品牌已有开发信（直接沿用，不再花 AI 费用），<b>'+d.pending+'</b> 家需要生成</div>'
+        +'<div class="s-fs13-c475569-mt4">其中 <b>'+d.already+'</b> 家'+(pp?'的目标公司':'')+'该品牌已有开发信（直接沿用，不再花 AI 费用），<b>'+d.pending+'</b> 家需要生成</div>'
+        +(pp&&n>1?'<div class="s-fs13-c475569-mt4">共 <b>'+(d.slots==null?d.matching:d.slots)+'</b> 个联系人触点（每公司至多 '+n+' 个），其中 <b>'+(d.slots_covered==null?d.already:d.slots_covered)+'</b> 个该品牌已有开发信，<b>'+((d.slots==null?d.matching:d.slots)-(d.slots_covered==null?d.already:d.slots_covered))+'</b> 个需要生成</div>':'')
         +(countries?'<div class="s-fs12-c6b7280-mt6">国家分布：'+countries+'</div>':'')
         +(rows?'<table class="cp-table"><thead><tr><th>客户ID</th><th>公司</th><th>国家</th><th>评分</th><th>细分</th><th>邮箱</th><th>开发信</th></tr></thead><tbody>'+rows+'</tbody></table><div class="cp-hint">仅预览前 20 家（按评分优先）</div>':'')
         +'</div>';
@@ -4477,11 +4525,13 @@ document.getElementById('cgCreate').onclick=function(){
   api('/admin/api/outreach/campaigns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
     .then(function(d){
       var pp=document.getElementById('cgPerPerson').checked;
+      var cpn=Number(document.getElementById('cgContactsPer').value)||1;
       var msg;
       if(pp&&typeof d.companies==='number'){
         msg='✅ 群发任务已创建：匹配 '+d.companies+' 家公司，定向 '+d.total+' 个联系人'
           +(d.companies>d.total?'（'+(d.companies-d.total)+' 家公司没有带邮箱的联系人，已跳过）':'')
-          +(d.capped?'（超过单任务上限，已截取）':'')+'。每家公司取最早发现的有邮箱联系人。点「生成草稿」开始分批生成。';
+          +(d.capped?'（超过单任务上限，已截取）':'')
+          +'。每家公司按角色优先级取至多 '+cpn+' 个有邮箱联系人'+(cpn>1?'；建议错开批次发送，避免同公司同日多封':'')+'。点「生成草稿」开始分批生成。';
       }else{
         msg='✅ 群发任务已创建：共 '+d.total+' 家客户'+(d.capped?'（超过单任务上限，已截取评分最高的 '+d.total+' 家）':'')+'。点「生成草稿」开始分批生成。';
       }
