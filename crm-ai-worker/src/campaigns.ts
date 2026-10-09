@@ -25,6 +25,7 @@ const MAX_FILTER_VALUES = 10;
 const MAX_VALUE_LENGTH = 50;
 const MAX_KEYWORDS = 5;
 const MAX_ROLE_PRIORITY = 5;
+const MAX_CONTACTS_PER_COMPANY = 3;
 const MAX_CUSTOMER_IDS = 500;
 const MAX_CAMPAIGN_SIZE = 2000;
 const MAX_GROUP_FILTER_BYTES = 4_000;
@@ -63,6 +64,13 @@ export interface SegmentFilters {
    * meaningful with perPerson — company grain ignores it (ignore-at-use,
    * so a saved group's JSON keeps parsing across grain flips). */
   rolePriority: string[];
+  /** Phase 9 (design §4): how many email-bearing contacts a per-person
+   * snapshot may take per company — 1..3 (default 1 = Phase 8 exactly).
+   * The 3-cap is the phase8 §2.2 spam guard made concrete: one brand
+   * mailing N mailboxes at the same company in one sweep looks like spam;
+   * N ≤ 3 and an explicit opt-in keep multi-touch deliberate. Company
+   * grain reads it as 1 (ignore-at-use, same rule as rolePriority). */
+  contactsPerCompany: number;
 }
 
 export const EMPTY_FILTERS: SegmentFilters = {
@@ -79,6 +87,7 @@ export const EMPTY_FILTERS: SegmentFilters = {
   personaRoles: [],
   perPerson: false,
   rolePriority: [],
+  contactsPerCompany: 1,
 };
 
 function sanitizeList(value: unknown, max: number, label: string): string[] {
@@ -172,6 +181,15 @@ export function parseSegmentFilters(input: unknown): SegmentFilters {
   if (!Number.isFinite(minLeadScore) || minLeadScore < 0 || minLeadScore > 100) {
     throw new Error("min_lead_score 必须在 0-100 之间");
   }
+  const rawContactsPerCompany = raw.contacts_per_company ?? raw.contactsPerCompany;
+  // Booleans are numbers to Number() (true → 1) — reject them outright: a
+  // count field must arrive as a number or a numeric string, nothing else.
+  const contactsPerCompany = rawContactsPerCompany === undefined || rawContactsPerCompany === null || rawContactsPerCompany === ""
+    ? 1
+    : typeof rawContactsPerCompany === "boolean" ? NaN : Number(rawContactsPerCompany);
+  if (!Number.isInteger(contactsPerCompany) || contactsPerCompany < 1 || contactsPerCompany > MAX_CONTACTS_PER_COMPANY) {
+    throw new Error(`contacts_per_company 必须是 1-${MAX_CONTACTS_PER_COMPANY} 之间的整数`);
+  }
   return {
     countries: sanitizeList(raw.countries, MAX_FILTER_VALUES, "countries"),
     segments: sanitizeList(raw.segments, MAX_FILTER_VALUES, "segments"),
@@ -190,6 +208,7 @@ export function parseSegmentFilters(input: unknown): SegmentFilters {
       ? false
       : raw.per_person !== false && raw.per_person !== 0,
     rolePriority: sanitizeList(raw.role_priority ?? raw.rolePriority, MAX_ROLE_PRIORITY, "role_priority"),
+    contactsPerCompany,
   };
 }
 
@@ -208,6 +227,7 @@ export function serializeFilters(f: SegmentFilters): string {
     persona_roles: f.personaRoles,
     per_person: f.perPerson,
     role_priority: f.rolePriority,
+    contacts_per_company: f.contactsPerCompany,
   });
 }
 
@@ -417,6 +437,15 @@ export interface SegmentPreview {
   pending: number;
   already: number;
   noDraft: number;
+  /** Phase 9 (design §5): member rows a create would snapshot. Company
+   * grain mirrors matching; per-person it is the picked-contacts count
+   * (≤ contactsPerCompany per matched company) — with multi-contact this,
+   * not matching, is the number of emails the campaign will produce. */
+  slots: number;
+  /** Phase 9 (design §5): picked contacts that already have a draft or a
+   * sent email for this brand (they cost no AI budget). Mirrors already
+   * for company grain. */
+  slots_covered: number;
   by_country: Array<{ country: string | null; n: number }>;
   sample: Array<{
     id: number;
@@ -438,7 +467,13 @@ export interface SegmentPreview {
  * unit is the company's pick (lowest-seq email-bearing contact) — the
  * matching count requires such a contact, and the has-draft/already checks
  * look at that contact's drafts (contact grain), so the preview counts
- * exactly what the campaign's generate step will adopt or generate. */
+ * exactly what the campaign's generate step will adopt or generate.
+ *
+ * Phase 9 (design §5): with contactsPerCompany > 1 the picked set is the
+ * top-N ranked contacts per company; `slots` / `slots_covered` count that
+ * set from the SAME window-function pick the create snapshot uses — never
+ * a second ranking. Sample rows still show the top-1 pick; slots is the
+ * authoritative count. */
 export async function previewSegment(
   env: AdminEnv,
   filters: SegmentFilters,
@@ -483,7 +518,40 @@ export async function previewSegment(
     : `EXISTS (SELECT 1 FROM outreach_emails e
                 WHERE e.customer_id = c.id AND e.brand_name = ? AND e.status IN ('draft','sent'))`;
 
-  const [count, sample, byCountry, covered] = await Promise.all([
+  // Phase 9 (design §5): the top-N pick set, same window function and same
+  // rank binds the create snapshot uses. The INNER JOIN on contacts implies
+  // the email-bearing-contact gate, so no EXISTS is appended here. Bind
+  // order is textual: clause ?s → rank ?s (SELECT-list window ORDER BY) →
+  // N; the covered query adds brand + N after the clause binds.
+  const n = perPerson ? Math.min(Math.max(filters.contactsPerCompany, 1), MAX_CONTACTS_PER_COMPANY) : 1;
+  const pickInner = `FROM customers c
+                      JOIN contacts ct ON ct.company_id = c.company_id
+                      ${clause} AND ct.email IS NOT NULL AND ct.email != ''`;
+  const slotsPromise = perPerson
+    ? env.DB.prepare(
+        `SELECT COUNT(*) AS n FROM (
+           SELECT ROW_NUMBER() OVER (PARTITION BY c.company_id
+                                     ORDER BY ${rankPrefix}ct.seq, ct.id) AS rn
+           ${pickInner}
+         ) WHERE rn <= ?`,
+      ).bind(...binds, ...rank.binds, n).first<{ n: number }>()
+    : Promise.resolve(null);
+  const slotsCoveredPromise = perPerson && brandName
+    ? env.DB.prepare(
+        `SELECT COUNT(*) AS n FROM (
+           SELECT c.id AS customer_id, ct.id AS contact_id,
+                  ROW_NUMBER() OVER (PARTITION BY c.company_id
+                                     ORDER BY ${rankPrefix}ct.seq, ct.id) AS rn
+           ${pickInner}
+         ) pick
+         JOIN outreach_emails e
+           ON e.customer_id = pick.customer_id AND e.brand_name = ?
+              AND e.status IN ('draft','sent') AND e.contact_id = pick.contact_id
+         WHERE pick.rn <= ?`,
+      ).bind(...binds, ...rank.binds, brandName, n).first<{ n: number }>()
+    : Promise.resolve(null);
+
+  const [count, sample, byCountry, covered, slotsRes, slotsCoveredRes] = await Promise.all([
     env.DB.prepare(`SELECT COUNT(*) AS n FROM customers c ${clause}${contactGate}`)
       .bind(...binds).first<{ n: number }>(),
     env.DB.prepare(
@@ -505,15 +573,23 @@ export async function previewSegment(
              AND ${alreadyExpr}`,
          ).bind(...binds, brandName, ...rank.binds).first<{ n: number }>()
       : Promise.resolve(null),
+    slotsPromise,
+    slotsCoveredPromise,
   ]);
 
   const matching = count?.n ?? 0;
   const already = Math.min(covered?.n ?? 0, matching);
+  // Company grain mirrors the company numbers (slots = matching,
+  // slots_covered = already); per-person reads the pick-set counts.
+  const slots = perPerson ? (slotsRes?.n ?? 0) : matching;
+  const slotsCovered = perPerson ? Math.min(slotsCoveredRes?.n ?? 0, slots) : already;
   return {
     matching,
     pending: Math.max(0, matching - already),
     already,
     noDraft: Math.max(0, matching - already),
+    slots,
+    slots_covered: slotsCovered,
     by_country: byCountry.results,
     sample: sample.results,
   };
@@ -619,7 +695,7 @@ export async function listCampaignMembers(
        LEFT JOIN customers c ON c.id = m.customer_id
        LEFT JOIN contacts ct ON ct.id = m.contact_id
        LEFT JOIN outreach_emails e ON e.id = m.outreach_email_id
-       ${clause} ORDER BY m.customer_id LIMIT ? OFFSET ?`,
+       ${clause} ORDER BY m.customer_id, m.contact_id LIMIT ? OFFSET ?`,
     ).bind(...binds, opts.limit, opts.offset).all(),
     env.DB.prepare(`SELECT COUNT(*) AS n FROM outreach_campaign_members m ${clause}`)
       .bind(...binds).first<{ n: number }>(),
@@ -667,31 +743,32 @@ export async function createCampaign(
       : "没有匹配的客户：请放宽筛选条件（海选需要 status=completed 且有邮箱）");
   }
 
-  // Phase 8 (design §2.2): a per-person snapshot takes exactly ONE
-  // email-bearing contact per matched company; companies without such a
-  // contact drop out (reported via companies vs total). Phase 9 (design
-  // §2): the pick's ORDER BY starts with the shared role-priority rank
-  // (contactRankSql) — same builder as the preview, so the snapshot picks
-  // exactly the contact the preview counted. The rank ?s live in the
-  // SELECT-list subquery, so they bind BEFORE the IN-chunk ids.
+  // Phase 8 (design §2.2) + Phase 9 (design §2/§4): a per-person snapshot
+  // takes the top-N email-bearing contacts per matched company (N =
+  // contactsPerCompany, server-capped at 3; Phase 8 = N 1), ranked by the
+  // shared role-priority rank (contactRankSql) then seq/id — the SAME
+  // order the preview counted. Companies without such a contact drop out
+  // (reported via companies vs total). The rank ?s sit in the SELECT-list
+  // window ORDER BY, so they bind BEFORE the IN-chunk ids and N.
   const memberPairs: Array<{ customer_id: number; contact_id: number }> = [];
   if (perPerson) {
     const rank = contactRankSql(input.filters.rolePriority);
     const rankPrefix = rank.sql ? `${rank.sql}, ` : "";
+    const n = Math.min(Math.max(input.filters.contactsPerCompany, 1), MAX_CONTACTS_PER_COMPANY);
     for (let i = 0; i < memberIds.length; i += 100) {
       const chunk = memberIds.slice(i, i + 100);
       const rows = await env.DB.prepare(
-        `SELECT c.id AS customer_id,
-                (SELECT ct.id FROM contacts ct
-                   WHERE ct.company_id = c.company_id AND ct.email IS NOT NULL AND ct.email != ''
-                   ORDER BY ${rankPrefix}ct.seq, ct.id LIMIT 1) AS contact_id
-         FROM customers c WHERE c.id IN (${chunk.map(() => "?").join(",")})`,
-      ).bind(...rank.binds, ...chunk).all<{ customer_id: number; contact_id: number | null }>();
-      for (const row of rows.results) {
-        if (row.contact_id !== null) {
-          memberPairs.push({ customer_id: row.customer_id, contact_id: row.contact_id });
-        }
-      }
+        `SELECT customer_id, contact_id FROM (
+           SELECT c.id AS customer_id, ct.id AS contact_id,
+                  ROW_NUMBER() OVER (PARTITION BY c.company_id
+                                     ORDER BY ${rankPrefix}ct.seq, ct.id) AS rn
+           FROM customers c
+           JOIN contacts ct ON ct.company_id = c.company_id
+           WHERE c.id IN (${chunk.map(() => "?").join(",")})
+             AND ct.email IS NOT NULL AND ct.email != ''
+         ) WHERE rn <= ?`,
+      ).bind(...rank.binds, ...chunk, n).all<{ customer_id: number; contact_id: number }>();
+      memberPairs.push(...rows.results.map((row) => ({ customer_id: row.customer_id, contact_id: row.contact_id })));
     }
     if (!memberPairs.length) {
       throw new Error("没有可发送的联系人：匹配的公司都没有带邮箱的联系人");
@@ -797,7 +874,10 @@ export interface CampaignStepResult {
    * being finished, which is only true once everything is sent or failed. */
   done: boolean;
   quota: Awaited<ReturnType<typeof getQuota>> | null;
-  results: Array<{ customer_id: number; ok: boolean; error?: string }>;
+  /** Phase 9 (design §5): per-person outcomes carry the contact_id of the
+   * member row they resolved, so multi-touch campaigns report which
+   * contact(s) of a company were handled; company grain leaves it unset. */
+  results: Array<{ customer_id: number; contact_id?: number; ok: boolean; error?: string }>;
 }
 
 /* Upstream failures that a later click can plausibly succeed on. Anything else
@@ -844,8 +924,13 @@ function classifyContactGenerationError(
  *
  * Phase 8: a batch can mix grains — company members (contact_id NULL) and
  * per-person members (contact_id set). Each half is routed to its own
- * generator; a member row is updated by (campaign_id, customer_id), which
- * stays the members PK either way. */
+ * generator.
+ *
+ * Phase 9 (design §5): a per-person campaign may hold SEVERAL members of
+ * the same company (multi-touch), so every member row is addressed by the
+ * full grain key (campaign_id, customer_id, contact_id) — `IS ?` is the
+ * NULL-safe equality in SQLite — and the touched set is keyed by pair, so
+ * one contact's outcome never marks its sibling contact's row. */
 export async function runCampaignGenerate(
   env: AdminEnv,
   campaignId: number,
@@ -870,7 +955,7 @@ export async function runCampaignGenerate(
     const batch = Math.min(Math.max(limit, 1), 50);
     const pending = await env.DB.prepare(
       `SELECT customer_id, contact_id FROM outreach_campaign_members
-       WHERE campaign_id = ? AND status = 'pending' ORDER BY customer_id LIMIT ?`,
+       WHERE campaign_id = ? AND status = 'pending' ORDER BY customer_id, contact_id LIMIT ?`,
     ).bind(campaignId, batch).all<{ customer_id: number; contact_id: number | null }>();
     if (!pending.results.length) {
       const progress = (await getCampaign(env, campaignId))!;
@@ -904,24 +989,31 @@ export async function runCampaignGenerate(
 
     const stmts: D1PreparedStatement[] = [];
     const results: CampaignStepResult["results"] = [];
-    const touched = new Set<number>();
+    // Phase 9 (design §5): multi-touch means several members share a
+    // customer_id, so the touched set is keyed by the full grain pair.
+    // `contact_id IS ?` is SQLite's NULL-safe equality: with a NULL bind it
+    // matches exactly the company-grain row, so every member UPDATE below
+    // targets one row of the pair key instead of every sibling.
+    const pairKey = (customerId: number, contactId: number | null): string =>
+      `${customerId}:${contactId ?? ""}`;
+    const touched = new Set<string>();
 
     for (const row of companyOutcome?.already ?? []) {
       // Already has a draft (or a sent one) for this brand: adopt it instead of
       // generating a second email, so the campaign still gets sent.
       stmts.push(env.DB.prepare(
         `UPDATE outreach_campaign_members SET status = ?, outreach_email_id = ?, error = NULL
-         WHERE campaign_id = ? AND customer_id = ?`,
-      ).bind(row.status === "sent" ? "sent" : "generated", row.email_id, campaignId, row.customer_id));
-      touched.add(row.customer_id);
+         WHERE campaign_id = ? AND customer_id = ? AND contact_id IS ?`,
+      ).bind(row.status === "sent" ? "sent" : "generated", row.email_id, campaignId, row.customer_id, null));
+      touched.add(pairKey(row.customer_id, null));
       results.push({ customer_id: row.customer_id, ok: true });
     }
     for (const row of companyOutcome?.drafts ?? []) {
       stmts.push(env.DB.prepare(
         `UPDATE outreach_campaign_members SET status = 'generated', outreach_email_id = ?, error = NULL
-         WHERE campaign_id = ? AND customer_id = ?`,
-      ).bind(row.email_id, campaignId, row.customer_id));
-      touched.add(row.customer_id);
+         WHERE campaign_id = ? AND customer_id = ? AND contact_id IS ?`,
+      ).bind(row.email_id, campaignId, row.customer_id, null));
+      touched.add(pairKey(row.customer_id, null));
       results.push({ customer_id: row.customer_id, ok: true });
     }
     for (const row of contactOutcome?.already ?? []) {
@@ -929,18 +1021,18 @@ export async function runCampaignGenerate(
       // "already" here means THIS contact already has an email for the brand.
       stmts.push(env.DB.prepare(
         `UPDATE outreach_campaign_members SET status = ?, outreach_email_id = ?, error = NULL
-         WHERE campaign_id = ? AND customer_id = ?`,
-      ).bind(row.status === "sent" ? "sent" : "generated", row.email_id, campaignId, row.customer_id));
-      touched.add(row.customer_id);
-      results.push({ customer_id: row.customer_id, ok: true });
+         WHERE campaign_id = ? AND customer_id = ? AND contact_id IS ?`,
+      ).bind(row.status === "sent" ? "sent" : "generated", row.email_id, campaignId, row.customer_id, row.contact_id));
+      touched.add(pairKey(row.customer_id, row.contact_id));
+      results.push({ customer_id: row.customer_id, contact_id: row.contact_id, ok: true });
     }
     for (const row of contactOutcome?.drafts ?? []) {
       stmts.push(env.DB.prepare(
         `UPDATE outreach_campaign_members SET status = 'generated', outreach_email_id = ?, error = NULL
-         WHERE campaign_id = ? AND customer_id = ?`,
-      ).bind(row.email_id, campaignId, row.customer_id));
-      touched.add(row.customer_id);
-      results.push({ customer_id: row.customer_id, ok: true });
+         WHERE campaign_id = ? AND customer_id = ? AND contact_id IS ?`,
+      ).bind(row.email_id, campaignId, row.customer_id, row.contact_id));
+      touched.add(pairKey(row.customer_id, row.contact_id));
+      results.push({ customer_id: row.customer_id, contact_id: row.contact_id, ok: true });
     }
 
     // Members the generator could not attribute an outcome to. The distinction
@@ -950,7 +1042,7 @@ export async function runCampaignGenerate(
     // 'failed' so it stops blocking the campaign.
     let failed = 0;
     let retryable = 0;
-    const unattributed = pending.results.filter((p) => !touched.has(p.customer_id));
+    const unattributed = pending.results.filter((p) => !touched.has(pairKey(p.customer_id, p.contact_id)));
     for (const row of unattributed) {
       const message = row.contact_id === null
         ? classifyGenerationError(row.customer_id, companyOutcome?.errors ?? [])
@@ -961,9 +1053,10 @@ export async function runCampaignGenerate(
       if (message === null) { retryable++; continue; }
       failed++;
       stmts.push(env.DB.prepare(
-        `UPDATE outreach_campaign_members SET status = 'failed', error = ? WHERE campaign_id = ? AND customer_id = ?`,
-      ).bind(message.slice(0, 300), campaignId, row.customer_id));
-      results.push({ customer_id: row.customer_id, ok: false, error: message });
+        `UPDATE outreach_campaign_members SET status = 'failed', error = ?
+         WHERE campaign_id = ? AND customer_id = ? AND contact_id IS ?`,
+      ).bind(message.slice(0, 300), campaignId, row.customer_id, row.contact_id));
+      results.push({ customer_id: row.customer_id, contact_id: row.contact_id ?? undefined, ok: false, error: message });
     }
 
     for (let i = 0; i < stmts.length; i += 50) {
@@ -999,6 +1092,9 @@ export async function runCampaignGenerate(
 
 interface SendableMember {
   customer_id: number;
+  /** Phase 9 (design §5): the member row's grain key — NULL for company
+   * members, the picked contact for per-person members. */
+  contact_id: number | null;
   outreach_email_id: number;
   email_to: string | null;
   subject: string | null;
@@ -1044,14 +1140,17 @@ export async function runCampaignSend(
     const batch = Math.min(Math.max(limit, 1), 50);
 
     // INNER JOIN semantics are intentional: a member is sendable only while its
-    // draft still exists and is still unsent.
+    // draft still exists and is still unsent. Phase 9 (design §5): the select
+    // carries the grain key and orders siblings deterministically, so a
+    // multi-touch company sends contact 1 then contact 2, never both at once
+    // by accident of a shared customer_id.
     const members = await env.DB.prepare(
-      `SELECT m.customer_id, m.outreach_email_id, e.email_to, e.subject, e.body, c.country
+      `SELECT m.customer_id, m.contact_id, m.outreach_email_id, e.email_to, e.subject, e.body, c.country
        FROM outreach_campaign_members m
        JOIN outreach_emails e ON e.id = m.outreach_email_id
        LEFT JOIN customers c ON c.id = m.customer_id
        WHERE m.campaign_id = ? AND m.status = 'generated' AND e.status = 'draft'
-       ORDER BY m.customer_id LIMIT ?`,
+       ORDER BY m.customer_id, m.contact_id LIMIT ?`,
     ).bind(campaignId, batch).all<SendableMember>();
 
     if (!members.results.length) {
@@ -1095,10 +1194,10 @@ export async function runCampaignSend(
         );
         if (res.ok) {
           sent++;
-          results.push({ customer_id: member.customer_id, ok: true });
+          results.push({ customer_id: member.customer_id, contact_id: member.contact_id ?? undefined, ok: true });
           await env.DB.prepare(
-            "UPDATE outreach_campaign_members SET status = 'sent', error = NULL WHERE campaign_id = ? AND customer_id = ?",
-          ).bind(campaignId, member.customer_id).run();
+            "UPDATE outreach_campaign_members SET status = 'sent', error = NULL WHERE campaign_id = ? AND customer_id = ? AND contact_id IS ?",
+          ).bind(campaignId, member.customer_id, member.contact_id).run();
         } else if ((res as StateSendResult).outcome === "skipped_locked") {
           // Another execution owns this email right now (an operator's
           // single-send click racing the batch, or a fail-open window before
@@ -1109,10 +1208,10 @@ export async function runCampaignSend(
           continue;
         } else {
           failed++;
-          results.push({ customer_id: member.customer_id, ok: false, error: res.error });
+          results.push({ customer_id: member.customer_id, contact_id: member.contact_id ?? undefined, ok: false, error: res.error });
           await env.DB.prepare(
-            "UPDATE outreach_campaign_members SET status = 'failed', error = ? WHERE campaign_id = ? AND customer_id = ?",
-          ).bind((res.error ?? "发送失败").slice(0, 300), campaignId, member.customer_id).run();
+            "UPDATE outreach_campaign_members SET status = 'failed', error = ? WHERE campaign_id = ? AND customer_id = ? AND contact_id IS ?",
+          ).bind((res.error ?? "发送失败").slice(0, 300), campaignId, member.customer_id, member.contact_id).run();
         }
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
@@ -1121,10 +1220,10 @@ export async function runCampaignSend(
         // 'generated' so it is retried on the next day, not burned as failed.
         if (isQuotaStop(message)) { quotaStop = true; break; }
         failed++;
-        results.push({ customer_id: member.customer_id, ok: false, error: message });
+        results.push({ customer_id: member.customer_id, contact_id: member.contact_id ?? undefined, ok: false, error: message });
         await env.DB.prepare(
-          "UPDATE outreach_campaign_members SET status = 'failed', error = ? WHERE campaign_id = ? AND customer_id = ?",
-        ).bind(message.slice(0, 300), campaignId, member.customer_id).run();
+          "UPDATE outreach_campaign_members SET status = 'failed', error = ? WHERE campaign_id = ? AND customer_id = ? AND contact_id IS ?",
+        ).bind(message.slice(0, 300), campaignId, member.customer_id, member.contact_id).run();
         // Missing/invalid Gmail config will fail identically for every remaining
         // member, so stop the batch instead of burning through all of them.
         if (e instanceof GmailConfigError) { stopped = true; break; }

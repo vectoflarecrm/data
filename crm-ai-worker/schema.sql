@@ -528,21 +528,32 @@ CREATE INDEX IF NOT EXISTS idx_campaigns_brand ON outreach_campaigns(brand_name,
 CREATE TABLE IF NOT EXISTS outreach_campaign_members (
   campaign_id INTEGER NOT NULL,
   customer_id INTEGER NOT NULL,
-  -- Phase 8 Stage 49: per-person campaigns — the contact this member's
-  -- draft goes to. NULL = company grain (all pre-Phase-8 campaigns). The
-  -- PK pins one row per company either way, so a per-person snapshot takes
-  -- exactly one email-bearing contact per matched company (lowest seq,
-  -- docs/phase8 §2.2).
+  -- Phase 8 Stage 49 / Phase 9 Stage 53: per-person campaigns — the
+  -- contact this member's draft goes to. NULL = company grain (all
+  -- pre-Phase-8 campaigns). A per-person campaign may now snapshot up to
+  -- contacts_per_company (server cap 3) email-bearing contacts per
+  -- company (docs/phase9 §3-4).
   contact_id INTEGER,
+  -- Phase 9 Stage 53: coalesced grain key for the UNIQUE index below.
+  -- SQLite forbids generated columns in a PRIMARY KEY and treats NULLs
+  -- as distinct inside PK/UNIQUE keys, so the table has no explicit PK
+  -- (implicit rowid) and the one-row-per-grain guarantee lives here:
+  -- company rows collapse to 0, contact rows keep their id.
+  contact_norm INTEGER NOT NULL GENERATED ALWAYS AS (COALESCE(contact_id, 0)) STORED,
   -- pending | generated | sent | skipped | failed
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'generated', 'sent', 'skipped', 'failed')),
   outreach_email_id INTEGER,
-  error TEXT,
-  PRIMARY KEY (campaign_id, customer_id)
+  error TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_campaign_members_queue ON outreach_campaign_members(campaign_id, status);
+
+-- Phase 9 Stage 53: one member row per (campaign, company, grain) — the
+-- rebuild target of migrations/0028 (existing databases). Verified to
+-- reject duplicates on BOTH grains.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_members_grain
+  ON outreach_campaign_members(campaign_id, customer_id, contact_norm);
 
 -- Login brute-force throttling for /admin/login.
 --

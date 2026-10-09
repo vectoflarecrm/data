@@ -76,6 +76,10 @@ function makeDb(): any {
     CREATE TABLE outreach_campaign_members (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       campaign_id INTEGER NOT NULL, customer_id INTEGER NOT NULL,
+      /* Phase 9 (design §5): production members have carried contact_id
+       * since the Phase 8 migration; the send path keys member rows by the
+       * full (campaign, customer, contact) grain. NULL = company grain. */
+      contact_id INTEGER,
       outreach_email_id INTEGER, status TEXT NOT NULL DEFAULT 'pending',
       error TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
