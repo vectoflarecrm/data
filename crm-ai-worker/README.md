@@ -18,13 +18,13 @@ completed / failed
 
 管道遵循「机械清洗 → 语义提取 → 入库关联 → 开发信调用」四层设计：
 
-1. **规则预清洗**（`cleanResearchContextForAi`）：零 token 成本剔除导航/页脚/重复块；`full_research_text` 保留原始多源文本供审计。
+1. **规则预清洗**（`cleanResearchContextForAi`）：零 token 成本剔除导航/页脚/重复块；原始文本按轮次逐源存入 `research_sources`（append+supersede，永不覆盖），旧的 `full_research_text` 大块字段自 Phase 3 起降级为只读兜底，不再写入。
 2. **语义提取**（AI Structured Output）：每条客户额外产出两份 JSON 列——
    - `company_profile`：公司背景、主营产品线、下游客户群体、核心卖点；
    - `outreach_context`：推荐切入角度 + 可引用的具体事实（开发信素材）。
    全部要求基于证据，无据可依的字段留空，严禁臆测。
 3. **入库关联**：合并数据在 `remarks` 中带【合并数据公司ID: xxx】标记，可追溯。
-4. **开发信生成**（outreach 模块）：prompt 优先引用 `company_profile`/`outreach_context` 结构化档案，原始研究文本降级为 2000 字符的兜底参考——开发信引用的都是清洗后的高信号内容，不再需要现读原始网页。
+4. **开发信生成**（outreach 模块）：prompt 优先引用 `company_profile`/`outreach_context` 结构化档案与 `research_personas` 人物画像（Phase 4 起画像感知），原始研究文本降级为 2000 字符的兜底参考——开发信引用的都是清洗后的高信号内容，不再需要现读原始网页。
 
 ## 技术架构与流程详解（供方案评估）
 
@@ -73,8 +73,12 @@ completed / failed
         /about /contact /team /products 等最多 3 页，与主站文本前缀去重
         （首页介绍原文重复的子页直接跳过）；社交页最多 3 页。
 
-阶段 5  研究文本落库
-        全部来源拼装 ≤50k 字符存 full_research_text（审计 + 重试复用依据）。
+阶段 5  研究分层落库（Phase 3/4）
+        每轮研究先建 research_runs 行，再逐源写 research_sources（URL、
+        source_type、raw_text、content_hash，写入侧 50k 预算，append+
+        supersede 保留历史轮次）；结构化事实写 research_facts（一行一事实，
+        挂 contact_id 实体关联）；信号/人物/画像分别落 research_signals /
+        research_personas / research_profiles。full_research_text 不再写入。
 
 阶段 6  清洗与事实预提取（免费，零 token）
         cleanResearchContextForAi：行级噪声模式剔除（导航/页脚/cookie）、
@@ -103,21 +107,28 @@ completed / failed
         fail-open 放行 —— 宁可多花 token 也不漏客户。RELEVANCE_PRECHECK=off 关闭。
 
 阶段 8  写回（一次 env.DB.batch()）
-        联系人指纹去重（姓名|邮箱|电话|wa 全小写拼接）→ contacts 表；
-        field_evidence 删旧插新 → evidence 表（字段级来源 URL + 原文引用
-        + 置信度 0-1）；lead_score（0-100 确定性公式）与画像列写入
-        customers；WHERE id=? AND status='processing' 防过期覆盖。
+        联系人先经同人合并规划器（渠道身份 + 姓名相容，Phase 7）→ contacts 表；
+        field_evidence 按 evidence 版本链 append+supersede（不删旧，可追溯每版）；
+        lead_score（V2 六维公式 + lead_score_breakdown 分解缓存列）与画像列
+        写入 customers；WHERE id=? AND status='processing' 防过期覆盖。
 ```
 
-### lead_score 评分公式（确定性，无 AI 参与）
+### lead_score 评分公式 V2（Phase 5，确定性，无 AI 参与）
 
 ```text
-客户细分命中目标行业   +30   产品类别命中        +25
-找到联系方式           +15   找到邮箱             +5
-有姓名联系人           +10   有采购信号           +10
-规模/地理覆盖完整      +5+5                       上限 100
-用途：面板直查 SQL 筛选高分客户，无需重跑 AI；
-面板柱状图（≥80 / 60-79 / 40-59 / <40 / 未评分）实时展示分布。
+六维分解（weights 总和 = 100，存 lead_score_breakdown JSON 供面板六维条展示）：
+  ICP fit        icp_fit          ≤30   distributor 30 / dealer·oem·wholesaler 25 /
+                                     e-commerce 15 / retailer 10 / user·service 5
+  product fit    product_fit      ≤20   product_categories 非空且非「信息不足」
+  buyer role     buyer_role       ≤10   ≥1 具名联系人 10 / 仅有角色画像 5
+  buying signal  buying_signal    ≤15   buying_signals ≥1 条
+  reachability   reachability     ≤15   联系人邮箱 15 / 手机·whatsapp 8 / 任意联系人 4
+  strategic val  strategic_value  ≤10   company_size +5 / geographic_coverage +5
+「不相关」短路：六维全 0，总分 0。旧行 breakdown 为 NULL → 面板降级为只显总分，
+下一次研究运行自动补齐。总分合同不变（0-100），群发 min_lead_score / 直方图 /
+排序等既有消费方零改动。
+用途：面板直查 SQL 筛选高分客户，无需重跑 AI；群发支持 dimension_floors
+按单维设下限（如 {"icp_fit": 25}）。
 ```
 
 ### data_completeness_score 数据完整度（Stage 15，与 lead_score 相互独立）
@@ -140,16 +151,41 @@ customers.status:   pending → processing → completed / failed
 api_key_usage:      provider × key_index × day 的成功计数（面板 📊 卡片）
 api_key_health:     被限 Key 的冷却截止时间与最近错误（面板 🧊 可一键清除）
                    key_index = "<provider>:<api_configs.id>"，每个 Key 独立槽位
-evidence 表:        每条核心判断的 source_url + evidence_text + confidence
-                    （详情弹窗「证据链」区展示，无需重爬即可核验）
+evidence 表:        每条核心判断的 source_url + evidence_text + confidence，
+                     版本链 append+supersede（is_current），可追溯到确切证据版本
+                     （详情弹窗「证据链」区展示，无需重爬即可核验）
+audit_logs:          每次变更/登录/权限拒绝的 actor + role + action + request_id，
+                     /admin/audit 面板可查；默认保留 180 天（AUDIT_RETENTION_DAYS）
+request_id:          每请求 UUID 贯穿 X-Request-ID 响应头、audit 行与 500 响应体；
+                     outreach_emails / gmail_send_log / customer_imports 行内同款
+                     request_id，一跳定位「这封邮件是哪次请求发的」
 ```
 
 ### 面板安全边界
 
-三处改动都源自同一个前提：仓库是公开的，`/admin/login` 的存在与形式都不算秘密，
-而猜中 token 等于交出 D1 里的全部 API Key。
+仓库是公开的，`/admin/login` 的存在与形式都不算秘密。Security V2 把「单 Token = root 密码」
+升级成了多层信任边界（完整报告：`docs/security-v2-final-report.md`）：
 
 ```text
+Cloudflare Access 周界   配置 CF_ACCESS_TEAM + CF_ACCESS_AUD 后，每个 /admin 请求必须
+                         携带有效 Cf-Access-Jwt-Assertion，且在代码内对团队 JWKS 验签
+                         （AUD/issuer 钉死、fail-closed —— 周界是部署态而非仪表盘态）
+会话层                   ADMIN_PANEL_TOKEN 降级为 bootstrap/恢复凭据；浏览器会话是
+                         admin_sessions 的随机 256-bit token，只存 SHA-256 哈希，
+                         HttpOnly + SameSite=Strict + 1 小时过期 + 可吊销/全吊销
+WebAuthn 2FA（可选）     设置 WEBAUTHN_RP_ID 并注册通行密钥后登录变两步
+                         （token → 断言/恢复码 → 会话），且 Bearer master-token
+                         路径关闭；10 个一次性恢复码兜底
+RBAC                     super_admin / operator / researcher / sender / readonly
+                         五角色 deny-by-default 权限门，角色每次请求从会话行重读
+Origin 守卫              所有变更请求校验同源 Origin/Referer，403 在鉴权之前生效
+安全响应头               nonce-CSP（script/style 均无 unsafe-inline）、HSTS、
+                         X-Frame-Options、Referrer-Policy、Permissions-Policy
+脱敏                     jsonResponse() 单点改写敏感键名；safeLog() 擦除
+                         PEM/enc:v1:/Bearer 模式；仓库级静态测试禁用裸 console.*
+审计                     每次变更、登录失败、权限拒绝写 audit_logs（fail-open，
+                         审计故障不拖垮面板）
+
 登录限流（D1 表 admin_login_attempts）
   scope='ip' 5 次失败 → 锁 15 分钟（Retry-After 告知剩余秒数）
   scope='global' 30 次 → 全体短锁（覆盖轮换来源地址的分布式喷洒）
@@ -179,27 +215,51 @@ evidence 表:        每条核心判断的 source_url + evidence_text + confiden
 ```text
 /admin                 客户 CRUD + 评分分布卡 + CSV 导入 + 海选预过滤
                        （国家/细分/产品为下拉勾选，选项旁显示当前命中数）
-/admin/keys            动态 Key 池（D1，即时生效）/ 冷却监控 / 用量卡片 / 凭据加密
+/admin/keys            动态 Key 池（D1，即时生效）/ 冷却监控 / 用量卡片 / 凭据加密与轮换
 /admin/outreach        开发信生成与 Gmail 发送（结构化档案驱动，按国家语言）
-                       └─「🎯 定向群发」标签页：客群圈选 / 保存客群 / 分批续发
-POST /admin/login      面板登录。限流在读取提交的 token 之前判断；被锁时即使 token
-                       正确也拒绝，且响应不透露该 token 是否正确（否则限流本身
-                       就成了猜测正确值的探针）
+                       └─「🎯 定向群发」标签页：客群圈选 / 保存客群 / 分批续发 /
+                          按联系人发送（人物角色筛选，Phase 8）
+/admin/audit           审计日志查看（只读，action 过滤 + 游标分页）
+/admin/sessions        活跃会话清单与吊销（super_admin）
+/admin/security        WebAuthn 通行密钥自助管理（注册/删除/恢复码重生成）
+POST /admin/login      面板登录（可选两步：token → WebAuthn 断言/恢复码）。限流在读取
+                       提交的 token 之前判断；被锁时即使 token 正确也拒绝，且响应不
+                       透露该 token 是否正确（否则限流本身就成了猜测正确值的探针）
 GET  /admin/api/customers?min_lead_score=   列表/筛选
-POST /admin/api/customers/import            CSV 原始层 → 去重入队
+POST /admin/api/customers/import            CSV 原始层 → 去重入队（5MB/2000 行上限）
 GET  /admin/api/customers/pre-filter        SQL 海选（不花 AI token）
 GET  /admin/api/customers/filter-options    海选/群发筛选下拉的候选项与命中数
                                             （与 buildSegmentWhere 同一条 LIKE，
                                             选项旁的数字 = 勾选后的统计结果）
 GET  /admin/api/customers/lead-score-histogram  评分分布
-GET  /admin/api/customers/:id               详情（含 contacts + evidence）
+GET  /admin/api/customers/:id               详情（含 contacts + evidence + 研究分层）
+POST /admin/api/customers/:id/contacts/merge   手工合并疑似重复联系人（Phase 7）
 GET  /admin/api/keys                        Key 列表（只回 key_hint）+ encryption 状态
 GET  /admin/api/keys/usage                  平台用量/容量汇总
 POST /admin/api/keys                        新增单把 Key（未配置加密密钥则 400）
 POST /admin/api/keys/bulk                   批量导入（按 HMAC 指纹去重）
 POST /admin/api/keys/encryption-key         生成 32 字节 base64 候选密钥（只返回不保存）
 POST /admin/api/keys/encrypt-all            存量明文就地加密（幂等，返回转换/剩余数）
+POST /admin/api/keys/reseal                 密钥轮换后全量重封（配 CREDENTIAL_ENC_KEY_PREVIOUS）
+POST /admin/api/gmail/accounts              发信账号池 CRUD（OAuth refresh / 服务账号）
 POST /admin/api/gmail/encrypt-all           发信凭据存量明文就地加密（同上，同一套 AES-GCM）
+POST /admin/api/gmail/reseal                发信凭据全量重封（同 keys/reseal）
+POST /admin/api/outreach/generate           生成开发信（公司粒度或联系人粒度）
+GET  /admin/api/outreach/emails|stats|quota 草稿列表 / 统计 / Gmail 配额
+POST /admin/api/outreach/send-batch         批量发送（状态机 + 幂等 + 配额预留）
+POST /admin/api/outreach/segment-preview    群发前预览（口径与创建完全一致）
+GET|POST /admin/api/outreach/groups         客群 CRUD（filters JSON round-trip）
+GET|POST /admin/api/outreach/campaigns      群发任务列表/创建（含 per_person + persona_roles）
+GET  /admin/api/outreach/campaigns/:id/members   成员表（per-person 时含联系人列）
+POST /admin/api/outreach/campaigns/:id/generate|send   两步续跑
+GET  /admin/api/audit-logs                  审计日志查询（audit.read，游标分页）
+POST /admin/api/auth/login|logout|revoke    会话生命周期
+GET  /admin/api/auth/me|sessions            当前身份 / 活跃会话清单
+POST /admin/api/auth/sessions/revoke|revoke-all   吊销任意会话 / 全吊销（super_admin）
+POST /admin/api/auth/mfa/assert|recovery    两步登录断言 / 恢复码
+POST /admin/api/auth/webauthn/register/*    通行密钥注册（options / verify）
+GET|DELETE /admin/api/auth/webauthn/credentials[/:id]   凭据清单 / 删除
+POST /admin/api/auth/webauthn/recovery/regenerate     重生成恢复码
 ```
 
 #### 定向群发（`outreach_campaigns`）
@@ -209,11 +269,23 @@ POST /admin/api/gmail/encrypt-all           发信凭据存量明文就地加密
 - **圈客**：复用 `/admin` 海选的同一套筛选条件（`buildSegmentWhere`），或手工勾选客户（≤500）；
   筛选后可选「排除已发送过的客户」。条件为下拉勾选（国家/细分/产品/关键词，
   选项旁的数字是该条件当前可发信的客户数），不再手填字符串。
+- **智能筛选维度**（Phase 6/8，默认全关）：`has_buying_signal`（只圈当前研究轮
+  产出采购信号的公司）、`dimension_floors`（六维评分按维度设下限，如
+  `{"icp_fit": 25}`、`{"reachability": 15}`，未评分行不通过——下限即主张）、
+  `persona_roles`（按研究产出的人物角色圈定，如「采购总监」）。
+  三个入口（海选/预览/创建）共享同一个 SQL builder，口径不会漂移。
 - **快照**：创建任务时把命中的 customer id 写入 `outreach_campaign_members`，
   之后每一步都按这份名单走。管道会持续改写 `customers`，若每步重跑筛选，
   「预览 N 家」和「实际发出 N 家」会对不上。
+- **按联系人发送**（Phase 8，`per_person`）：勾选后每家公司快照**一个最早带邮箱的
+  联系人**（contacts.seq 升序），不再要求公司邮箱；返回值区分「匹配 N 家公司 /
+  定向 M 个联系人」，成员表带 contact_id 和联系人列。粒度由创建时的 filters 钉死，
+  后续步骤不会漂移。
 - **两步续跑**：`生成草稿` 只处理 `pending` 成员，且只给「尚无该品牌开发信」的客户调 AI；
   `继续发送` 只处理 `generated` 成员。每步一批（1–50），关页面不丢进度。
+- **并发安全**（Security V2）：`campaign_locks` 单飞锁防两个 Cron 同时执行同一任务；
+  发送走 draft→reserved→sending→sent 状态机 + 内容幂等键，Worker 崩溃不会重发；
+  Gmail 配额原子预留，并发下也不会超发。
 - **配额语义**：Gmail 400 封/天用完时按**批次中止**处理，成员留在 `generated`，
   明天接着发 —— 绝不标记为 `failed`（那等于永久排除，是这里最容易写反的地方）。
 - **错误分类**：429/超时/5xx 保留成员为 `pending` 可重试；其余标记 `failed` 让任务能收尾。
@@ -246,24 +318,38 @@ POST /admin/api/gmail/encrypt-all           发信凭据存量明文就地加密
 ```
 
 单行解密失败（如换过 `CREDENTIAL_ENC_KEY`）只跳过该行，不拖垮整个 provider。
-相关测试：`tests/credential-crypto.test.ts`（19）、`tests/credential-api.test.ts`（18）。
+轮换：设置 `CREDENTIAL_ENC_KEY_PREVIOUS` 后解密自动回退旧密钥，面板 reseal 扫描
+全量重封到新密钥（`docs/backup-recovery.md` §4）。
+相关测试：`tests/credential-crypto.test.ts`、`tests/credential-api.test.ts`。
 
 
 ### 源码结构
 
 ```text
-src/index.ts            Cron 入口：认领 → 抓取 → 清洗 → AI 分析 → 回写（2100 行）
-src/admin.ts            面板路由与 5 个 *_HTML 面板模板（3233 行）
-src/campaigns.ts        定向群发：筛选 DSL、客群 CRUD、生成/发送两步状态机
-src/facets.ts           筛选下拉候选项（国家/细分/产品/关键词）与 LIKE 命中计数
-src/outreach.ts         开发信生成（结构化档案 → 按国家语言）
-src/gmail.ts            OAuth 发信、配额查询、失败冷却
-src/provider-keys.ts    Key 池解析（D1 优先 / env 兜底）+ 30s isolate 缓存
-src/credential-crypto.ts AES-GCM 加解密 + HMAC 指纹 + HKDF 密钥派生（173 行）
-src/rate-limit.ts       AI provider 的 per-isolate RPM 滑动窗口
+src/index.ts            Cron 入口：认领 → 抓取 → 清洗 → AI 分析 → 回写（2457 行）
+src/admin.ts            面板路由与 7 个面板模板（5127 行）
+src/campaigns.ts        定向群发：筛选 DSL、客群 CRUD、生成/发送两步状态机、per-person 粒度
+src/research-run.ts     research_runs/sources/facts/signals/personas/profiles 写入（append+supersede）
+src/outreach.ts         开发信生成（结构化档案 → 按国家语言；支持联系人粒度）
+src/outreach-send.ts    发送状态机 draft→reserved→sending→sent/uncertain/failed
+src/gmail.ts            OAuth 发信、账号池、失败冷却
+src/gmail-quota.ts      配额原子预留（INSERT…SELECT + TTL 回收）
+src/campaign-lock.ts    群发单飞锁（原子 upsert + token 守护释放）
+src/contact-merge.ts    同人合并规划器（渠道身份 + 姓名相容）
+src/lead-score-dims.ts  六维评分权重（唯一服务端定义处，面板 JS 镜像）
+src/facets.ts           筛选下拉候选项（国家/细分/产品/关键词）与命中计数
+src/provider-keys.ts    Key 池解析（D1 优先 / env 兜底）+ isolate 缓存
+src/credential-crypto.ts AES-GCM 加解密 + HMAC 指纹 + HKDF 密钥派生
+src/rate-limit.ts       本地滑动窗口 + RateLimiterDO 全局滑动窗口（绑定存在时）
+src/rate-limiter.ts     RateLimiter 抽象：Local / D1 固定窗 / Tiered 组合
 src/key-pool.ts         回退链 / 用量记录
 src/bulk-keys.ts        批量粘贴解析（`,` / Tab / `|` 分隔）
-tests/                  11 个文件 / 162 个测试
+src/data-retention.ts   DATA_RETENTION_DAYS 定期清理（gmail_send_log 等）
+src/auth/               rbac（五角色权限门）、webauthn（零依赖验证器）、session-hygiene
+src/security/           cf-access、outbound-url（SSRF）、csv-limits、origin-guard、
+                        redaction、safe-log、request-context
+src/audit/              audit-log、audit-retention
+tests/                  69 个文件 / 899 个测试（54 顶层 + 10 security + 5 concurrency）
 ```
 
 ### 关键设计决策与理由（评估替代方案时的对照基线）
@@ -271,13 +357,15 @@ tests/                  11 个文件 / 162 个测试
 ```text
 1. Cron 拉取而非消息队列   D1 单条 UPDATE 认领已消除并发重复，免排队
    运维；代价是吞吐受 50 子请求/调用硬上限约束（BATCH_SIZE=3 封顶）。
-2. 研究文本落库 + 重试复用  管道中搜索 Credits 最稀缺（1k/月/Key），
-   所有可重试失败都发生在研究之后，重试只补 AI 调用 —— 回填 186 行
-   实测 0 Tavily 消耗。
+2. 研究来源落库 + 重试复用  管道中搜索 Credits 最稀缺（1k/月/Key），
+   所有可重试失败都发生在研究之后，重试只补 AI 调用 —— research_sources
+   按轮次保留原始文本，重试从 sources 重建上下文，回填 186 行实测 0 Tavily 消耗。
 3. 规则优先、AI 兜底       邮箱/电话/JSON-LD/去重全部零 token 完成；
    AI 只做语义判断，输入预算 30k→22k 字符后同额度池可服务约 2 倍请求。
-4. per-isolate 滑动窗口限流 无需 Durable Objects：Cron 单并发 + 免费档
-   低流量下足够；若未来多 Worker 并发写同一上游，需迁移到 DO 全局限流。
+4. 三层限流                本地 per-isolate 滑动窗口（快速层）+ 全局权威层：
+   D1 固定窗口，配置了 RATE_LIMITER Durable Object 绑定时自动升级为 DO
+   全局滑动窗口（消除固定窗 2x 边界超发）+ 429 反应式 api_key_health 冷却兜底。
+   Cron 单并发下本地层已够；DO 层为未来多实例并发准备，代码两层都容忍。
 5. D1 即 Key 池 + 冷却状态  面板改 Key 即时生效、免部署；env Secrets
    兜底保证面板清空不停服。冷却槽位以 api_configs.id 为标识，
    每个 Key 独立，互不牵连。
@@ -287,9 +375,9 @@ tests/                  11 个文件 / 162 个测试
 7. 加密用前缀而非迁移状态位  api_key 保留 NOT NULL 约束，密文以 enc:v1:
    开头。无前缀 = 存量明文 = 直接透传，于是「能否读取」与「是否已加密」
    解耦，部署不依赖人工先跑迁移，加密也就地可回滚。
-8. 限流计数落 D1 而非内存   rate-limit.ts 的桶是 per-isolate 的 Map，isolate
-   重启即清零、多实例下互不可见。登录限流要跨重启、跨实例生效，故存 D1
-   （admin_login_attempts），读取时顺带清理过期行以免另加 cron。
+8. 限流计数落 D1 而非内存   登录限流要跨 isolate 重启、跨实例生效，故存 D1
+   （admin_login_attempts），读取时顺带清理过期行以免另加 cron。provider 限流的
+   本地桶虽是 per-isolate 的 Map，但权威层已落在 D1/DO（见决策 4），两级互补。
 9. 可修复错误不脱敏        500 一律脱敏（只回 request_id + 日志），但我们自己
    写给操作员的 400 保持原文——把「名称不能为空」换成 request_id 只会让
    面板无从下手。
@@ -302,16 +390,16 @@ tests/                  11 个文件 / 162 个测试
 | # | 现状与瓶颈 | 候选替代方案 | 收益 | 代价 |
 |---|---|---|---|---|
 | 1 | 吞吐受 50 子请求/调用限制，BATCH_SIZE=3 封顶 | **Cloudflare Queues**：每客户一条消息，消费者逐条处理，天然并行且无子请求聚合问题 | 吞吐与队列深度线性扩展，不再受单调用限制 | 付费计划（$5/月起，Queues 需 Workers Paid） |
-| 2 | AI provider 的 per-isolate 限流窗口在多 Worker/多区域并发时会低估真实 RPM | **Durable Objects** 全局限流器（强一致单例） | 精准保护上游免费档，杜绝多节点叠加 429 | 增加一跳 DO 调用延迟；免费额度够用但代码复杂度上升 |
-| 3 | 同一域名重新研究时仍会重新抓主站（仅复用 full_research_text） | **KV 页面缓存**：URL→文本 24h TTL | 跨行去重（同集团多客户）、人工复审后重跑省抓取 | KV 读免费档 10 万次/天充裕；需失效策略 |
+| 2 | ~~AI provider 的 per-isolate 限流窗口在多 Worker/多区域并发时会低估真实 RPM~~ **已实现**（Stage 32）：`RateLimiterDO` 每 provider key 一个 DO 实例的真全局滑动窗口，`RATE_LIMITER` 绑定存在时自动接管权威层，无绑定时回退 D1 固定窗口 | 已落地 | 多节点叠加 429 已消除 | — |
+| 3 | 同一域名重新研究时仍会重新抓主站（重试复用只从 `research_sources` 重建文本，不省抓取） | **KV 页面缓存**：URL→文本 24h TTL | 跨行去重（同集团多客户）、人工复审后重跑省抓取 | KV 读免费档 10 万次/天充裕；需失效策略 |
 | 4 | ~~AI 每客户一次全量分析~~ **已实现**：`runRelevancePrecheck`（`@cf/meta/llama-3.1-8b-instruct-fast`，免费 Neurons）在 Gemini 分析前判定相关性，不相关客户直接置 `segment=不相关`（0 付费 token）；解析失败/绑定缺失自动放行（fail-open），`RELEVANCE_PRECHECK=off` 可关闭 | 已落地；后续可迭代：不相关行积累后回看预检准确率，必要时改为「低置信送全量分析」 | 不相关客户（约 30-40%）零付费 token | 预检误杀会漏掉边缘客户（保守提示词缓解） |
 | 5 | 文本清洗基于行模式与哈希去重，近似重复（同一新闻多站转载）仍会通过 | **Embedding 近似去重**（Workers AI bge-m3 + Vectorize） | 再省 10-20% 输入 token；可顺带做客户相似度聚类 | 首条需入库向量；增加一次 embedding 调用/来源块 |
 | 6 | 开发信个性化依赖单客户档案，无跨客户记忆 | **Vectorize RAG**：把 company_profile 向量化，写开发信时召回同细分/同区域客户案例做风格参考 | 开发信质量提升 | 存储/查询成本低，但收益偏质量而非省钱 |
 | 7 | Firecrawl 降级仅 1 次且配额有限（免费 500 次/月） | **Cloudflare Browser Rendering** 绑定（付费计划含免费额度）替代/并列 Firecrawl | 同账号内闭环，无第三方配额 | 需 Workers Paid；冷启动略高 |
 | 8 | 搜索依赖 SaaS（Tavily/Exa/Brave）月额度 | **SearXNG 自托管**（VPS）作最后兜底（现已用 DuckDuckGo HTML 兜底，稳定性一般） | 搜索无额度上限 | 需维护一台 VPS；自托管引擎有被封锁风险 |
-| 9 | 研究文本 50k 字符全量存 D1（行数多后表体积大） | **R2 归档**：>30 天的 full_research_text 移到 R2，D1 只留摘要 | D1 行读成本与体积下降 | 需归档 cron 与读取回源逻辑 |
+| 9 | 原始研究文本按轮次存 `research_sources`（superseded 轮次占多数，行数多后体积大） | **R2 归档**：把 superseded 的 source 行移到 R2，D1 只留当前轮 | D1 行读成本与体积下降 | 需归档 cron 与读取回源逻辑 |
 | 10 | 回退链固定顺序，未按「每 token 实际产出质量」动态排序 | 按 provider 记录 lead_score 达成率，动态调整链序 | 同 token 产出更高分客户 | 需要统计窗口与再平衡逻辑 |
-| 11 | 单个 `ADMIN_PANEL_TOKEN` 无 WebAuthn/2FA；加密密钥与它同级保护，攻破面板即等于拿到明文 Key | WebAuthn 通行密钥（passkey）替代共享 token；密钥改用 KMS/Seal 托管 | 去掉共享秘密与可重放的静态凭据 | 需自定义域与更严格的 cookie/CSP 改造；passkey 需额外备份恢复路径 |
+| 11 | ~~单个 `ADMIN_PANEL_TOKEN` 无 WebAuthn/2FA~~ **已实现**（Stage 29/35）：WebAuthn 两步登录（通行密钥 + 10 个一次性恢复码，激活后 Bearer master-token 路径关闭）；Cloudflare Access 代码内验签周界可选叠加 | 已落地；密钥 KMS/Seal 托管仍留作长期项 | 去掉可重放的静态凭据 | — |
 | 12 | D1 写入权限等同全表读写，面板 SQL 出口无细粒度限制 | 拆分 D1：客户库与凭据库分离，凭据库只允许存储过程式访问 | 即使面板被攻破也难触及 Key 表 | 跨库查询受限，热路径（每请求读 Key）要重新设计 |
 
 **结论基线**：当前架构在免费额度内的单位成本约为「每客户 1 次搜索消耗 + 5-6k AI input tokens」；上述 1/3/4/5 任一落地都可再降 30%+ 成本或翻倍吞吐。若项目升级为生产级批量（>5 万客户/月），优先做 #1（Queues）+ #4（两级过滤）组合。
@@ -440,7 +528,7 @@ npx wrangler secret put OPENROUTER_MODEL
 
 ### RPM 主动限流
 
-Worker 在发起每一次 AI 调用前会先经过本地滑动窗口限流器（`src/rate-limit.ts`）：
+Worker 在发起每一次 AI 调用前会先经过三层限流（`src/rate-limit.ts` + `src/rate-limiter.ts`）：
 
 - 每家 Provider 的默认上限 = 单 Key 免费档 RPM × 已配置 Key 数量：
 
@@ -451,8 +539,11 @@ DeepSeek: 100 RPM/Key（无公开限制）, OpenRouter: 15 RPM/Key
 ```
 
 - 达到上限时不再硬撞上游 429，而是直接切到回退链中的下一家 Provider；
+- 本地层是 per-isolate 滑动窗口（零开销）；全局权威层默认用 D1 固定窗口计数，
+  配置了 wrangler `RATE_LIMITER` Durable Object 绑定时自动升级为 `RateLimiterDO`
+  全局滑动窗口（每 provider key 一个 DO 实例，消除固定窗 2x 边界超发）。
+  任何一层故障 fail-open 到其余层，不会因限流器故障阻塞管道；
 - 配合既有机制：上游返回 429 时自动故障转移，受限 Key 通过 D1 `api_key_health` 表冷却；
-- 限流窗口按 Worker isolate 记账，Cron 任务为单并发顺序执行，足以保护免费档账号；
 - 如需覆盖某家 Provider 的总 RPM，可配置可选 Secret（每家一个，值为数字）：
 
 ```bash
@@ -467,6 +558,30 @@ npx wrangler secret put OPENROUTER_RPM
 ```
 
 这些 `*_RPM` 变量是普通配置（非敏感），CI 会自动同步；不设置时使用默认值。
+
+### 可选运行参数（非敏感，未设置时均有安全默认值）
+
+```text
+OUTREACH_DRY_RUN               "true"/"1" = 走完整发送状态机但 Gmail 传输为 no-op
+                               （不发真邮件、不占配额）——冒烟测试专用，测完必须移除
+AUDIT_RETENTION_DAYS           审计日志保留天数（默认 180，"0" = 永久，写错回退默认）
+DATA_RETENTION_DAYS            gmail_send_log / research_runs / customer_imports /
+                               被取代 evidence 的保留天数（默认 180，"0" = 永久；
+                               contacts/outreach 行是活业务数据，永不按期清理）
+CREDENTIAL_ENC_KEY_PREVIOUS    加密密钥轮换时的旧主密钥：解密自动回退 +
+                               面板 keys/reseal、gmail/reseal 全量重封
+WEBAUTHN_RP_ID                 设置并注册通行密钥后启用两步登录，同时关闭
+                               Bearer master-token 路径（10 个恢复码兜底）
+CF_ACCESS_TEAM / CF_ACCESS_AUD 设置后启用 Cloudflare Access 周界：每个 /admin
+                               请求须带有效 Cf-Access-Jwt-Assertion，代码内
+                               对团队 JWKS 验签（fail-closed）
+CAMPAIGN_LOCK_TTL_MS           群发单飞锁 TTL（过期可被偷锁接管）
+RELEVANCE_PRECHECK             "off" = 关闭相关性预检（默认开启）
+```
+
+`RATE_LIMITER` 是 wrangler.toml 里的 Durable Object 绑定（非 Secret）：存在时
+provider 限流的全局权威层自动切换为 DO 滑动窗口，缺失时回退 D1 固定窗口——
+本地开发与未迁移部署不受影响。
 
 默认模型为：
 
@@ -622,16 +737,21 @@ curl "http://127.0.0.1:8787/__scheduled?cron=*/5%20*%20*%20*%20*"
 npm test
 ```
 
-11 个测试文件 / 162 个测试，全部离线运行（不花 token、不发邮件、不需真实密钥）：
+69 个测试文件 / 899 个测试，全部离线运行（不花 token、不发邮件、不需真实密钥）：
 
 ```text
-campaign-steps.test.ts    群发状态机（CampaignDeps 注入假 AI/Gmail）652 行
-campaigns.test.ts         筛选 DSL、客群 CRUD、预览
-facets.test.ts            筛选下拉候选项：计数 = LIKE 过滤结果、候选词词表
-credential-api.test.ts    凭据加密端到端（明文兼容、去重、幂等迁移）340 行
-admin-hardening.test.ts   登录限流、错误脱敏（含 `return promise` 逃逸的回归测试）
-provider-keys.test.ts     Key 池解析与冷却槽位（含 id 遗漏的回归测试）
-relevance.test.ts  key-pool.test.ts  rate-limit.test.ts  bulk-keys.test.ts
+tests/security/         10 文件：经真实 handleAdminRequest 的安全验收
+                        （auth / rbac / csrf / ssrf / 凭据脱敏与加密 / csv-limits /
+                         headers / audit / prompt-injection）
+tests/concurrency/      5 文件：10/50/100 并发风暴——配额预留、幂等、任务认领、
+                        研究认领、三层限流
+顶层                     研究分层（research-text/sources/facts/signals/personas/
+                        profiles）、群发（campaign-steps/targeting/persona/lock）、
+                        contact-merge、lead-score、评分分离、凭据加密端到端、
+                        auth-sessions、webauthn 单元+流程、gmail-quota、
+                        outreach-send、rate-limiter(-do)、facets、provider-keys、
+                        csv-limits、audit、cf-access、fk-rebuild、health、
+                        dry-run 机制等
 ```
 
 开发服务器使用本地 D1 数据库；先用 `--local` 初始化 Schema 并插入测试数据：
@@ -707,7 +827,7 @@ CREDENTIAL_ENC_KEY
 
 `CREDENTIAL_ENC_KEY` 是 D1 凭据加密密钥（32 字节 base64），**未设置时面板仍可读取存量明文 Key，但会拒绝一切新增/导入**。它同样不要提交到仓库；在 `/admin/keys` 的「🔐 凭据加密」卡片生成并保存即可。**丢失该密钥，存量 Key 无法解密**——加密前请先 `npx wrangler d1 export crm-ai-db --remote --output backup.sql` 备份。
 
-仓库是公开的，`/admin/login` 的存在与形式都不算秘密，而猜中 token 等于交出 D1 里的全部 API Key，因此登录失败会计数并锁定：
+仓库是公开的，`/admin/login` 的存在与形式都不算秘密；未启用 2FA 时猜中 token 仍等于拿到面板权限，因此登录失败会计数并锁定：
 
 - 同一 IP 连续 **5 次**失败 → 锁定 **15 分钟**（`Retry-After` 告知剩余秒数）。
 - 全局计数器 30 次失败 → 全体短暂锁定，覆盖轮换来源地址的分布式喷洒。
@@ -739,7 +859,7 @@ pending → processing → completed
 
 - 使用单条 `UPDATE ... RETURNING` 原子认领 3 条 pending 记录，避免 Cron 并发重复处理；
 - 网页请求超时为 10 秒；
-- AI 分析前会先执行本地数据清洗（`cleanResearchContextForAi`）：剔除导航/页脚/cookie 横幅等样板行、跨来源去重、并按块与全局预算截断（单块 4.5K 字符，总量 30K 字符），显著降低 AI token 消耗；原始研究全文仍保留在 `full_research_text` 供审计；
+- AI 分析前会先执行本地数据清洗（`cleanResearchContextForAi`）：剔除导航/页脚/cookie 横幅等样板行、跨来源去重、并按块与全局预算截断，显著降低 AI token 消耗；原始研究文本按轮次逐源存 `research_sources` 供审计与重试复用，`full_research_text` 列保留为只读兜底，不再写入；
 - 搜索引擎回退链：Tavily → Exa → Searlo → DuckDuckGo（Brave 已停用：免费档需绑卡）；
 - 主网站被反爬拦截（HTTP 403/503）或需 JS 渲染时，自动降级用 Firecrawl 无头渲染抓取一次（可选 Key `FIRECRAWL_API_KEY`，未配置时自动跳过）；
 - 确认被反爬拦截且降级失败的客户标记为「需人工复审」并归入 failed，不消耗重试次数；修复后可在管理面板重新置为 pending；
@@ -757,6 +877,7 @@ pending → processing → completed
 - AI 只能处理网页文本并写入画像字段，不能执行任意 SQL；
 - outreach 面板支持 iSupfactory（SUPs）和 Neptunor（RIB Boats + Inflatable Boats）两种品牌身份，可分别设置发件人、签名和附件；
 - **Gmail 发信账号池**：面板「📮 发信账号」页可添加多个发信身份，支持两种凭据——OAuth 令牌（推荐，无需服务账号密钥，用 `scripts/get-gmail-refresh-token.py` 一次性授权）和传统服务账号（全域委托）；每封邮件自动选用剩余配额最多的健康账号；被 Google 拒绝的账号自动冷却 6 小时；品牌可绑定指定账号；每日总配额 = 各账号之和；详见 `docs/gmail-account-setup.md`；
+- **发送可靠性**（Security V2）：发送走 crash-safe 状态机 `draft → reserved → sending → sent/uncertain/failed`——配额在调 Gmail **之前**原子预留，内容幂等键 + 唯一索引保证 Worker 崩溃/超时后重跑绝不重发同一封；卡在 `sending` 的行隔离为 `uncertain`（可能已消耗 Gmail 侧配额，由操作员裁决，绝不自动重试）；`OUTREACH_DRY_RUN=true` 时全链路空跑（不发真邮件、不占配额），冒烟测试零风险；
 - D1 写回使用 `WHERE id = ? AND status = 'processing'`，避免过期任务覆盖新状态。
 
 ## D1 Schema
@@ -770,18 +891,27 @@ schema.sql
 字段包括：
 
 ```text
-customers: id, company_id, domain, status, customer_segment, personas_and_solutions, remarks, updated_at
+customers: id, company_id, domain, status, customer_segment, personas_and_solutions, remarks, lead_score, lead_score_breakdown（V2 六维分解 JSON）, data_completeness_score, updated_at；full_research_text 降级为只读兜底列
 outreach_settings: brand_name, product_category, company_intro, sender_email, sender_name, company_entity（发送主体名义，正文署名用，留空则用品牌名）, signature, enabled
 outreach_attachments: brand_name, filename, mime_type, size_bytes, content_base64, language（es/de/fr/… 或 all=通用）
 gmail_accounts: label, credential_type（oauth_refresh / service_account）, client_email, private_key（refresh_token 或 PEM，AES-GCM 加密存储 enc:v1:…，不回显；无前缀的存量明文行可读可用，用 POST /admin/api/gmail/encrypt-all 一键转换）, delegated_domain, daily_limit, enabled, last_error, cooldown_until
-outreach_emails: customer_id, email_to, brand_name, subject, body, status, sent_at
-outreach_groups: name（唯一）, description, filters（SegmentFilters 的 JSON）
+outreach_emails: customer_id, contact_id（per-person 群发时的收件联系人，Phase 8）, email_to, brand_name, subject, body, status（draft/reserved/sending/sent/uncertain/failed，Security V2 发送状态机）, idempotency_key（唯一部分索引，防重发）, send_attempts, locked_at/locked_by（过期发送回收）, gmail_message_id, request_id, sent_at
+outreach_groups: name（唯一）, description, filters（SegmentFilters 的 JSON，含 has_buying_signal / dimension_floors / per_person / persona_roles）
 outreach_campaigns: name, brand_name, group_id, filters, total（创建时的快照人数）, status（draft/paused/done）, last_error
-outreach_campaign_members: campaign_id + customer_id（联合主键）, status（pending/generated/sent/failed）, outreach_email_id, error
+outreach_campaign_members: campaign_id + customer_id（联合主键）, contact_id（per-person 粒度钉死到具体联系人）, status（pending/generated/sent/failed）, outreach_email_id, error
+研究分层（Phase 3/4，均 append+supersede + is_current 版本链）: research_runs（每轮一行，含 parser_version/model_name/model_version）, research_sources（逐源 raw_text + content_hash）, research_facts（一行一事实，挂 contact_id）, research_signals（当前轮采购信号）, research_personas（人物画像）, research_profiles（公司画像）；evidence（字段级证据，版本化含完整溯源 source_id/source_hash/content_hash）
+contacts: contact_id（唯一）, company_id, seq（公司内唯一，per-person 群发按此取最早联系人）, 姓名/职位/部门/邮箱/手机/座机/whatsapp/linkedin/社交账号
+customer_imports: CSV 原始层（source_row + request_id）
+admin_users / admin_sessions: 会话认证（token 只存 SHA-256 哈希，1 小时过期，可吊销）
+webauthn_credentials / webauthn_challenges / webauthn_recovery_codes: 两步登录凭据、一次性挑战、恢复码（只存哈希）
+audit_logs: actor_user_id, actor_role, action, resource_type/id, request_id, metadata_json（默认保留 180 天）
+gmail_send_reservations: 配额原子预留（idempotency_key 唯一 + TTL 回收）
+campaign_locks: 群发单飞锁（token 守护释放）
+rate_limit_windows: D1 固定窗口全局限流计数（无 DO 绑定时的权威层）
 admin_login_attempts: scope（ip/global）+ ident（联合主键）, failures, window_start, locked_until（登录失败计数，15 分钟后自动清理）
 api_configs 增补列: key_hint（面板显示的 `AIzaSy…x7f2`）, key_fingerprint（HMAC 指纹，用于去重）；api_key 存 `enc:v1:…` 密文，无前缀即存量明文
 api_key_health: provider, key_index, exhausted_until, last_error
-gmail_send_log: outreach_email_id, recipient, status, detail, sent_at
+gmail_send_log: outreach_email_id, recipient, status, detail, sender_client_email, request_id, sent_at
 ```
 
 并为 `status` 和 `company_id` 建立索引。`outreach_campaign_members` 另按
@@ -796,7 +926,13 @@ gmail_send_log: outreach_email_id, recipient, status, detail, sent_at
 | `0004_outreach_campaigns.sql` | 定向群发三张表 |
 | `0005_admin_login_attempts.sql` | 登录失败计数表 |
 | `0006_api_configs_credential_columns.sql` | `api_configs` 的 `key_hint` / `key_fingerprint` 两列 |
+| `0007`–`0019` | Security V2：会话认证、审计日志、发送状态机 + 幂等索引、配额预留、群发锁、research_runs + 版本化 evidence、评分分离列、D1 限流窗口、contacts 表、WebAuthn 三表、业务行 request_id、outreach_emails FK 重建 |
+| `0020`–`0022` | Phase 3：research_sources 原始层、原子回填、research_facts 类型化事实层 |
+| `0023`–`0025` | Phase 4：research_signals、research_personas、research_profiles + facts 挂 contact_id |
+| `0026_lead_score_breakdown.sql` | Phase 5：六维评分分解缓存列 |
+| `0027_campaign_contact_grain.sql` | Phase 8：outreach_emails / campaign_members 的 contact_id 联系人粒度 |
 
 `0006` 的两条 `ALTER TABLE ADD COLUMN` 必须**逐条**执行——D1 遇到重复列会整批失败。
-CI 每次部署都会自动跑这些升级（幂等，重复执行是 no-op），所以正常 push 即可，
-不需要手动执行。
+`0019` 的 FK 重建是单事务表重建（已声明 FK 时跳过；发现孤儿草稿行会拒绝执行并给出
+清理 SQL，绝不静默）。CI 每次部署都会自动跑这些升级（幂等，重复执行是 no-op），
+所以正常 push 即可，不需要手动执行。
