@@ -24,6 +24,7 @@ import { acquireCampaignLock, CampaignLockedError } from "./campaign-lock";
 const MAX_FILTER_VALUES = 10;
 const MAX_VALUE_LENGTH = 50;
 const MAX_KEYWORDS = 5;
+const MAX_ROLE_PRIORITY = 5;
 const MAX_CUSTOMER_IDS = 500;
 const MAX_CAMPAIGN_SIZE = 2000;
 const MAX_GROUP_FILTER_BYTES = 4_000;
@@ -56,6 +57,12 @@ export interface SegmentFilters {
    * (the panel restores it from the same JSON). Default false = company
    * grain, the pre-Phase-8 behavior. */
   perPerson: boolean;
+  /** Phase 9 (design §2): ordered role keywords for the per-person pick.
+   * Email-bearing contacts rank by the FIRST keyword their contacts.title
+   * contains (operator's order = priority), then seq, then id. Only
+   * meaningful with perPerson — company grain ignores it (ignore-at-use,
+   * so a saved group's JSON keeps parsing across grain flips). */
+  rolePriority: string[];
 }
 
 export const EMPTY_FILTERS: SegmentFilters = {
@@ -71,6 +78,7 @@ export const EMPTY_FILTERS: SegmentFilters = {
   dimensionFloors: {},
   personaRoles: [],
   perPerson: false,
+  rolePriority: [],
 };
 
 function sanitizeList(value: unknown, max: number, label: string): string[] {
@@ -127,6 +135,32 @@ function sanitizeDimensionFloors(value: unknown): Partial<Record<LeadScoreDimens
   return floors;
 }
 
+/** Phase 9 (design §2): escape SQL LIKE metacharacters so a literal
+ * `%`/`_`/`\` in an operator keyword can never widen the match — the
+ * keyword matches itself, nothing else. */
+function escapeLike(input: string): string {
+  return input.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+/** Phase 9 (design §2): the ONE ranking for the per-person contact pick.
+ * previewSegment and createCampaign both compose their ORDER BY from
+ * this builder — two ranking implementations could drift, and the Stage
+ * 49/51 invariant is that the preview counts exactly what the create
+ * snapshot adopts. Empty keyword list → "" (pure seq/id order,
+ * byte-compatible Phase 8). `ct` is the contacts alias both callers use;
+ * LIKE is ASCII-case-insensitive in SQLite (CJK keywords unaffected). */
+export function contactRankSql(rolePriority: string[]): { sql: string; binds: string[] } {
+  if (!rolePriority.length) return { sql: "", binds: [] };
+  const branches = rolePriority.map((role, i) =>
+    i === 0
+      ? `CASE WHEN ct.title LIKE ? ESCAPE '\\' THEN 0`
+      : `WHEN ct.title LIKE ? ESCAPE '\\' THEN ${i}`);
+  return {
+    sql: `${branches.join(" ")} ELSE ${rolePriority.length} END`,
+    binds: rolePriority.map((role) => `%${escapeLike(role)}%`),
+  };
+}
+
 /** Parse + validate an untrusted filter payload (API body or stored JSON). */
 export function parseSegmentFilters(input: unknown): SegmentFilters {
   if (input === undefined || input === null) return { ...EMPTY_FILTERS };
@@ -155,6 +189,7 @@ export function parseSegmentFilters(input: unknown): SegmentFilters {
     perPerson: raw.per_person === undefined
       ? false
       : raw.per_person !== false && raw.per_person !== 0,
+    rolePriority: sanitizeList(raw.role_priority ?? raw.rolePriority, MAX_ROLE_PRIORITY, "role_priority"),
   };
 }
 
@@ -172,6 +207,7 @@ export function serializeFilters(f: SegmentFilters): string {
     dimension_floors: f.dimensionFloors,
     persona_roles: f.personaRoles,
     per_person: f.perPerson,
+    role_priority: f.rolePriority,
   });
 }
 
@@ -421,9 +457,17 @@ export async function previewSegment(
     ? ` AND EXISTS (SELECT 1 FROM contacts ct WHERE ct.company_id = c.company_id AND ct.email IS NOT NULL AND ct.email != '')`
     : "";
   // The company's contact pick, identical to the createCampaign snapshot.
+  // Phase 9 (design §2): the ORDER BY starts with the shared role-priority
+  // rank when keywords are present — same builder, same binds, so the
+  // preview can never disagree with the snapshot. The rank ?s sit inside
+  // this subquery, so they bind BEFORE the clause binds in queries that
+  // embed it in the SELECT list, and AFTER in the covered-count query
+  // (textual ? order is binding order in SQLite).
+  const rank = contactRankSql(filters.rolePriority);
+  const rankPrefix = rank.sql ? `${rank.sql}, ` : "";
   const contactPick = `(SELECT ct.id FROM contacts ct
                         WHERE ct.company_id = c.company_id AND ct.email IS NOT NULL AND ct.email != ''
-                        ORDER BY ct.seq, ct.id LIMIT 1)`;
+                        ORDER BY ${rankPrefix}ct.seq, ct.id LIMIT 1)`;
   // has_draft at the campaign's own grain: company drafts for company
   // campaigns, the picked contact's drafts for per-person campaigns.
   const hasDraftExpr = perPerson
@@ -447,7 +491,7 @@ export async function previewSegment(
               ${hasDraftExpr} AS has_draft
        FROM customers c ${clause}${contactGate}
        ORDER BY c.lead_score DESC NULLS LAST, c.id LIMIT 20`,
-    ).bind(brandName ?? "", ...binds).all<SegmentPreview["sample"][number]>(),
+     ).bind(brandName ?? "", ...rank.binds, ...binds).all<SegmentPreview["sample"][number]>(),
     env.DB.prepare(
       `SELECT c.country, COUNT(*) AS n FROM customers c ${clause}${contactGate}
        GROUP BY c.country ORDER BY n DESC LIMIT 10`,
@@ -459,7 +503,7 @@ export async function previewSegment(
       ? env.DB.prepare(
           `SELECT COUNT(*) AS n FROM customers c ${clause}${contactGate}
              AND ${alreadyExpr}`,
-        ).bind(...binds, brandName).first<{ n: number }>()
+         ).bind(...binds, brandName, ...rank.binds).first<{ n: number }>()
       : Promise.resolve(null),
   ]);
 
@@ -624,21 +668,25 @@ export async function createCampaign(
   }
 
   // Phase 8 (design §2.2): a per-person snapshot takes exactly ONE
-  // email-bearing contact per matched company — lowest seq (the first the
-  // research found), ties by id. The members PK pins one row per company
-  // either way. Companies without such a contact drop out (reported via
-  // companies vs total).
+  // email-bearing contact per matched company; companies without such a
+  // contact drop out (reported via companies vs total). Phase 9 (design
+  // §2): the pick's ORDER BY starts with the shared role-priority rank
+  // (contactRankSql) — same builder as the preview, so the snapshot picks
+  // exactly the contact the preview counted. The rank ?s live in the
+  // SELECT-list subquery, so they bind BEFORE the IN-chunk ids.
   const memberPairs: Array<{ customer_id: number; contact_id: number }> = [];
   if (perPerson) {
+    const rank = contactRankSql(input.filters.rolePriority);
+    const rankPrefix = rank.sql ? `${rank.sql}, ` : "";
     for (let i = 0; i < memberIds.length; i += 100) {
       const chunk = memberIds.slice(i, i + 100);
       const rows = await env.DB.prepare(
         `SELECT c.id AS customer_id,
                 (SELECT ct.id FROM contacts ct
-                  WHERE ct.company_id = c.company_id AND ct.email IS NOT NULL AND ct.email != ''
-                  ORDER BY ct.seq, ct.id LIMIT 1) AS contact_id
+                   WHERE ct.company_id = c.company_id AND ct.email IS NOT NULL AND ct.email != ''
+                   ORDER BY ${rankPrefix}ct.seq, ct.id LIMIT 1) AS contact_id
          FROM customers c WHERE c.id IN (${chunk.map(() => "?").join(",")})`,
-      ).bind(...chunk).all<{ customer_id: number; contact_id: number | null }>();
+      ).bind(...rank.binds, ...chunk).all<{ customer_id: number; contact_id: number | null }>();
       for (const row of rows.results) {
         if (row.contact_id !== null) {
           memberPairs.push({ customer_id: row.customer_id, contact_id: row.contact_id });
