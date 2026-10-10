@@ -53,6 +53,12 @@ import {
 } from "./campaigns";
 import { CampaignLockedError } from "./campaign-lock";
 import { buildFilterOptions } from "./facets";
+import { LEAD_SCORE_WEIGHTS } from "./lead-score-dims";
+import {
+  loadLeadScoreConfig,
+  saveLeadScoreWeights,
+  parseLeadScoreWeights,
+} from "./lead-score-config";
 import { roleHasPermission, requiredPermission } from "./auth/rbac";
 import { applySecurityHeaders, htmlCsp } from "./security-headers";
 import { originGuardRejection } from "./security/origin-guard";
@@ -2640,6 +2646,44 @@ async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthCo
         FROM customers WHERE status = 'completed'
       `).first<{ total: number; unscored: number; s80: number; s60: number; s40: number; s0: number }>();
       return jsonResponse(rows ?? { total: 0, unscored: 0, s80: 0, s60: 0, s40: 0, s0: 0 });
+    }
+    // Phase 10 Stage 55 — GET /admin/api/lead-score/config: the effective
+    // six-dimension weights, the code defaults (the panel's reset-to-default
+    // affordance), and when the profile was last tuned. Fail-open to
+    // defaults pre-tune/pre-migration — the read must always answer.
+    // Gated customers.read in rbac.ts (the score is customer data).
+    if (url.pathname === "/admin/api/lead-score/config" && request.method === "GET") {
+      const config = await loadLeadScoreConfig(env);
+      return jsonResponse({
+        weights: config.weights,
+        // Shallow copy, never the module-level object: pre-tune the config
+        // resolves to LEAD_SCORE_WEIGHTS by reference, and sanitizeResponse's
+        // cycle guard (shared WeakSet) redacts any value it has already
+        // walked — the same reference under both keys would answer
+        // "[REDACTED]" instead of the defaults.
+        defaults: { ...LEAD_SCORE_WEIGHTS },
+        updated_at: config.updatedAt,
+      });
+    }
+    // PUT /admin/api/lead-score/config — retune the dimension weights. The
+    // body IS the weights object: exactly the six dimension keys, each an
+    // integer 0-100, summing to exactly 100 (the frozen 0-100 total
+    // contract) — anything else is a 400 carrying the reason. Audited with
+    // old→new weights; the Stage 57 re-score sweep is what makes the stored
+    // per-customer scores follow. Gated scores.write (super_admin +
+    // operator) in rbac.ts; fail-loud on save (a silent no-op config write
+    // would be a lie).
+    if (url.pathname === "/admin/api/lead-score/config" && request.method === "PUT") {
+      const raw: unknown = await request.json().catch(() => null);
+      const parsed = parseLeadScoreWeights(raw);
+      if (!parsed.ok) return jsonResponse({ detail: parsed.error }, 400);
+      const before = await loadLeadScoreConfig(env);
+      const updatedAt = await saveLeadScoreWeights(env, parsed.weights, auth.user.id);
+      await auditAdminAction(env, request, auth, "UPDATE_SCORE_CONFIG", "lead_score_config", "1", {
+        old_weights: before.weights,
+        new_weights: parsed.weights,
+      });
+      return jsonResponse({ ok: true, weights: parsed.weights, updated_at: updatedAt });
     }
     // GET /admin/api/customers/filter-options — option lists (with live match
     // counts) behind the 海选 / 定向群发 filter dropdowns. Counts reuse the

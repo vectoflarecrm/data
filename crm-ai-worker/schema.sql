@@ -785,6 +785,20 @@ CREATE INDEX IF NOT EXISTS idx_research_signals_run ON research_signals(research
 CREATE INDEX IF NOT EXISTS idx_research_personas_customer ON research_personas(customer_id, is_current);
 CREATE INDEX IF NOT EXISTS idx_research_personas_run ON research_personas(research_run_id);
 
+-- Phase 10 Stage 55: operator-tunable lead-score dimension weights (the
+-- audit's deferred "making weights configurable" item, 建议 §十八). Single
+-- global profile — CHECK(id = 1) is the enforced invariant. weights_json is
+-- written only through the validated PUT /admin/api/lead-score/config (six
+-- integer keys 0-100 summing to exactly 100); missing table/row fails open
+-- to the code defaults in src/lead-score-dims.ts. Migration 0029 carries
+-- the same CREATE for existing databases.
+CREATE TABLE IF NOT EXISTS lead_score_config (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  weights_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT
+);
+
 -- The §18.1 UNIQUE indexes — customers(domain), api_configs(provider,
 -- key_fingerprint), contacts.contact_id and contacts(company_id, seq) — are
 -- applied by the dedicated CI step, NOT here: schema.sql runs against the

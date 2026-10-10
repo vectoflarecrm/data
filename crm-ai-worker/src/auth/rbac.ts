@@ -22,6 +22,7 @@ export type Permission =
   | "research.run"
   | "campaigns.read"
   | "campaigns.write"
+  | "scores.write"
   | "outreach.read"
   | "outreach.generate"
   | "outreach.send"
@@ -48,6 +49,7 @@ export const ROLE_PERMISSIONS: Record<AdminRole, ReadonlySet<Permission>> = {
     "customers.write",
     "research.run",
     "campaigns.write",
+    "scores.write",
     "outreach.generate",
     "outreach.send",
     "providers.write",
@@ -60,6 +62,7 @@ export const ROLE_PERMISSIONS: Record<AdminRole, ReadonlySet<Permission>> = {
     "research.run",
     "campaigns.read",
     "campaigns.write",
+    "scores.write",
     "outreach.read",
     "outreach.generate",
   ]),
@@ -182,6 +185,17 @@ export function requiredPermission(url: URL, method: string): Permission | null 
   // Mutations don't exist: non-GET maps to null and 404s in the router.
   if (parts[2] === "audit-logs") {
     return method === "GET" ? "audit.read" : null;
+  }
+
+  // ── Lead-score configuration (/admin/api/lead-score…) ──
+  // Phase 10: dimension-weight tuning (Stage 55) and the re-score sweep
+  // (Stage 57). The read side rides customers.read — the score is customer
+  // data; mutations are the scores.write trust level (super_admin +
+  // operator: weight tuning is business/research semantics, not credential
+  // management).
+  if (parts[2] === "lead-score") {
+    if (method === "GET") return "customers.read";
+    return "scores.write";
   }
 
   // ── Customers (/admin/api/customers…) ──

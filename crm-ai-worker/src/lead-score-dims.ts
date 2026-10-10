@@ -22,7 +22,12 @@ export const LEAD_SCORE_DIMENSIONS = [
 
 export type LeadScoreDimension = (typeof LEAD_SCORE_DIMENSIONS)[number];
 
-export const LEAD_SCORE_WEIGHTS: Record<LeadScoreDimension, number> = {
+/** The weights record shape: one integer weight per dimension. Phase 10:
+ * these are the operator-tunable values (src/lead-score-config.ts stores
+ * them); the constant below stays the fail-open default. */
+export type LeadScoreWeights = Record<LeadScoreDimension, number>;
+
+export const LEAD_SCORE_WEIGHTS: LeadScoreWeights = {
   icp_fit: 30,
   product_fit: 20,
   buyer_role: 10,
