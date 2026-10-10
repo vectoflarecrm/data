@@ -6,9 +6,11 @@ import {
   buildSegmentWhere,
   segmentClause,
   previewSegment,
+  createGroup,
+  updateGroup,
   EMPTY_FILTERS,
 } from "../src/campaigns";
-import { LEAD_SCORE_DIMENSIONS, LEAD_SCORE_WEIGHTS } from "../src/lead-score-dims";
+import { LEAD_SCORE_DIMENSIONS, LEAD_SCORE_WEIGHTS, type LeadScoreWeights } from "../src/lead-score-dims";
 import type { AdminEnv } from "../src/admin";
 import { handleAdminRequest } from "../src/admin";
 
@@ -687,6 +689,99 @@ describe("pre-filter endpoint: persona_roles query param", () => {
     expect(body.matching).toBe(1);
     expect(body.sample[0].company_name).toBe("Acme");
 
+    db.close();
+  });
+});
+
+/* ── Phase 10 Stage 56: effective-weight floor clamps
+ * (docs/phase10-lead-score-config.md §3). Dimension floors validate against
+ * the weights effective at segment build time — operator-tuned via
+ * lead_score_config, loaded fail-open; every omitted-weights call site above
+ * keeps the pinned-defaults behavior byte-for-byte. ── */
+
+const TUNED_WEIGHTS: LeadScoreWeights = {
+  icp_fit: 60, product_fit: 10, buyer_role: 10,
+  buying_signal: 10, reachability: 5, strategic_value: 5,
+};
+
+describe("Phase 10: dimension floors clamp against the effective weights", () => {
+  it("accepts a floor the tuned config can reach and rejects one it cannot", () => {
+    expect(parseSegmentFilters({ dimension_floors: { icp_fit: 40 } }, TUNED_WEIGHTS).dimensionFloors)
+      .toEqual({ icp_fit: 40 });
+    expect(() => parseSegmentFilters({ dimension_floors: { icp_fit: 61 } }, TUNED_WEIGHTS))
+      .toThrow(/icp_fit 门槛必须在 0-60 之间/);
+  });
+
+  it("the omitted-weights path keeps the pinned-defaults clamp exactly", () => {
+    // 40 is reachable under TUNED_WEIGHTS but NOT under the code defaults —
+    // the single-argument call must keep rejecting it (existing behavior).
+    expect(() => parseSegmentFilters({ dimension_floors: { icp_fit: 40 } }))
+      .toThrow(/icp_fit 门槛必须在 0-30 之间/);
+  });
+
+  it("deserializeFilters threads the weights (stored group JSON at build time)", () => {
+    const stored = JSON.stringify({ dimension_floors: { icp_fit: 40 } });
+    expect(deserializeFilters(stored, TUNED_WEIGHTS).dimensionFloors).toEqual({ icp_fit: 40 });
+    // Under the code defaults the same floor 40 exceeds the 0-30 clamp, and
+    // deserializeFilters is fail-open by design — stored JSON degrades to
+    // EMPTY_FILTERS, never a throw (weights or not, corrupt or invalid).
+    expect(deserializeFilters(stored).dimensionFloors).toEqual({});
+    expect(
+      deserializeFilters(JSON.stringify({ dimension_floors: { icp_fit: 61 } }), TUNED_WEIGHTS),
+    ).toEqual({ ...EMPTY_FILTERS });
+    expect(deserializeFilters("{broken", TUNED_WEIGHTS)).toEqual({ ...EMPTY_FILTERS });
+  });
+
+  it("createGroup/updateGroup load the tuned weights from the database (fail-open pre-tune and pre-migration)", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const GROUPS_DDL = `
+      CREATE TABLE outreach_groups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT,
+        filters TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );`;
+    const CONFIG_DDL = `
+      CREATE TABLE lead_score_config (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        weights_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        updated_by TEXT
+      );`;
+
+    // Pre-migration database (no lead_score_config table at all): the load
+    // fails open to the code defaults — group creation works, clamp stays 30.
+    const bare = new DatabaseSync(":memory:");
+    bare.exec(GROUPS_DDL);
+    const bareEnv = { DB: new FakeD1(bare) } as unknown as AdminEnv;
+    await expect(
+      createGroup(bareEnv, { name: "g1", filters: { dimension_floors: { icp_fit: 40 } } }),
+    ).rejects.toThrow(/0-30/);
+    expect(await createGroup(bareEnv, { name: "g1", filters: { dimension_floors: { icp_fit: 30 } } })).toBe(1);
+    bare.close();
+
+    // Tuned database: the same floor 40 that the defaults rejected is now a
+    // valid segment; floors past the tuned max still reject with its range.
+    const db = new DatabaseSync(":memory:");
+    db.exec(GROUPS_DDL + CONFIG_DDL);
+    const env = { DB: new FakeD1(db) } as unknown as AdminEnv;
+    // No config row yet (never tuned): still the code defaults.
+    await expect(
+      createGroup(env, { name: "g1", filters: { dimension_floors: { icp_fit: 40 } } }),
+    ).rejects.toThrow(/0-30/);
+    db.prepare(
+      "INSERT INTO lead_score_config (id, weights_json, updated_at) VALUES (1, ?, '2026-01-01 00:00:00')",
+    ).run(JSON.stringify(TUNED_WEIGHTS));
+    const id = await createGroup(env, { name: "g1", filters: { dimension_floors: { icp_fit: 40 } } });
+    expect(id).toBe(1);
+    await expect(
+      updateGroup(env, id, { filters: { dimension_floors: { icp_fit: 61 } } }),
+    ).rejects.toThrow(/0-60/);
+    await updateGroup(env, id, { filters: { dimension_floors: { icp_fit: 55 } } });
+    const row = db.prepare("SELECT filters FROM outreach_groups WHERE id = ?").get(id) as { filters: string };
+    expect(JSON.parse(row.filters).dimension_floors).toEqual({ icp_fit: 55 });
     db.close();
   });
 });

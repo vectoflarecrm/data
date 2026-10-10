@@ -1,5 +1,6 @@
 import { AdminEnv } from "./admin";
-import { LEAD_SCORE_DIMENSIONS, LEAD_SCORE_WEIGHTS, type LeadScoreDimension } from "./lead-score-dims";
+import { LEAD_SCORE_DIMENSIONS, LEAD_SCORE_WEIGHTS, type LeadScoreDimension, type LeadScoreWeights } from "./lead-score-dims";
+import { loadLeadScoreWeights } from "./lead-score-config";
 import { generateOutreachForCustomerIds, generateOutreachForContactIds, attachmentLangForCountry } from "./outreach";
 import { getQuota, sendOutreachEmail, sendDelayMs, GmailConfigError } from "./gmail";
 import { sendWithStateMachine, type StateSendResult } from "./outreach-send";
@@ -118,11 +119,17 @@ function sanitizeIds(value: unknown): number[] {
   return [...new Set(ids)];
 }
 
-/** Phase 6 (design §2.2): validate per-dimension floors against the pinned
- * Phase 5 weights (single server-side home: lead-score-dims). Unknown keys
- * are typos — rejected, not ignored; zero floors are dropped (no-op);
- * out-of-range values are rejected like min_lead_score. */
-function sanitizeDimensionFloors(value: unknown): Partial<Record<LeadScoreDimension, number>> {
+/** Phase 6 (design §2.2): validate per-dimension floors against the
+ * effective lead-score weights (Phase 10: operator-tunable via
+ * lead_score_config, loaded fail-open by the callers below; the default
+ * parameter keeps the pinned-defaults behavior for every call site that
+ * has no env to load from). Unknown keys are typos — rejected, not
+ * ignored; zero floors are dropped (no-op); out-of-range values are
+ * rejected like min_lead_score. */
+function sanitizeDimensionFloors(
+  value: unknown,
+  weights: LeadScoreWeights,
+): Partial<Record<LeadScoreDimension, number>> {
   if (value === undefined || value === null) return {};
   if (typeof value !== "object" || Array.isArray(value)) {
     throw new Error("dimension_floors 必须是 JSON 对象");
@@ -135,7 +142,7 @@ function sanitizeDimensionFloors(value: unknown): Partial<Record<LeadScoreDimens
     }
     const dim = key as LeadScoreDimension;
     const num = Number(raw[key]);
-    const max = LEAD_SCORE_WEIGHTS[dim];
+    const max = weights[dim];
     if (!Number.isInteger(num) || num < 0 || num > max) {
       throw new Error(`${dim} 门槛必须在 0-${max} 之间`);
     }
@@ -170,8 +177,15 @@ export function contactRankSql(rolePriority: string[]): { sql: string; binds: st
   };
 }
 
-/** Parse + validate an untrusted filter payload (API body or stored JSON). */
-export function parseSegmentFilters(input: unknown): SegmentFilters {
+/** Parse + validate an untrusted filter payload (API body or stored JSON).
+ * Phase 10: `weights` clamps dimension floors against the effective
+ * lead-score config (callers with an env load it fail-open and pass it in);
+ * omitted, the pinned code defaults apply — every test/legacy call site
+ * keeps its exact behavior. */
+export function parseSegmentFilters(
+  input: unknown,
+  weights: LeadScoreWeights = LEAD_SCORE_WEIGHTS,
+): SegmentFilters {
   if (input === undefined || input === null) return { ...EMPTY_FILTERS };
   if (typeof input !== "object" || Array.isArray(input)) {
     throw new Error("filters 必须是 JSON 对象");
@@ -202,7 +216,7 @@ export function parseSegmentFilters(input: unknown): SegmentFilters {
     hasBuyingSignal: raw.has_buying_signal === undefined
       ? false
       : raw.has_buying_signal !== false && raw.has_buying_signal !== 0,
-    dimensionFloors: sanitizeDimensionFloors(raw.dimension_floors ?? raw.dimensionFloors),
+    dimensionFloors: sanitizeDimensionFloors(raw.dimension_floors ?? raw.dimensionFloors, weights),
     personaRoles: sanitizeList(raw.persona_roles ?? raw.personaRoles, MAX_FILTER_VALUES, "persona_roles"),
     perPerson: raw.per_person === undefined
       ? false
@@ -231,10 +245,13 @@ export function serializeFilters(f: SegmentFilters): string {
   });
 }
 
-export function deserializeFilters(raw: string | null): SegmentFilters {
+export function deserializeFilters(
+  raw: string | null,
+  weights: LeadScoreWeights = LEAD_SCORE_WEIGHTS,
+): SegmentFilters {
   if (!raw) return { ...EMPTY_FILTERS };
   try {
-    return parseSegmentFilters(JSON.parse(raw));
+    return parseSegmentFilters(JSON.parse(raw), weights);
   } catch {
     return { ...EMPTY_FILTERS };
   }
@@ -374,7 +391,11 @@ export async function createGroup(
 ): Promise<number> {
   const name = String(input.name ?? "").trim().slice(0, 100);
   if (!name) throw new Error("客群名称不能为空");
-  const filters = serializeFilters(parseSegmentFilters(input.filters));
+  // Phase 10: floors clamp against the weights effective NOW (fail-open) —
+  // a group saved this moment should not carry a floor the current config
+  // can never produce.
+  const weights = await loadLeadScoreWeights(env);
+  const filters = serializeFilters(parseSegmentFilters(input.filters, weights));
   if (filters.length > MAX_GROUP_FILTER_BYTES) throw new Error("筛选条件过大");
   const description = typeof input.description === "string"
     ? input.description.trim().slice(0, 200) || null
@@ -410,7 +431,9 @@ export async function updateGroup(
     binds.push(typeof input.description === "string" ? input.description.trim().slice(0, 200) || null : null);
   }
   if (input.filters !== undefined) {
-    const filters = serializeFilters(parseSegmentFilters(input.filters));
+    // Phase 10: same effective-weights clamp as createGroup (fail-open).
+    const weights = await loadLeadScoreWeights(env);
+    const filters = serializeFilters(parseSegmentFilters(input.filters, weights));
     if (filters.length > MAX_GROUP_FILTER_BYTES) throw new Error("筛选条件过大");
     sets.push("filters = ?");
     binds.push(filters);

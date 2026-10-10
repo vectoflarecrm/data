@@ -1,5 +1,6 @@
 import { handleAdminRequest } from "./admin";
-import { LEAD_SCORE_WEIGHTS } from "./lead-score-dims";
+import { LEAD_SCORE_WEIGHTS, type LeadScoreWeights } from "./lead-score-dims";
+import { loadLeadScoreWeights } from "./lead-score-config";
 import { planContactPersist, type ExistingContact } from "./contact-merge";
 import { rpmLimitFor, acquireRpmSlot, rpmEnvOverride } from "./rate-limit";
 import { collectKeyPool, buildKeyOrder } from "./key-pool";
@@ -2027,7 +2028,18 @@ export interface LeadScoreBreakdown {
 // for the engine here and re-exported below so tests/lead-score-v2.test.ts
 // keeps importing from this module unchanged.
 
-export function computeLeadScoreV2(a: CustomerAnalysis): LeadScoreBreakdown {
+// Phase 10 (design docs/phase10-lead-score-config.md §3): the dimension
+// weights are operator-tunable (lead_score_config, Stage 55). The tiers are
+// RATIOS of the configured weight — Math.round(ratio × weight) — so a retune
+// rescales every tier proportionally without a deploy. Under the default
+// weights every ratio resolves to the Phase 5 integers exactly (25 = 5/6·30,
+// 15 = ½·30, 10 = ⅓·30, 5 = ⅙·30, 8 = 8/15·15, 4 = 4/15·15): the golden
+// suite (tests/lead-score-v2.test.ts) pins that byte-identity. Callers that
+// omit the weights (tests, ad-hoc analysis) get the code defaults.
+export function computeLeadScoreV2(
+  a: CustomerAnalysis,
+  weights: LeadScoreWeights = LEAD_SCORE_WEIGHTS,
+): LeadScoreBreakdown {
   // Irrelevant companies are worthless by definition — the AI precheck marks
   // them segment=不相关 with score 0, so the SQL-based histogram/filter can
   // never surface one as a lead regardless of which fields were populated.
@@ -2043,32 +2055,43 @@ export function computeLeadScoreV2(a: CustomerAnalysis): LeadScoreBreakdown {
     };
   }
   // ICP fit: wholesale buyers outweigh end users (V1 segment tiering).
-  let icpFit = 0;
+  let icpRatio = 0;
   const seg = a.customer_segment.toLowerCase();
-  if (seg.includes("distributor")) icpFit = LEAD_SCORE_WEIGHTS.icp_fit;
-  else if (seg.includes("dealer") || seg.includes("oem") || seg.includes("wholesaler")) icpFit = 25;
-  else if (seg.includes("e-commerce")) icpFit = 15;
-  else if (seg.includes("retailer")) icpFit = 10;
-  else if (seg.includes("user") || seg.includes("service")) icpFit = 5;
+  if (seg.includes("distributor")) icpRatio = 1;
+  else if (seg.includes("dealer") || seg.includes("oem") || seg.includes("wholesaler")) icpRatio = 5 / 6;
+  else if (seg.includes("e-commerce")) icpRatio = 1 / 2;
+  else if (seg.includes("retailer")) icpRatio = 1 / 3;
+  else if (seg.includes("user") || seg.includes("service")) icpRatio = 1 / 6;
+  const icpFit = Math.round(icpRatio * weights.icp_fit);
   // Product fit: matches our catalogue.
   const cats = (a.product_categories ?? "").toLowerCase();
-  const productFit = cats && !cats.includes("信息不足") ? LEAD_SCORE_WEIGHTS.product_fit : 0;
+  const productFit = cats && !cats.includes("信息不足") ? weights.product_fit : 0;
   // Buyer role: a named decision-maker beats role-only personas.
   const hasNamedContact = a.found_contacts.some((c) => c.first_name || c.last_name);
   const hasRolePersona = extractPersonaEntries(a.personas_and_solutions).some((p) => p.persona_role);
-  const buyerRole = hasNamedContact ? LEAD_SCORE_WEIGHTS.buyer_role : hasRolePersona ? 5 : 0;
+  const buyerRole = hasNamedContact
+    ? weights.buyer_role
+    : hasRolePersona
+      ? Math.round((1 / 2) * weights.buyer_role)
+      : 0;
   // Buying signal: active purchase intent.
-  const buyingSignal = a.buying_signals.length > 0 ? LEAD_SCORE_WEIGHTS.buying_signal : 0;
+  const buyingSignal = a.buying_signals.length > 0 ? weights.buying_signal : 0;
   // Reachability: an email is the strongest outreach channel, phone/WhatsApp
   // the runner-up, any other contact a weak signal.
-  let reachability = 0;
-  if (a.found_contacts.some((c) => c.email)) reachability = LEAD_SCORE_WEIGHTS.reachability;
-  else if (a.found_contacts.some((c) => c.cellphone || c.whatsapp)) reachability = 8;
-  else if (a.found_contacts.length > 0) reachability = 4;
-  // Strategic value: verified coverage/size fields.
-  let strategicValue = 0;
-  if (a.company_size && !a.company_size.includes("信息不足")) strategicValue += 5;
-  if (a.geographic_coverage && !a.geographic_coverage.includes("信息不足")) strategicValue += 5;
+  let reachRatio = 0;
+  if (a.found_contacts.some((c) => c.email)) reachRatio = 1;
+  else if (a.found_contacts.some((c) => c.cellphone || c.whatsapp)) reachRatio = 8 / 15;
+  else if (a.found_contacts.length > 0) reachRatio = 4 / 15;
+  const reachability = Math.round(reachRatio * weights.reachability);
+  // Strategic value: verified coverage/size fields. The two components share
+  // ONE round of the combined ratio (½ per verified field) — rounding each
+  // half separately could push an odd weight past its own maximum
+  // (Math.round(½·15) + Math.round(½·15) = 16 > 15); one round keeps every
+  // dimension ≤ its configured weight, byte-identical under the defaults.
+  let strategicRatio = 0;
+  if (a.company_size && !a.company_size.includes("信息不足")) strategicRatio += 1 / 2;
+  if (a.geographic_coverage && !a.geographic_coverage.includes("信息不足")) strategicRatio += 1 / 2;
+  const strategicValue = Math.round(strategicRatio * weights.strategic_value);
   return {
     version: "lead-score-v2",
     icp_fit: icpFit,
@@ -2080,10 +2103,10 @@ export function computeLeadScoreV2(a: CustomerAnalysis): LeadScoreBreakdown {
   };
 }
 
-function computeLeadScore(a: CustomerAnalysis): number {
+function computeLeadScore(a: CustomerAnalysis, weights: LeadScoreWeights = LEAD_SCORE_WEIGHTS): number {
   // Total contract frozen (design §3.2): the V2 dimension sum, capped at 100
   // (the weights sum to exactly 100; the clamp is belt-and-braces).
-  const b = computeLeadScoreV2(a);
+  const b = computeLeadScoreV2(a, weights);
   return Math.min(
     100,
     b.icp_fit + b.product_fit + b.buyer_role + b.buying_signal + b.reachability + b.strategic_value,
@@ -2134,7 +2157,13 @@ interface CustomerProcessResult {
   reason?: string;
 }
 
-async function processCustomer(customer: CustomerRow, env: Env): Promise<CustomerProcessResult> {
+async function processCustomer(
+  customer: CustomerRow,
+  env: Env,
+  // Phase 10: the tick's lead-score weights (loaded once per tick below) —
+  // the analysis scores under the config active when it ran.
+  weights: LeadScoreWeights,
+): Promise<CustomerProcessResult> {
   const retryCount = getRetryCount(customer.remarks);
   // Stage 14 (spec §15): every attempt opens a research_run; evidence rows
   // reference it and are APPENDED (history is superseded via is_current, never
@@ -2334,11 +2363,11 @@ async function processCustomer(customer: CustomerRow, env: Env): Promise<Custome
     const companyProfileJson = analysis.company_profile ? JSON.stringify(analysis.company_profile) : null;
     const outreachContextJson = analysis.outreach_context ? JSON.stringify(analysis.outreach_context) : null;
     const buyingSignalsJson = analysis.buying_signals.length ? JSON.stringify(analysis.buying_signals) : null;
-    const leadScore = computeLeadScore(analysis);
+    const leadScore = computeLeadScore(analysis, weights);
     // Phase 5 (建议 §十八): six-dimension decomposition cached beside the
     // total — dual-write in the same UPDATE, one writer per fact (the total
     // stays lead_score's; the JSON carries no total, design §4.1).
-    const leadScoreBreakdownJson = JSON.stringify(computeLeadScoreV2(analysis));
+    const leadScoreBreakdownJson = JSON.stringify(computeLeadScoreV2(analysis, weights));
     // Stage 15 (spec §16): independent quality axis — separate formula,
     // separate column; neither score influences or overwrites the other.
     const completenessScore = computeCompletenessScore(customer, analysis, verifiedSocial.length);
@@ -2627,10 +2656,16 @@ export default {
         metadata: { company_id: c.company_id, via: "cron" },
       });
     }
+    // Phase 10 (design §3): the effective dimension weights load ONCE per
+    // tick (fail-open to the code defaults when the table/row is absent) and
+    // flow through processCustomer into the score + breakdown writes — one
+    // config SELECT per tick, not per customer, and a mid-tick retune waits
+    // for the next tick instead of splitting one batch across two profiles.
+    const leadScoreWeights = await loadLeadScoreWeights(env);
     // Process in parallel; per-customer pacing (INTER_SOURCE_DELAY_MS between
     // searches) already respects upstream rate limits, and the RPM limiter
     // guards each provider pool.
-    const results = await Promise.all(customers.map((c) => processCustomer(c, env)));
+    const results = await Promise.all(customers.map((c) => processCustomer(c, env, leadScoreWeights)));
     await env.DB.batch(results.map((r) => r.update));
     // Stage 9: outcome rows are written only after the batch applied, so the
     // trail matches the database state. Retries are not audited — the row

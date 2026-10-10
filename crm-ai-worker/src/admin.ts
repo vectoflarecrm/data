@@ -56,6 +56,7 @@ import { buildFilterOptions } from "./facets";
 import { LEAD_SCORE_WEIGHTS } from "./lead-score-dims";
 import {
   loadLeadScoreConfig,
+  loadLeadScoreWeights,
   saveLeadScoreWeights,
   parseLeadScoreWeights,
 } from "./lead-score-config";
@@ -2391,7 +2392,10 @@ async function handleCampaignApi(request: Request, env: AdminEnv, auth: AdminAut
     // committing any AI or send budget to it.
     if (path === "/admin/api/outreach/segment-preview" && request.method === "POST") {
       const body = await readJsonBody(request);
-      const filters = parseSegmentFilters(body.filters ?? body);
+      // Phase 10: dimension floors clamp against the weights effective NOW
+      // (fail-open to the code defaults) — the preview is a live build.
+      const weights = await loadLeadScoreWeights(env);
+      const filters = parseSegmentFilters(body.filters ?? body, weights);
       const brand = typeof body.brand === "string" ? body.brand.trim() || null : null;
       return jsonResponse(await previewSegment(env, filters, brand));
     }
@@ -2452,6 +2456,10 @@ async function handleCampaignApi(request: Request, env: AdminEnv, auth: AdminAut
     if (path === "/admin/api/outreach/campaigns" && request.method === "POST") {
       const body = await readJsonBody(request);
       const brandName = String(body.brand ?? "");
+      // Phase 10: the campaign's segment is built NOW — both filter sources
+      // (a saved group's stored JSON or a fresh body) clamp their dimension
+      // floors against the weights effective at this moment (fail-open).
+      const weights = await loadLeadScoreWeights(env);
       let filters: ReturnType<typeof parseSegmentFilters>;
       let groupId: number | null = null;
       let groupName: string | null = null;
@@ -2464,11 +2472,11 @@ async function handleCampaignApi(request: Request, env: AdminEnv, auth: AdminAut
         if (!group) return jsonResponse({ detail: "客群不存在" }, 404);
         // A campaign launched from a saved group uses the group's stored
         // filters, so the preview the operator saw cannot drift from the send.
-        filters = deserializeFilters(group.filters);
+        filters = deserializeFilters(group.filters, weights);
         groupId = group.id;
         groupName = group.name;
       } else {
-        filters = parseSegmentFilters(body.filters ?? body);
+        filters = parseSegmentFilters(body.filters ?? body, weights);
       }
       const created = await createCampaign(env, {
         name: body.name,

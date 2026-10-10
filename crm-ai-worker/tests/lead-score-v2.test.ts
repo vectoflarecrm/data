@@ -8,6 +8,7 @@ import {
   LEAD_SCORE_WEIGHTS,
 } from "../src/index";
 import type { CustomerAnalysis } from "../src/index";
+import type { LeadScoreWeights } from "../src/lead-score-dims";
 
 /* Phase 5 — Lead Score V2 (建议 §十八, design docs/phase5-lead-score-v2.md).
  *
@@ -339,5 +340,101 @@ describe("admin detail API — breakdown fail-open (§4.2)", () => {
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.lead_score).toBe(100);
     expect(body.lead_score_breakdown).toBeNull();
+  });
+});
+
+/* ── Phase 10 Stage 56 (docs/phase10-lead-score-config.md §3): the tiers are
+ * ratios of the operator-tunable weights — Math.round(ratio × weight). Under
+ * the defaults every pin above is byte-identical (the ratios were read off
+ * those integers); this block pins the CUSTOM-weight behavior: rescaling,
+ * rounding, the shared strategic round, and the weights-immune 不相关
+ * short-circuit. ── */
+
+describe("Phase 10: configurable weights — ratio × weight rescaling", () => {
+  const TUNED: LeadScoreWeights = {
+    icp_fit: 60, product_fit: 10, buyer_role: 10,
+    buying_signal: 10, reachability: 5, strategic_value: 5,
+  };
+  const ODD: LeadScoreWeights = {
+    icp_fit: 31, product_fit: 20, buyer_role: 9,
+    buying_signal: 15, reachability: 15, strategic_value: 10,
+  };
+  const STRATEGIC_ODD: LeadScoreWeights = {
+    icp_fit: 30, product_fit: 20, buyer_role: 10,
+    buying_signal: 15, reachability: 16, strategic_value: 9,
+  };
+
+  it("omitting the weights is byte-identical to passing the defaults", () => {
+    const a = analysis();
+    expect(computeLeadScoreV2(a)).toEqual(computeLeadScoreV2(a, LEAD_SCORE_WEIGHTS));
+    expect(computeLeadScore(a)).toBe(computeLeadScore(a, LEAD_SCORE_WEIGHTS));
+  });
+
+  it("icp_fit tiers rescale: dealer 5/6, e-commerce ½, retailer ⅓, user ⅙ of the weight", () => {
+    const dim = (segment: string) =>
+      computeLeadScoreV2(analysis({ customer_segment: segment }), TUNED).icp_fit;
+    expect(dim("Distributor")).toBe(60);
+    expect(dim("Boat Dealer")).toBe(50); // Math.round(5/6 · 60)
+    expect(dim("E-commerce seller")).toBe(30); // ½ · 60
+    expect(dim("Retailer")).toBe(20); // ⅓ · 60
+    expect(dim("End user (local surfer)")).toBe(10); // ⅙ · 60
+    expect(dim("Marina")).toBe(0);
+  });
+
+  it("half tiers round to the nearest integer (role-only persona under a 9-weight)", () => {
+    expect(computeLeadScoreV2(analysis(), ODD).buyer_role).toBe(9); // named contact
+    const personas = { personas: [{ name: "Purchasing", role: "Purchasing Manager", needs: [], pain_points: [] }], solutions: [] };
+    expect(
+      computeLeadScoreV2(analysis({ found_contacts: [], personas_and_solutions: personas }), ODD).buyer_role,
+    ).toBe(5); // Math.round(½ · 9) = 5, rounds half up
+  });
+
+  it("reachability tiers rescale: phone 8/15, bare contact 4/15", () => {
+    expect(computeLeadScoreV2(analysis(), TUNED).reachability).toBe(5); // email = full weight
+    expect(
+      computeLeadScoreV2(analysis({ found_contacts: [{ cellphone: "+34 600 000 000" }] }), TUNED).reachability,
+    ).toBe(3); // Math.round(8/15 · 5)
+    expect(
+      computeLeadScoreV2(analysis({ found_contacts: [{ linkedin_url: "https://linkedin.com/in/x" }] }), TUNED).reachability,
+    ).toBe(1); // Math.round(4/15 · 5)
+  });
+
+  it("strategic_value shares ONE round of the combined ratio — an odd weight never exceeds its own max", () => {
+    // Both fields under a 9-weight: Math.round(1 · 9) = 9 — NOT the
+    // per-half 8 + 8 = 16-style overshoot of rounding each ½ separately.
+    expect(computeLeadScoreV2(analysis(), STRATEGIC_ODD).strategic_value).toBe(9);
+    expect(
+      computeLeadScoreV2(analysis({ geographic_coverage: null }), STRATEGIC_ODD).strategic_value,
+    ).toBe(5); // Math.round(½ · 9) = 5
+    expect(
+      computeLeadScoreV2(analysis({ company_size: "信息不足", geographic_coverage: "信息不足" }), STRATEGIC_ODD).strategic_value,
+    ).toBe(0);
+  });
+
+  it("a full-fit record under TUNED hits every custom max and the total stays 100", () => {
+    expect(computeLeadScoreV2(analysis(), TUNED)).toEqual({
+      version: "lead-score-v2",
+      icp_fit: 60,
+      product_fit: 10,
+      buyer_role: 10,
+      buying_signal: 10,
+      reachability: 5,
+      strategic_value: 5,
+    });
+    expect(computeLeadScore(analysis(), TUNED)).toBe(100);
+  });
+
+  it("不相关 ignores the custom weights entirely", () => {
+    const b = computeLeadScoreV2(analysis({ customer_segment: "不相关（本地餐馆）" }), TUNED);
+    expect(b).toEqual({
+      version: "lead-score-v2",
+      icp_fit: 0,
+      product_fit: 0,
+      buyer_role: 0,
+      buying_signal: 0,
+      reachability: 0,
+      strategic_value: 0,
+    });
+    expect(computeLeadScore(analysis({ customer_segment: "不相关（本地餐馆）" }), TUNED)).toBe(0);
   });
 });
