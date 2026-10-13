@@ -3997,8 +3997,8 @@ const ADMIN_PANEL_HTML = `<!doctype html>
   // operator — the server re-validates everything anyway.
   var lastContacts=[];
   var ctNorm=function(v){return String(v||'').trim().toLowerCase()};
-  var ctPhone=function(v){return ctNorm(v).replace(/[ \-().]/g,'')};
-  var ctName=function(ct){return ctNorm(((ct.first_name||'')+' '+(ct.last_name||'')).trim().replace(/\s+/g,' '))};
+  var ctPhone=function(v){return ctNorm(v).replace(/[ \\-().]/g,'')};
+  var ctName=function(ct){return ctNorm(((ct.first_name||'')+' '+(ct.last_name||'')).trim().replace(/\\s+/g,' '))};
   var ctKeys=function(ct){return [ctNorm(ct.email),ctPhone(ct.cellphone),ctPhone(ct.whatsapp),ctName(ct)].filter(Boolean)};
   var renderContacts=function(contacts){lastContacts=contacts||[];if(!contacts||contacts.length===0)return'<div class="s-c94a3b8-p12">暂无联系人数据</div>';
     var kc={};contacts.forEach(function(ct){ctKeys(ct).forEach(function(k){kc[k]=(kc[k]||0)+1})});
@@ -4018,7 +4018,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
     var picked=cbs.map(function(cb){return{cid:cb.getAttribute('data-cid'),seq:Number(cb.getAttribute('data-seq'))||0}}).sort(function(a,b){return a.seq-b.seq});
     var survivor=picked[0].cid,mergedIds=picked.slice(1).map(function(p){return p.cid});
     var nm=function(cid){var c=null;for(var i=0;i<lastContacts.length;i++){if(lastContacts[i].contact_id===cid)c=lastContacts[i]}return c?((((c.first_name||'')+' '+(c.last_name||'')).trim())||cid):cid};
-    if(!confirm('将把 '+mergedIds.length+' 个联系人合并进主行 '+nm(survivor)+'（'+survivor+'，勾选中序号最早的一行）。\n主行已有字段不会被覆盖，空字段由其余行填充，关联的联系方式证据会重指向主行。确定？'))return;
+    if(!confirm('将把 '+mergedIds.length+' 个联系人合并进主行 '+nm(survivor)+'（'+survivor+'，勾选中序号最早的一行）。\\n主行已有字段不会被覆盖，空字段由其余行填充，关联的联系方式证据会重指向主行。确定？'))return;
     mb.disabled=true;
     api('/admin/api/customers/'+state.selected+'/contacts/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({survivor_contact_id:survivor,merged_contact_ids:mergedIds})}).then(function(){openDetail(state.selected)}).catch(function(e){alert('❌ '+e.message);mb.disabled=false})}};
   var renderVerifiedSocial=function(sv){if(!sv)return'';var social=null;try{social=JSON.parse(sv)}catch(e){}if(!social||!social.length)return'';var h='<div class="section-title">📱 已验证社交媒体</div><div class="s-dfx-fxww-g8">';social.forEach(function(s){var icon=s.platform==='LinkedIn'?'🔗':s.platform==='Facebook'?'📘':s.platform==='Instagram'?'📷':s.platform==='Twitter'?'🐦':s.platform==='YouTube'?'📺':s.platform==='TikTok'?'🎵':'🌐';var statusCls=s.verified?'sv-ok':'sv-bad';var statusText=s.verified?'已验证':'未验证';h+='<div class="s-bgf8fafc-bd1 ol e2e8f0-br8-p10 14-dfx-aic-g8"><span class="s-fs18">'+icon+'</span><div><div class="s-fw600-fs13">'+esc(s.platform)+'</div><a href="'+esc(s.url)+'" target="_blank" class="s-fs12-c1677d2-wbba">'+esc(s.url)+'</a></div><span class="'+statusCls+'">'+statusText+'</span></div>'});h+='</div>';return h};
@@ -5014,7 +5014,7 @@ function loadKeys(){
     var tb=document.querySelector('#keysTable tbody');tb.innerHTML='';
     var cdMap={};
     (d.cooldowns||[]).forEach(function(c){
-      var m=/^([a-z]+):(\d+)$/.exec(c.key_index||'');
+      var m=/^([a-z]+):(\\d+)$/.exec(c.key_index||'');
       if(m&&m[1]===c.provider)cdMap[Number(m[2])]=c;
     });
     renderEncryption(d.encryption||{});

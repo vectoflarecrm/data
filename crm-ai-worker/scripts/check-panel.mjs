@@ -12,18 +12,58 @@ const src = readFileSync(new URL("../src/admin.ts", import.meta.url), "utf8");
 const blocks = [...src.matchAll(/^const (\w*_HTML) = `/gm)];
 if (blocks.length === 0) throw new Error("no *_HTML template literals found in src/admin.ts");
 
-// Undo the template-literal escaping so this is the bytes the browser sees.
-const unescape = (html) =>
-  html.replace(/\\`/g, "`").replace(/\\\$\{/g, "${").replace(/\\\\/g, "\\");
+// Evaluate the template literal exactly as TS does, so the bytes checked here
+// are the bytes the browser receives. The old three-regex "unescape" kept
+// `\n` as two characters, which validated different text than the served
+// page: a `\n` inside a panel JS string shipped as a real newline, split the
+// string literal in half, and killed the whole panel script with a
+// SyntaxError while this checker still reported "parses OK".
+function unescape(raw) {
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (c !== "\\") { out += c; continue; }
+    const n = raw[++i];
+    if (n === undefined) { out += "\\"; break; }
+    if (n === "n") out += "\n";
+    else if (n === "t") out += "\t";
+    else if (n === "r") out += "\r";
+    else if (n === "b") out += "\b";
+    else if (n === "f") out += "\f";
+    else if (n === "v") out += "\v";
+    else if (n === "0") out += "\0";
+    else if (n === "`" || n === "$" || n === "\\") out += n;
+    else if (n === "\n") { /* line continuation: swallow the break */ }
+    else if (n === "\r") { if (raw[i + 1] === "\n") i++; }
+    else if (n === "x") {
+      const hex = raw.slice(i + 1, i + 3);
+      if (/^[0-9a-fA-F]{2}$/.test(hex)) { out += String.fromCharCode(parseInt(hex, 16)); i += 2; }
+      else out += "x";
+    } else if (n === "u") {
+      if (raw[i + 1] === "{") {
+        const close = raw.indexOf("}", i + 2);
+        const hex = raw.slice(i + 2, close);
+        if (close > 0 && /^[0-9a-fA-F]{1,6}$/.test(hex)) { out += String.fromCodePoint(parseInt(hex, 16)); i = close; }
+        else out += "u";
+      } else {
+        const hex = raw.slice(i + 1, i + 5);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) { out += String.fromCharCode(parseInt(hex, 16)); i += 4; }
+        else out += "u";
+      }
+    } else out += n; // NonEscapeCharacter identity: \d -> d, \s -> s, ...
+  }
+  return out;
+}
 
 function extractPanel(name, from) {
   // Panels are written as one HTML blob per literal, terminated by a backtick
   // followed by a semicolon at end of line. Scanning for a bare backtick would
   // stop at an escaped one, so match the terminator on a line of its own tail.
+  // Returns the RAW template text; escape evaluation happens in the caller.
   const rest = src.slice(from);
   const end = rest.search(/`;[ \t]*$/m);
   if (end < 0) throw new Error(`unterminated template literal for ${name}`);
-  return unescape(rest.slice(0, end));
+  return rest.slice(0, end);
 }
 
 let bad = 0;
@@ -33,7 +73,20 @@ for (const [i, block] of blocks.entries()) {
   console.log(`\n── ${name}`);
   let panel;
   try {
-    panel = extractPanel(name, from);
+    // Two steps, both needed: first scan the RAW executable-script regions for
+    // identity escapes that evaluation would silently rewrite (\d -> d etc.) —
+    // those corrupt regexes without ever producing a syntax error; then
+    // evaluate the escapes to get the served bytes for the parse check.
+    const rawPanel = extractPanel(name, from);
+    for (const sm of rawPanel.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+      for (const esc of sm[1].matchAll(/\\(.)/gs)) {
+        if (!"ntrbfvxu0`$\\\n\r".includes(esc[1])) {
+          bad++;
+          console.error(`  raw '\\${esc[1]}' in script serves as '${esc[1]}' — write '\\\\${esc[1]}' to serve a backslash escape`);
+        }
+      }
+    }
+    panel = unescape(rawPanel);
   } catch (e) {
     console.error(`  EXTRACT FAILED: ${e.message}`);
     bad++;
