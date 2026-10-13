@@ -64,10 +64,14 @@ completed / failed
         6 条查询模板（联系方式×2、LinkedIn×3、业务×1），每条独立走
         Tavily→Exa→Searlo→DuckDuckGo 链（Brave 已停用）；结果去噪（维基/视频页）、
         剔除自有域名、跨查询 URL 去重、内容前缀去重（不同查询命中同页只
-        抓一次）；取前 5 个结果页抓正文（LinkedIn 优先，6k 字符预算，其余
-        4k），并对其做规则级联系方式提取（[直接提取] 行）。
+        抓一次）；候选池最多 10 页逐页身份核验（页面须提及目标公司名变体
+        或官网域名，讲别家公司的整页一律不收），收满 5 个通过核验的页面
+        即停（LinkedIn 优先，6k 字符预算，其余 4k），并对其做规则级联系
+        方式提取（[直接提取] 行）；摘要兜底同样过身份核验，全部不过则
+        返回空（宁可空上下文，不混入别家公司数据）。
         成本：Tavily advanced=2 Credits/查询（主消耗，Key 池 500 次/Key/月）；
-        重试行命中研究复用路径时整段跳过（0 Credits）。
+        重试行命中研究复用路径时整段跳过（0 Credits）；海选「重新入队」
+        会作废旧研究强制重爬（恢复消耗）。
 
 阶段 4  子页面抓取（免费）
         /about /contact /team /products 等最多 3 页，与主站文本前缀去重
@@ -235,8 +239,10 @@ POST /admin/login      面板登录（可选两步：token → WebAuthn 断言/�
 GET  /admin/api/customers?min_lead_score=   列表/筛选
 POST /admin/api/customers/import            CSV 原始层 → 去重入队（5MB/2000 行上限）
 GET  /admin/api/customers/pre-filter        SQL 海选（不花 AI token）。action：count 统计 /
-                                             queue 重新入队 / export 全量 CSV 导出（带 BOM，
-                                             5000 行上限，超出尾部截断说明）
+                                              queue 重新入队（作废旧研究 research_sources
+                                              置 is_current=0 + 清 full_research_text 兜底，
+                                              强制下次 cron 重爬重搜）/ export 全量 CSV 导出
+                                              （带 BOM，5000 行上限，超出尾部截断说明）
 GET  /admin/api/customers/filter-options    海选/群发筛选下拉的候选项与命中数
                                             （与 buildSegmentWhere 同一条 LIKE，
                                             选项旁的数字 = 勾选后的统计结果）

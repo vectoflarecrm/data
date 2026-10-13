@@ -35,8 +35,9 @@ class FakeD1 {
     return stmt;
   }
   async batch(stmts: any[]) {
-    for (const s of stmts) await s.run();
-    return [];
+    const out: any[] = [];
+    for (const s of stmts) out.push(await s.run());
+    return out;
   }
 }
 
@@ -90,6 +91,22 @@ async function makeEnv(overrides: Record<string, unknown> = {}) {
       last_error TEXT, last_used_at TIMESTAMP,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    -- pre-filter action=queue 先作废旧研究（research_sources 置 is_current=0）
+    -- 再重新入队，两条 UPDATE 同 batch；审计断言依赖 batch 的逐语句结果。
+    CREATE TABLE research_sources (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      research_run_id TEXT,
+      customer_id TEXT NOT NULL,
+      source_type TEXT NOT NULL,
+      source_url TEXT,
+      raw_text TEXT,
+      content_hash TEXT,
+      parser_version TEXT,
+      fetched_at TEXT NOT NULL,
+      is_current INTEGER NOT NULL DEFAULT 1,
+      valid_from TEXT,
+      valid_until TEXT
     );
   `);
   db.prepare("INSERT INTO customers (id, company_id, domain, status, company_name, country, lead_score) VALUES (1, 'c1', 'acme.com', 'completed', 'Acme', 'US', 80)").run();

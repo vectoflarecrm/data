@@ -1087,11 +1087,29 @@ async function preFilterCustomers(request: Request, env: AdminEnv, auth: AdminAu
   const { clause, binds } = segmentClause(filters, { requireCompleted: true, requireEmail: hasEmail });
 
   if (action === "queue") {
-    // Reset the filtered set for re-research (海选 → 再处理).
-    const result = await env.DB.prepare(
-      `UPDATE customers SET status = 'pending', updated_at = CURRENT_TIMESTAMP ${clause}`,
-    ).bind(...binds).run();
-    const queued = result.meta.changes ?? 0;
+    // Reset the filtered set for re-research (海选 → 再处理). Re-queue must
+    // also retire the saved research: processCustomer's canReuseResearch
+    // path would otherwise re-run the AI on the PREVIOUS crawl verbatim —
+    // re-queueing a customer whose profile was contaminated with another
+    // company's data would re-analyse the same bad inputs. research_sources
+    // rows are superseded (is_current = 0, valid_until = now — history
+    // stays queryable) and the deprecated blob cache is cleared, so the
+    // next tick pays a fresh crawl+search. Both statements run in one batch.
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const validUntil =
+      `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())} ` +
+      `${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())}`;
+    const supersedeSources = env.DB.prepare(
+      `UPDATE research_sources SET is_current = 0, valid_until = ?
+        WHERE is_current = 1
+          AND customer_id IN (SELECT company_id FROM customers ${clause})`,
+    ).bind(validUntil, ...binds);
+    const requeue = env.DB.prepare(
+      `UPDATE customers SET status = 'pending', full_research_text = NULL, updated_at = CURRENT_TIMESTAMP ${clause}`,
+    ).bind(...binds);
+    const results = await env.DB.batch([supersedeSources, requeue]);
+    const queued = results[1]?.meta?.changes ?? 0;
     // Stage 9: re-queueing IS research being (re)started for a customer set.
     await auditAdminAction(env, request, auth, "START_RESEARCH", "customer", null, {
       via: "pre-filter",
@@ -3936,7 +3954,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
   $('pfHasEmail').onchange=function(){pfDDAll(pfDDList)};
   var pfParams=function(){var p=new URLSearchParams();var c=pfDDSel.countries.join(','),s=pfDDSel.segments.join(','),pr=pfDDSel.products.join(','),m=$('pfMinScore').value,proles=$('pfPersonaRoles').value.trim();if(c)p.set('countries',c);if(s)p.set('segments',s);if(pr)p.set('products',pr);if(m&&Number(m)>0)p.set('min_lead_score',m);if($('pfHasEmail').checked)p.set('has_email','1');if($('pfHasSignal').checked)p.set('has_buying_signal','1');if(proles)p.set('persona_roles',proles);return p};
   $('pfCount').onclick=function(){var p=pfParams();p.set('action','count');$('pfCount').disabled=true;api('/admin/api/customers/pre-filter?'+p.toString()).then(function(d){var s=d.sample||[];var lines=s.slice(0,5).map(function(c){return esc((c.company_name||c.display_id||c.id)+'（'+(c.lead_score??'—')+'分）')}).join('、');$('pfResult').classList.remove('hidden');$('pfResult').innerHTML='🎯 匹配 <b>'+d.matching+'</b> 家'+(lines?'。高分示例：'+lines:'');$('pfResult').style.color='#123b68'}).catch(function(e){$('pfResult').classList.remove('hidden');$('pfResult').textContent='❌ '+e.message;$('pfResult').style.color='#b91c1c'}).finally(function(){$('pfCount').disabled=false})};
-  $('pfQueue').onclick=function(){if(!confirm('确定将所有匹配的已完成客户重置为 pending 重新研究？'))return;var p=pfParams();p.set('action','queue');$('pfQueue').disabled=true;api('/admin/api/customers/pre-filter?'+p.toString()).then(function(d){$('pfResult').classList.remove('hidden');$('pfResult').innerHTML='✅ 已重新入队 <b>'+d.queued+'</b> 家，等待 cron 逐批处理';$('pfResult').style.color='#123b68';load()}).catch(function(e){$('pfResult').classList.remove('hidden');$('pfResult').textContent='❌ '+e.message;$('pfResult').style.color='#b91c1c'}).finally(function(){$('pfQueue').disabled=false})};
+  $('pfQueue').onclick=function(){if(!confirm('确定将所有匹配的已完成客户重新研究？将作废旧研究数据并重新抓取分析（消耗搜索配额），完成后画像与评分全部刷新。'))return;var p=pfParams();p.set('action','queue');$('pfQueue').disabled=true;api('/admin/api/customers/pre-filter?'+p.toString()).then(function(d){$('pfResult').classList.remove('hidden');$('pfResult').innerHTML='✅ 已作废旧研究并重新入队 <b>'+d.queued+'</b> 家，等待 cron 重新抓取分析';$('pfResult').style.color='#123b68';load()}).catch(function(e){$('pfResult').classList.remove('hidden');$('pfResult').textContent='❌ '+e.message;$('pfResult').style.color='#b91c1c'}).finally(function(){$('pfQueue').disabled=false})};
   // 写开发信：当前筛选条件原样带去定向群发页（prefill=1），由那边的
   // 预填逻辑接手；导出：同 count 的 WHERE，服务端回 CSV 附件。
   $('pfOutreach').onclick=function(){var p=pfParams();p.set('prefill','1');location.href='/admin/outreach?'+p.toString()};
