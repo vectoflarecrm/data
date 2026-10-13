@@ -313,7 +313,48 @@ jobs:
           PY
 
       - name: Initialize remote D1 schema
-        run: npx wrangler d1 execute crm-ai-db --remote --file=./schema.sql
+        # Fast path: schema.sql as one atomic D1 transaction (the 0019-proven
+        # --file semantics). Fallback path (first deploy against a pre-V2
+        # database): per-statement execution tolerating ONLY "no such column"
+        # — the four index statements referencing post-migration columns
+        # (idx_outreach_idempotency / idx_outreach_send_lock /
+        # idx_outreach_contact / idx_campaign_members_grain) cannot exist
+        # until the ALTER steps below add their columns; they land on the
+        # next deploy, which takes the fast path again (verified by the
+        # deploy-sequence probe: standard + legacy-no-FK both converge, the
+        # second deploy runs 0 tolerated). Any other SQL error still fails
+        # the deploy.
+        run: |
+          if npx wrangler d1 execute crm-ai-db --remote --file=./schema.sql; then
+            echo 'schema.sql applied atomically'
+          else
+            echo 'atomic schema.sql failed - per-statement fallback (pre-V2 first deploy)'
+            python3 - <<'PY'
+          import re, subprocess, sys
+          sql = open('schema.sql', encoding='utf-8').read()
+          body = '\n'.join(l for l in sql.split('\n') if not l.lstrip().startswith('--'))
+          stmts = [s.strip() for s in re.split(r';\s*\n', body) if s.strip()]
+          tolerated, failed = 0, []
+          for s in stmts:
+              p = subprocess.run(
+                  ['npx', 'wrangler', 'd1', 'execute', 'crm-ai-db', '--remote', '--command', s],
+                  capture_output=True, text=True)
+              if p.returncode == 0:
+                  continue
+              out = p.stdout + p.stderr
+              if 'no such column' in out:
+                  tolerated += 1
+                  print(f'TOLERATED (lands after the ALTER steps): {s.splitlines()[0][:100]}')
+              else:
+                  failed.append((s.splitlines()[0], out))
+          if failed:
+              for head, out in failed:
+                  print(f'FAILED: {head}')
+                  print(out)
+              sys.exit(1)
+          print(f'schema fallback complete: {len(stmts)} statements, {tolerated} tolerated, 0 unexpected failures')
+          PY
+          fi
 
       - name: Verify remote D1 schema
         run: |
@@ -515,6 +556,51 @@ jobs:
           info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('customers') WHERE name = 'lead_score_breakdown'")"
           echo "customers lead_score_breakdown columns: $info"
           echo "$info" | grep -q '"n": 1' || { echo "Migration failed: customers.lead_score_breakdown missing after ALTER"; exit 1; }
+
+      - name: Migrate outreach contact-grain columns (Phase 8 Stage 49)
+        # 0027: outreach_emails.contact_id (per-person drafts) and
+        # outreach_campaign_members.contact_id (per-person snapshots) plus
+        # the (brand, customer, contact) dedup index. Nullable additive
+        # columns, same duplicate-column-tolerant ALTER pattern as every
+        # Stage 17+ step. Runs AFTER the Stage 34 FK rebuild on purpose:
+        # 0019's frozen column list predates Phase 8, so this step adds
+        # contact_id to whatever shape the rebuild produced (or the
+        # pre-existing table, when the rebuild was skipped).
+        run: |
+          npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE outreach_emails ADD COLUMN contact_id INTEGER" 2>&1 | grep -q 'duplicate column name' && echo "outreach_emails.contact_id already exists" || true
+          npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE outreach_campaign_members ADD COLUMN contact_id INTEGER" 2>&1 | grep -q 'duplicate column name' && echo "outreach_campaign_members.contact_id already exists" || true
+          npx wrangler d1 execute crm-ai-db --remote --command "CREATE INDEX IF NOT EXISTS idx_outreach_contact ON outreach_emails(brand_name, customer_id, contact_id)" || true
+          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('outreach_emails') WHERE name = 'contact_id'")"
+          echo "$info" | grep -q '"n": 1' || { echo "Migration failed: outreach_emails.contact_id missing"; exit 1; }
+          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('outreach_campaign_members') WHERE name = 'contact_id'")"
+          echo "$info" | grep -q '"n": 1' || { echo "Migration failed: outreach_campaign_members.contact_id missing"; exit 1; }
+
+      - name: Rebuild outreach_campaign_members grain (Phase 9 Stage 53)
+        # 0028: the (campaign_id, customer_id) PRIMARY KEY cannot hold
+        # multi-contact rows, so the rebuilt table has no explicit PK and
+        # the grain guarantee moves to contact_norm (STORED generated
+        # COALESCE(contact_id, 0)) under a UNIQUE index — the 0019
+        # single-transaction rebuild precedent. Gated on the grain INDEX,
+        # not pragma_table_info (SQLite hides STORED generated columns
+        # there — probe-verified), so an already-rebuilt database skips
+        # the data movement entirely; the pre-rebuild PK shape cannot hold
+        # grain duplicates, so the INSERT SELECT cannot violate the new
+        # index.
+        run: |
+          grain="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name = 'idx_campaign_members_grain'")"
+          if echo "$grain" | grep -q '"n": 0'; then
+            before_n="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM outreach_campaign_members" | grep -o '"n": [0-9]*')"
+            echo 'campaign_members grain rebuild required - running migration 0028 (single transaction)'
+            npx wrangler d1 execute crm-ai-db --remote --file=./migrations/0028_campaign_members_grain.sql
+            after_n="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM outreach_campaign_members" | grep -o '"n": [0-9]*')"
+            [ "$before_n" = "$after_n" ] || { echo "Migration failed: campaign_members row count changed ($before_n -> $after_n)"; exit 1; }
+          else
+            echo 'campaign_members grain already rebuilt - skipping'
+          fi
+          grain="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name = 'idx_campaign_members_grain'")"
+          echo "$grain" | grep -q '"n": 1' || { echo "Migration failed: idx_campaign_members_grain missing after rebuild"; exit 1; }
+          norm="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_xinfo('outreach_campaign_members') WHERE name = 'contact_norm'")"
+          echo "$norm" | grep -q '"n": 1' || { echo "Migration failed: contact_norm missing after rebuild"; exit 1; }
 
       - name: Typecheck
         run: npm run typecheck
