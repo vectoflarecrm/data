@@ -113,7 +113,7 @@ completed / failed
         写入 customers；WHERE id=? AND status='processing' 防过期覆盖。
 ```
 
-### lead_score 评分公式 V2（Phase 5，确定性，无 AI 参与）
+### lead_score 评分公式 V2（Phase 5，确定性，无 AI 参与；权重可调 Phase 10）
 
 ```text
 六维分解（weights 总和 = 100，存 lead_score_breakdown JSON 供面板六维条展示）：
@@ -127,8 +127,14 @@ completed / failed
 「不相关」短路：六维全 0，总分 0。旧行 breakdown 为 NULL → 面板降级为只显总分，
 下一次研究运行自动补齐。总分合同不变（0-100），群发 min_lead_score / 直方图 /
 排序等既有消费方零改动。
+权重可调（Phase 10）：上表 30/20/10/15/15/10 为代码默认，操作员可在 /admin
+六维权重编辑器重调（每维 0-100 整数、合计恰 100；单行 lead_score_config 表，
+scores.write 权限，PUT /admin/api/lead-score/config）。引擎档位是权重的比例
+（Math.round(ratio×weight)），默认权重下与上表整数逐字节一致；研究管线每 tick
+读当前权重（fail-open 默认），改权重后点「重算存量评分」（POST
+/admin/api/lead-score/rescore）按新权重全量重算已完成客户。
 用途：面板直查 SQL 筛选高分客户，无需重跑 AI；群发支持 dimension_floors
-按单维设下限（如 {"icp_fit": 25}）。
+按单维设下限（如 {"icp_fit": 25}，上限按当前权重钳制）。
 ```
 
 ### data_completeness_score 数据完整度（Stage 15，与 lead_score 相互独立）
@@ -213,7 +219,8 @@ Origin 守卫              所有变更请求校验同源 Origin/Referer，403 �
 ### 面板端点一览
 
 ```text
-/admin                 客户 CRUD + 评分分布卡 + CSV 导入 + 海选预过滤
+/admin                 客户 CRUD + 评分分布卡 + 六维权重编辑器与存量重算（Phase 10）
+                       + CSV 导入 + 海选预过滤
                        （国家/细分/产品为下拉勾选，选项旁显示当前命中数）
 /admin/keys            动态 Key 池（D1，即时生效）/ 冷却监控 / 用量卡片 / 凭据加密与轮换
 /admin/outreach        开发信生成与 Gmail 发送（结构化档案驱动，按国家语言）
@@ -232,6 +239,8 @@ GET  /admin/api/customers/filter-options    海选/群发筛选下拉的候选�
                                             （与 buildSegmentWhere 同一条 LIKE，
                                             选项旁的数字 = 勾选后的统计结果）
 GET  /admin/api/customers/lead-score-histogram  评分分布
+GET|PUT /admin/api/lead-score/config        六维权重读写（读含代码默认/上次调整时间；写校验整数 0-100、合计恰 100，审计 UPDATE_SCORE_CONFIG）
+POST /admin/api/lead-score/rescore          按当前权重全量重算已完成客户评分（id 游标分块；不相关归零；审计 RESCORE_LEADS）
 GET  /admin/api/customers/:id               详情（含 contacts + evidence + 研究分层）
 POST /admin/api/customers/:id/contacts/merge   手工合并疑似重复联系人（Phase 7）
 GET  /admin/api/keys                        Key 列表（只回 key_hint）+ encryption 状态
@@ -331,8 +340,8 @@ POST /admin/api/auth/webauthn/recovery/regenerate     重生成恢复码
 ### 源码结构
 
 ```text
-src/index.ts            Cron 入口：认领 → 抓取 → 清洗 → AI 分析 → 回写（2457 行）
-src/admin.ts            面板路由与 7 个面板模板（5366 行）
+src/index.ts            Cron 入口：认领 → 抓取 → 清洗 → AI 分析 → 回写（2529 行）
+src/admin.ts            面板路由与 7 个面板模板（5552 行）
 src/campaigns.ts        定向群发：筛选 DSL、客群 CRUD、生成/发送两步状态机、per-person 粒度、角色优先多触点
 src/research-run.ts     research_runs/sources/facts/signals/personas/profiles 写入（append+supersede）
 src/outreach.ts         开发信生成（结构化档案 → 按国家语言；支持联系人粒度）
@@ -341,7 +350,9 @@ src/gmail.ts            OAuth 发信、账号池、失败冷却
 src/gmail-quota.ts      配额原子预留（INSERT…SELECT + TTL 回收）
 src/campaign-lock.ts    群发单飞锁（原子 upsert + token 守护释放）
 src/contact-merge.ts    同人合并规划器（渠道身份 + 姓名相容）
-src/lead-score-dims.ts  六维评分权重（唯一服务端定义处，面板 JS 镜像）
+src/lead-score-dims.ts  六维评分维度与代码默认权重（唯一服务端定义处）
+src/lead-score-engine.ts 六维评分引擎（比例×权重；leaf 模块，管线与面板重算端点共用，Stage 57 自 index 抽出）
+src/lead-score-config.ts 六维权重配置读写（单行表；fail-open 读 / fail-loud 写，Phase 10）
 src/facets.ts           筛选下拉候选项（国家/细分/产品/关键词）与命中计数
 src/provider-keys.ts    Key 池解析（D1 优先 / env 兜底）+ isolate 缓存
 src/credential-crypto.ts AES-GCM 加解密 + HMAC 指纹 + HKDF 密钥派生
@@ -742,7 +753,7 @@ curl "http://127.0.0.1:8787/__scheduled?cron=*/5%20*%20*%20*%20*"
 npm test
 ```
 
-69 个测试文件 / 899 个测试，全部离线运行（不花 token、不发邮件、不需真实密钥）：
+75 个测试文件 / 963 个测试，全部离线运行（不花 token、不发邮件、不需真实密钥）：
 
 ```text
 tests/security/         10 文件：经真实 handleAdminRequest 的安全验收
@@ -753,7 +764,8 @@ tests/concurrency/      5 文件：10/50/100 并发风暴——配额预留、�
 顶层                     研究分层（research-text/sources/facts/signals/personas/
                         profiles）、群发（campaign-steps/targeting/persona/
                         multi-touch/grain-rebuild/persona-roles/lock）、
-                        contact-merge、lead-score、评分分离、凭据加密端到端、
+                        contact-merge、lead-score（V2 引擎 / 权重配置 / 重算
+                        sweep）、评分分离、凭据加密端到端、
                         auth-sessions、webauthn 单元+流程、gmail-quota、
                         outreach-send、rate-limiter(-do)、facets、provider-keys、
                         csv-limits、audit、cf-access、fk-rebuild、health、
@@ -907,6 +919,7 @@ outreach_campaigns: name, brand_name, group_id, filters, total（创建时的快
 outreach_campaign_members: campaign_id + customer_id + contact_norm（COALESCE(contact_id,0) 生成列，三元 UNIQUE 索引钉死粒度——Phase 9 重建后无显式主键，同公司可多行联系人触点）, contact_id（per-person 粒度钉死到具体联系人，公司粒度为 NULL）, status（pending/generated/sent/failed）, outreach_email_id, error
 研究分层（Phase 3/4，均 append+supersede + is_current 版本链）: research_runs（每轮一行，含 parser_version/model_name/model_version）, research_sources（逐源 raw_text + content_hash）, research_facts（一行一事实，挂 contact_id）, research_signals（当前轮采购信号）, research_personas（人物画像）, research_profiles（公司画像）；evidence（字段级证据，版本化含完整溯源 source_id/source_hash/content_hash）
 contacts: contact_id（唯一）, company_id, seq（公司内唯一，per-person 群发无角色优先序时的取人序）, 姓名/职位/部门/邮箱/手机/座机/whatsapp/linkedin/社交账号
+lead_score_config: id=1（CHECK 钉死单行）, weights_json（六维权重，每维 0-100 整数、合计恰 100）, updated_at, updated_by（Phase 10）
 customer_imports: CSV 原始层（source_row + request_id）
 admin_users / admin_sessions: 会话认证（token 只存 SHA-256 哈希，1 小时过期，可吊销）
 webauthn_credentials / webauthn_challenges / webauthn_recovery_codes: 两步登录凭据、一次性挑战、恢复码（只存哈希）
@@ -938,6 +951,7 @@ gmail_send_log: outreach_email_id, recipient, status, detail, sender_client_emai
 | `0026_lead_score_breakdown.sql` | Phase 5：六维评分分解缓存列 |
 | `0027_campaign_contact_grain.sql` | Phase 8：outreach_emails / campaign_members 的 contact_id 联系人粒度 |
 | `0028_campaign_members_grain.sql` | Phase 9：campaign_members 粒度重建（contact_norm 生成列 + UNIQUE 索引，同公司多联系人触点） |
+| `0029_lead_score_config.sql` | Phase 10：六维权重配置单行表 |
 
 `0006` 的两条 `ALTER TABLE ADD COLUMN` 必须**逐条**执行——D1 遇到重复列会整批失败。
 `0019` 的 FK 重建是单事务表重建（已声明 FK 时跳过；发现孤儿草稿行会拒绝执行并给出

@@ -1,8 +1,9 @@
 # Phase 10 — Lead-score weight configuration
 
-Status: in progress (design signed off 2026-10-10: rescore sweep included,
-RBAC super_admin + operator; Stages 55/56/57 shipped — all three stages
-green; remaining: README Phase 10 section + wrap-up pass)
+Status: shipped in full (2026-10-13) — stages 55/56/57 done: config store +
+GET/PUT API, engine ratios × weight + all consumers, panel editor with
+de-mirrored renderer + chunked rescore sweep. 963 tests green, tsc clean,
+dry-run 618.49 KiB (gzip 151.07 KiB). README Phase 10 sections synced.
 
 ## 0. Trigger
 
