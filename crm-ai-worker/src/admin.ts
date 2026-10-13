@@ -1062,6 +1062,10 @@ async function importCustomersCsv(request: Request, env: AdminEnv, auth: AdminAu
 // rows to pending (action=queue) so the cron pipeline re-processes them.
 // Shares its WHERE-clause builder with the 定向群发 campaign preview so both
 // screens agree on what "this customer group" means.
+/* 海选 CSV 导出上限：一次响应最多输出这么多行——D1 查询与 Worker 内存都
+ * 需要有界；超限时在响应尾部追加截断说明行，操作员按提示收紧条件再导。 */
+const PREFILTER_EXPORT_ROW_CAP = 5_000;
+
 async function preFilterCustomers(request: Request, env: AdminEnv, auth: AdminAuthContext): Promise<Response> {
   const url = new URL(request.url);
   const hasEmail = url.searchParams.get("has_email") === "1";
@@ -1094,6 +1098,46 @@ async function preFilterCustomers(request: Request, env: AdminEnv, auth: AdminAu
       queued,
     });
     return jsonResponse({ action, queued });
+  }
+
+  if (action === "export") {
+    // 海选结果全量导出（CSV，带 BOM 方便 Excel 直接打开中文）。与 count
+    // 共用同一个 segmentClause WHERE，筛选语义完全一致。列集是固定白名
+    // 单：列表列 + 两个评分明细列——死列（从未写入的人名块、
+    // social_accounts）与 full_research_text 原文 blob 不导。不走
+    // jsonResponse/sanitizeResponse 的 JSON 出口，但白名单列名不含任
+    // 何 §19 敏感键。
+    const columns = [
+      ...CUSTOMER_LIST_COLUMNS.trim().split(/[,\s]+/).filter(Boolean),
+      "data_completeness_score",
+      "lead_score_breakdown",
+    ];
+    const rows = await env.DB.prepare(
+      `SELECT ${columns.join(", ")} FROM customers ${clause} ORDER BY lead_score DESC NULLS LAST, id LIMIT ?`,
+    ).bind(...binds, PREFILTER_EXPORT_ROW_CAP + 1).all<Record<string, string | number | null>>();
+    const data = rows.results;
+    const truncated = data.length > PREFILTER_EXPORT_ROW_CAP;
+    if (truncated) data.length = PREFILTER_EXPORT_ROW_CAP;
+    const cell = (v: string | number | null | undefined): string => {
+      if (v === null || v === undefined) return "";
+      const s = String(v);
+      return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const lines = [columns.join(",")];
+    for (const row of data) lines.push(columns.map((c) => cell(row[c])).join(","));
+    if (truncated) {
+      lines.push(`# 截断：匹配数超过 ${PREFILTER_EXPORT_ROW_CAP}，仅导出前 ${PREFILTER_EXPORT_ROW_CAP} 行——请收紧筛选条件后重新导出`);
+    }
+    const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12);
+    return new Response("\uFEFF" + lines.join("\r\n"), {
+      status: 200,
+      headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="prefilter-export-${stamp}-${data.length}rows.csv"`,
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
   }
 
   const count = await env.DB.prepare(
@@ -3797,7 +3841,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 .s-mw64{min-width:64px;width:64px;padding:6px 8px}
 </style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div class="s-dfx-g12-aic"><a href="/admin/security" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">🛡️ 安全设置</a><a href="/admin/outreach" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">📧 开发信管理</a><a href="/admin/keys" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
 <section class="panel"><h2>📥 客户数据导入（Seed CSV）</h2><p class="s-note">粘贴 CSV（需表头，支持列：company_name, country, domain/website, email, product）。原始数据永久保存在 customer_imports（不可变原始层）；域名或公司名匹配的行自动去重跳过，新公司以 pending 状态进入研究队列。</p><div class="toolbar"><input id="importFileName" placeholder="文件名备注（可选）" class="s-xw220"><button class="button" id="importBtn">导入并去重入队</button></div><textarea id="importCsv" rows="6" placeholder="company_name,country,website,email,product\nABC Sports,USA,,buyer@abcsports.com,SUP\nOcean Pro,Germany,oceanpro.de,,RIB"></textarea><div id="importMsg" class="notice hidden"></div></section>
-<section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p class="s-note">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围，再点「重新入队」让管道二次研究高价值客户。筛选项为下拉勾选，右侧数字是该条件当前命中的客户数（勾选「有邮箱」后只计有邮箱的）。</p><div class="toolbar"><span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span><span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span><span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span><select id="pfMinScore" class="s-mw130"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="50">最低分 ≥50</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select><label class="s-chiprow"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><label class="s-chiprow"><input type="checkbox" id="pfHasSignal"> 有购买信号</label><input id="pfPersonaRoles" placeholder="人物角色（逗号分隔，如：采购总监）" class="s-p8-bd1 ol cbd5e1-br6-fs13-mw180"><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button></div><div id="pfResult" class="notice hidden"></div></section>
+<section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p class="s-note">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围：「统计匹配」后可「重新入队」让管道二次研究高价值客户，「写开发信」把当前条件带入定向群发生成分批开发信，「导出全部数据」按当前条件下载全量 CSV。筛选项为下拉勾选，右侧数字是该条件当前命中的客户数（勾选「有邮箱」后只计有邮箱的）。</p><div class="toolbar"><span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span><span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span><span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span><select id="pfMinScore" class="s-mw130"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="50">最低分 ≥50</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select><label class="s-chiprow"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><label class="s-chiprow"><input type="checkbox" id="pfHasSignal"> 有购买信号</label><input id="pfPersonaRoles" placeholder="人物角色（逗号分隔，如：采购总监）" class="s-p8-bd1 ol cbd5e1-br6-fs13-mw180"><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button><button class="button" id="pfOutreach">✉️ 写开发信</button><button class="button secondary" id="pfExport">📥 导出全部数据</button></div><div id="pfResult" class="notice hidden"></div></section>
 <section class="panel"><h2>🎯 线索评分权重（Phase 10 可调）</h2><p class="s-note">六维权重决定评分结构：每维 0-100 的整数，六维合计必须恰好 100（总分 0-100 契约）。保存仅写入配置；已评分客户仍是旧权重结果——点「重算存量评分」按当前权重全量重算（不相关客户归零，未完成客户不受影响，数据完整度分不重算，不重新研究）。</p><div class="toolbar" id="lsInputs"></div><p class="s-note" id="lsMeta"></p><div class="toolbar"><span id="lsSum" class="s-fs12-fw700-mt2"></span><button class="button secondary" id="lsDefaultsBtn">恢复默认</button><button class="button" id="lsSaveBtn" disabled>保存权重</button><button class="button secondary" id="lsRescoreBtn">重算存量评分</button></div><div id="lsMsg" class="notice hidden"></div></section>
 <section class="panel"><h2>客户列表</h2><div id="scoreCard" class="hidden s-mb12" ></div><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>评分</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
 </main>
@@ -3893,6 +3937,10 @@ const ADMIN_PANEL_HTML = `<!doctype html>
   var pfParams=function(){var p=new URLSearchParams();var c=pfDDSel.countries.join(','),s=pfDDSel.segments.join(','),pr=pfDDSel.products.join(','),m=$('pfMinScore').value,proles=$('pfPersonaRoles').value.trim();if(c)p.set('countries',c);if(s)p.set('segments',s);if(pr)p.set('products',pr);if(m&&Number(m)>0)p.set('min_lead_score',m);if($('pfHasEmail').checked)p.set('has_email','1');if($('pfHasSignal').checked)p.set('has_buying_signal','1');if(proles)p.set('persona_roles',proles);return p};
   $('pfCount').onclick=function(){var p=pfParams();p.set('action','count');$('pfCount').disabled=true;api('/admin/api/customers/pre-filter?'+p.toString()).then(function(d){var s=d.sample||[];var lines=s.slice(0,5).map(function(c){return esc((c.company_name||c.display_id||c.id)+'（'+(c.lead_score??'—')+'分）')}).join('、');$('pfResult').classList.remove('hidden');$('pfResult').innerHTML='🎯 匹配 <b>'+d.matching+'</b> 家'+(lines?'。高分示例：'+lines:'');$('pfResult').style.color='#123b68'}).catch(function(e){$('pfResult').classList.remove('hidden');$('pfResult').textContent='❌ '+e.message;$('pfResult').style.color='#b91c1c'}).finally(function(){$('pfCount').disabled=false})};
   $('pfQueue').onclick=function(){if(!confirm('确定将所有匹配的已完成客户重置为 pending 重新研究？'))return;var p=pfParams();p.set('action','queue');$('pfQueue').disabled=true;api('/admin/api/customers/pre-filter?'+p.toString()).then(function(d){$('pfResult').classList.remove('hidden');$('pfResult').innerHTML='✅ 已重新入队 <b>'+d.queued+'</b> 家，等待 cron 逐批处理';$('pfResult').style.color='#123b68';load()}).catch(function(e){$('pfResult').classList.remove('hidden');$('pfResult').textContent='❌ '+e.message;$('pfResult').style.color='#b91c1c'}).finally(function(){$('pfQueue').disabled=false})};
+  // 写开发信：当前筛选条件原样带去定向群发页（prefill=1），由那边的
+  // 预填逻辑接手；导出：同 count 的 WHERE，服务端回 CSV 附件。
+  $('pfOutreach').onclick=function(){var p=pfParams();p.set('prefill','1');location.href='/admin/outreach?'+p.toString()};
+  $('pfExport').onclick=function(){var p=pfParams();p.set('action','export');var a=document.createElement('a');a.href='/admin/api/customers/pre-filter?'+p.toString();document.body.appendChild(a);a.click();a.remove();$('pfResult').classList.remove('hidden');$('pfResult').innerHTML='📥 已按当前筛选条件开始导出 CSV（行数多时需等待几秒，可在浏览器下载列表查看进度）';$('pfResult').style.color='#123b68'};
   var fields=[
     {key:'id',label:'数据库 ID',readonly:true},
     {key:'display_id',label:'客户 ID',readonly:true},
@@ -4587,6 +4635,22 @@ function cgSetFilters(f){
 function cgRenderPicked(){
   document.getElementById('cgPicked').textContent=cgPickedIds.length?('已选 '+cgPickedIds.length+' 家：'+cgPickedIds.slice(0,20).join(', ')+(cgPickedIds.length>20?' …':'')):'未勾选';
 }
+/* 海选过滤器「写开发信」落地：URL 带 prefill=1 时自动切到定向群发 tab
+   并带入筛选条件。下拉值经 cgPendingDD 缓存，等筛选项加载完成后自动
+   生效（cgSetFilters 内建该机制）；has_email 参数在此忽略——群发统计
+   本就要求可触达（按联系人发送时为联系人有邮箱）。 */
+(function(){
+  var q=new URLSearchParams(location.search);
+  if(q.get('prefill')!=='1')return;
+  var f={};
+  ['countries','segments','products'].forEach(function(k){var v=q.get(k);if(v)f[k]=v});
+  var m=q.get('min_lead_score');if(m&&Number(m)>0)f.min_lead_score=Number(m);
+  if(q.get('has_buying_signal')==='1')f.has_buying_signal=true;
+  var pr=q.get('persona_roles');if(pr)f.persona_roles=pr;
+  var tab=document.querySelector('.tab[data-tab="campaign"]');if(tab)tab.click();
+  cgSetFilters(f);
+  showMsg('cgMsg','✅ 已带入海选过滤器的筛选条件：选好品牌点「统计客群」预览，再「创建群发任务」生成分批开发信',true);
+})();
 /* Persona-role datalist: persona_roles and role_priority both match the
    stored persona_role values EXACTLY, so the inputs offer what exists
    (counts included once a value is picked). Fail-soft: an empty datalist

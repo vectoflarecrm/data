@@ -234,7 +234,9 @@ POST /admin/login      面板登录（可选两步：token → WebAuthn 断言/�
                        透露该 token 是否正确（否则限流本身就成了猜测正确值的探针）
 GET  /admin/api/customers?min_lead_score=   列表/筛选
 POST /admin/api/customers/import            CSV 原始层 → 去重入队（5MB/2000 行上限）
-GET  /admin/api/customers/pre-filter        SQL 海选（不花 AI token）
+GET  /admin/api/customers/pre-filter        SQL 海选（不花 AI token）。action：count 统计 /
+                                             queue 重新入队 / export 全量 CSV 导出（带 BOM，
+                                             5000 行上限，超出尾部截断说明）
 GET  /admin/api/customers/filter-options    海选/群发筛选下拉的候选项与命中数
                                             （与 buildSegmentWhere 同一条 LIKE，
                                             选项旁的数字 = 勾选后的统计结果）
