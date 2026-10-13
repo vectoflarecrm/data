@@ -18,6 +18,15 @@
  * consulted: this Worker answers with `Referrer-Policy: no-referrer`, so its
  * own panel sends no Referer — Origin is the only header that survives our
  * own policy.
+ *
+ * Literal-"null" policy (2026-10-13 amendment, operator decision): the
+ * serialized opaque origin "null" is allowed, exactly like a missing Origin.
+ * The operator's production browser serializes its form-POST Origin as the
+ * literal "null" (opaque-origin Chromium shell) and worked before Security
+ * V2 introduced this gate; rejecting it locked the operator out of the
+ * panel. Risk bound: the session cookie stays SameSite=Strict, so a
+ * cross-site opaque context cannot attach it — the primary CSRF layer
+ * holds. Every other foreign or unparseable Origin value is still rejected.
  */
 
 const STATE_CHANGING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -29,8 +38,9 @@ const STATE_CHANGING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 export function originGuardRejection(request: Request): Response | null {
   if (!STATE_CHANGING.has(request.method)) return null;
   const origin = request.headers.get("Origin");
-  if (origin === null) return null; // see policy note above
-  // Sandboxed frames send the literal "null" — treat as foreign.
+  // Missing Origin and the literal opaque "null" are both allowed — see the
+  // policy notes above (non-browser clients; opaque-origin browser clients).
+  if (origin === null || origin === "null") return null;
   let originNormalized: string | null = origin;
   try {
     originNormalized = new URL(origin).origin;

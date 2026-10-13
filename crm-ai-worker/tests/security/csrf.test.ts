@@ -63,13 +63,16 @@ describe("origin guard acceptance", () => {
     expect(res.status).not.toBe(403);
   });
 
-  it("the sandboxed-frame Origin 'null' is treated as foreign", async () => {
+  it("the literal Origin 'null' is allowed like a missing Origin (opaque-origin browser clients)", async () => {
     const env = makeEnv(makeDb());
     const res = await call(env, "/admin/api/customers", {
       ...jsonInit({}),
       headers: { Origin: "null" },
     });
-    expect(res.status).toBe(403);
+    // 2026-10-13 amendment: opaque-origin browser clients are let past the
+    // gate (SameSite=Strict remains the primary CSRF layer); the request
+    // then fails auth normally (401) without credentials.
+    expect(res.status).not.toBe(403);
   });
 
   it("an unparseable Origin is refused, not tolerated", async () => {

@@ -128,6 +128,24 @@ describe("stage 6: same-origin state-changing requests pass", () => {
     expect(res.status).toBe(303);
   });
 
+  it("accepts an opaque-origin (Origin: 'null') form login — pre-V2 client compatibility", async () => {
+    const { env } = await makeEnv();
+    const form = new FormData();
+    form.set("token", TOKEN);
+    const res = await handleAdminRequest(
+      new Request(BASE + "/admin/login", {
+        method: "POST",
+        headers: { "Origin": "null", "CF-Connecting-IP": "1.2.3.4" },
+        body: form,
+      }),
+      env,
+    );
+    // 2026-10-13 amendment: the operator's browser serializes its form-POST
+    // Origin as the literal "null"; the gate treats it like a missing Origin
+    // and the login proceeds to token verification (303 = success).
+    expect(res.status).toBe(303);
+  });
+
   it("accepts a same-origin PATCH (past the gate; business logic decides)", async () => {
     const { env } = await makeEnv();
     const res = await handleAdminRequest(req("PATCH", "/admin/api/customers/1", { origin: BASE, bearer: true, body: { status: "pending" } }), env);
@@ -167,10 +185,12 @@ describe("stage 6: foreign origins are rejected before any handler runs", () => 
     }
   });
 
-  it("treats Origin: null (sandboxed frame) as foreign", async () => {
+  it("treats the literal Origin 'null' like a missing Origin (opaque-origin browser clients)", async () => {
     const { env } = await makeEnv();
     const res = await handleAdminRequest(req("POST", "/admin/api/auth/logout", { origin: "null", bearer: true }), env);
-    expect(res.status).toBe(403);
+    // 2026-10-13 amendment: the operator's browser serializes its form-POST
+    // Origin as the literal "null"; the gate no longer treats it as foreign.
+    expect(res.status).toBe(200);
   });
 
   it("rejects a scheme mismatch on the same host", async () => {
