@@ -1,7 +1,8 @@
 # Phase 10 — Lead-score weight configuration
 
 Status: in progress (design signed off 2026-10-10: rescore sweep included,
-RBAC super_admin + operator; Stage 55 shipped, Stages 56–57 remaining)
+RBAC super_admin + operator; Stages 55/56/57 shipped — all three stages
+green; remaining: README Phase 10 section + wrap-up pass)
 
 ## 0. Trigger
 
@@ -109,6 +110,14 @@ Callers:
 
 ## 4. Panel + re-score sweep (Stage 57)
 
+- **Engine extracted to a leaf** (as-built, Stage 57): the rescore
+  endpoint lives in admin.ts, which cannot import the worker entry
+  (index → admin cycle) — `src/lead-score-engine.ts` now hosts
+  `computeLeadScoreV2` + `extractPersonaEntries` + `LeadScoreInputs`
+  (the narrow structural slice of CustomerAnalysis the six rules read; a
+  full analysis satisfies it without a cast). index.ts re-exports the
+  engine, so tests/lead-score-v2.test.ts keeps importing from
+  ../src/index unchanged.
 - **Weights editor** in `/admin` beside the score distribution card: six
   number inputs + live "合计" readout, save disabled unless the sum is
   exactly 100; shows defaults and last-updated; PUT → toast + audit.

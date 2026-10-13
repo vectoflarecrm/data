@@ -60,6 +60,7 @@ import {
   saveLeadScoreWeights,
   parseLeadScoreWeights,
 } from "./lead-score-config";
+import { computeLeadScoreV2, type LeadScoreInputs } from "./lead-score-engine";
 import { roleHasPermission, requiredPermission } from "./auth/rbac";
 import { applySecurityHeaders, htmlCsp } from "./security-headers";
 import { originGuardRejection } from "./security/origin-guard";
@@ -2693,6 +2694,109 @@ async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthCo
       });
       return jsonResponse({ ok: true, weights: parsed.weights, updated_at: updatedAt });
     }
+    // POST /admin/api/lead-score/rescore — Phase 10 Stage 57: the re-score
+    // sweep. A retune only rewrites the config; the stored per-customer
+    // scores stay stale (they were computed under the old profile) until
+    // this walks every completed row with a segment, rebuilds the engine
+    // inputs from the stored analysis columns + the LIVE contacts table
+    // (merge-visibility: a contact merged in after the analysis counts for
+    // buyer_role/reachability like a found one), recomputes under the
+    // currently-saved weights, and writes lead_score/lead_score_breakdown.
+    // 不相关 rows re-zero (score 0, all-zero breakdown); pending/processing/
+    // failed rows and data_completeness_score are untouched (separate axis —
+    // the sweep never re-runs research). Audited RESCORE_LEADS with counts +
+    // the applied weights. Gated scores.write (super_admin + operator) in
+    // rbac.ts. Chunked by id cursor (100 rows/query, D1 parameter caps); the
+    // contacts lookup rides the company_id index.
+    if (url.pathname === "/admin/api/lead-score/rescore" && request.method === "POST") {
+      const weights = await loadLeadScoreWeights(env);
+      const parseColumn = (raw: string | null): unknown => {
+        if (!raw) return null;
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return null;
+        }
+      };
+      let scanned = 0;
+      let rescored = 0;
+      let zeroed = 0;
+      let cursor = 0;
+      for (;;) {
+        const chunk = (
+          await env.DB.prepare(`
+            SELECT id, company_id, customer_segment, product_categories, company_size, geographic_coverage, personas_and_solutions, buying_signals
+            FROM customers
+            WHERE status = 'completed' AND customer_segment IS NOT NULL AND id > ?
+            ORDER BY id LIMIT 100
+          `)
+            .bind(cursor)
+            .all<{
+              id: number;
+              company_id: string;
+              customer_segment: string;
+              product_categories: string | null;
+              company_size: string | null;
+              geographic_coverage: string | null;
+              personas_and_solutions: string | null;
+              buying_signals: string | null;
+            }>()
+        ).results ?? [];
+        if (chunk.length === 0) break;
+        for (const row of chunk) {
+          cursor = row.id;
+          // Live contacts, not the analysis snapshot: a post-analysis
+          // merge/import must move the score without re-research
+          // (docs/phase10-lead-score-config.md §4).
+          const contacts = (
+            await env.DB.prepare(
+              "SELECT first_name, last_name, email, cellphone, whatsapp FROM contacts WHERE company_id = ?",
+            )
+              .bind(row.company_id)
+              .all<{
+                first_name: string | null;
+                last_name: string | null;
+                email: string | null;
+                cellphone: string | null;
+                whatsapp: string | null;
+              }>()
+          ).results ?? [];
+          const signalsRaw = parseColumn(row.buying_signals);
+          const inputs: LeadScoreInputs = {
+            customer_segment: row.customer_segment,
+            product_categories: row.product_categories,
+            company_size: row.company_size,
+            geographic_coverage: row.geographic_coverage,
+            personas_and_solutions: parseColumn(row.personas_and_solutions),
+            buying_signals: Array.isArray(signalsRaw)
+              ? signalsRaw.filter((s): s is string => typeof s === "string")
+              : [],
+            found_contacts: contacts,
+          };
+          const breakdown = computeLeadScoreV2(inputs, weights);
+          const total = Math.min(
+            100,
+            breakdown.icp_fit + breakdown.product_fit + breakdown.buyer_role +
+              breakdown.buying_signal + breakdown.reachability + breakdown.strategic_value,
+          );
+          await env.DB.prepare(
+            "UPDATE customers SET lead_score = ?, lead_score_breakdown = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          )
+            .bind(total, JSON.stringify(breakdown), row.id)
+            .run();
+          scanned += 1;
+          if (total > 0) rescored += 1;
+          else zeroed += 1;
+        }
+      }
+      await auditAdminAction(env, request, auth, "RESCORE_LEADS", "lead_score", null, {
+        scanned,
+        rescored,
+        zeroed,
+        weights: { ...weights },
+      });
+      return jsonResponse({ ok: true, scanned, rescored, zeroed });
+    }
     // GET /admin/api/customers/filter-options — option lists (with live match
     // counts) behind the 海选 / 定向群发 filter dropdowns. Counts reuse the
     // LIKE expressions of buildSegmentWhere(), so the number shown next to an
@@ -3688,9 +3792,13 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 .sf-hi{background:#16a34a}.sf-good{background:#65a30d}.sf-mid{background:#d97706}.sf-low{background:#9ca3af}.sf-none{background:#cbd5e1}
 .sv-ok{font-size:11px;color:#059669;font-weight:600}.sv-bad{font-size:11px;color:#dc2626;font-weight:600}
 .ev-hi{font-size:11px;color:#059669;font-weight:700}.ev-mid{font-size:11px;color:#d97706;font-weight:700}.ev-lo{font-size:11px;color:#9ca3af;font-weight:700}
+/* stage57 (Phase 10): weights-editor number inputs — narrow on purpose, the
+ * .toolbar input rule's 240px min-width would stack the six inputs. */
+.s-mw64{min-width:64px;width:64px;padding:6px 8px}
 </style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div class="s-dfx-g12-aic"><a href="/admin/security" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">🛡️ 安全设置</a><a href="/admin/outreach" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">📧 开发信管理</a><a href="/admin/keys" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
 <section class="panel"><h2>📥 客户数据导入（Seed CSV）</h2><p class="s-note">粘贴 CSV（需表头，支持列：company_name, country, domain/website, email, product）。原始数据永久保存在 customer_imports（不可变原始层）；域名或公司名匹配的行自动去重跳过，新公司以 pending 状态进入研究队列。</p><div class="toolbar"><input id="importFileName" placeholder="文件名备注（可选）" class="s-xw220"><button class="button" id="importBtn">导入并去重入队</button></div><textarea id="importCsv" rows="6" placeholder="company_name,country,website,email,product\nABC Sports,USA,,buyer@abcsports.com,SUP\nOcean Pro,Germany,oceanpro.de,,RIB"></textarea><div id="importMsg" class="notice hidden"></div></section>
 <section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p class="s-note">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围，再点「重新入队」让管道二次研究高价值客户。筛选项为下拉勾选，右侧数字是该条件当前命中的客户数（勾选「有邮箱」后只计有邮箱的）。</p><div class="toolbar"><span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span><span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span><span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span><select id="pfMinScore" class="s-mw130"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="50">最低分 ≥50</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select><label class="s-chiprow"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><label class="s-chiprow"><input type="checkbox" id="pfHasSignal"> 有购买信号</label><input id="pfPersonaRoles" placeholder="人物角色（逗号分隔，如：采购总监）" class="s-p8-bd1 ol cbd5e1-br6-fs13-mw180"><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button></div><div id="pfResult" class="notice hidden"></div></section>
+<section class="panel"><h2>🎯 线索评分权重（Phase 10 可调）</h2><p class="s-note">六维权重决定评分结构：每维 0-100 的整数，六维合计必须恰好 100（总分 0-100 契约）。保存仅写入配置；已评分客户仍是旧权重结果——点「重算存量评分」按当前权重全量重算（不相关客户归零，未完成客户不受影响，数据完整度分不重算，不重新研究）。</p><div class="toolbar" id="lsInputs"></div><p class="s-note" id="lsMeta"></p><div class="toolbar"><span id="lsSum" class="s-fs12-fw700-mt2"></span><button class="button secondary" id="lsDefaultsBtn">恢复默认</button><button class="button" id="lsSaveBtn" disabled>保存权重</button><button class="button secondary" id="lsRescoreBtn">重算存量评分</button></div><div id="lsMsg" class="notice hidden"></div></section>
 <section class="panel"><h2>客户列表</h2><div id="scoreCard" class="hidden s-mb12" ></div><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>评分</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
 </main>
 <div class="modal-overlay" id="modal"><div class="modal"><div class="modal-header"><h2 id="modalTitle">客户详情</h2><button class="button secondary small" id="closeModal">✕ 关闭</button></div><div class="modal-body" id="modalBody"></div><div class="modal-footer"><span id="modalMsg" class="notice hidden s-mra" ></span><button class="button danger small" id="requeueBtn">设为 pending 重新处理</button><button class="button" id="submitBtn">提交修改</button></div></div></div>
@@ -3712,6 +3820,30 @@ const ADMIN_PANEL_HTML = `<!doctype html>
     +'<div class="s-fx0 0 a-dfx-aic-fs12-c475569">已完成 <b>'+h.total+'</b> 家</div>'+'</div>';$c.querySelectorAll('.score-fill').forEach(function(el){el.style.width=el.getAttribute('data-w')+'%'})};
   var loadScoreCard=function(){api('/admin/api/customers/lead-score-histogram').then(renderScoreCard).catch(function(){})};
   loadScoreCard();
+  // Phase 10 (Stage 57, design docs/phase10-lead-score-config.md §4):
+  // operator-tunable six-dimension weights. The editor loads the saved
+  // profile, live-checks 合计 = 100, PUTs on save;「重算存量评分」triggers
+  // the server sweep so stored scores follow the new weights. LS_DIMS is
+  // the single key/label source — the breakdown renderer below shares it.
+  var LS_DIMS=[['icp_fit','ICP 契合'],['product_fit','产品匹配'],['buyer_role','决策人'],['buying_signal','采购信号'],['reachability','可触达'],['strategic_value','战略价值']];
+  // Fail-open fallback ONLY: the literals are what the config endpoint
+  // answers pre-tune; lsLoad() overwrites them with the SERVER's saved
+  // weights once the fetch lands — no JS mirror of LEAD_SCORE_WEIGHTS.
+  var LS_DIMS_MAX={icp_fit:30,product_fit:20,buyer_role:10,buying_signal:15,reachability:15,strategic_value:10};
+  var lsDefaults=null;
+  $('lsInputs').innerHTML=LS_DIMS.map(function(d){return '<label class="s-chiprow">'+esc(d[1])+' <input type="number" min="0" max="100" step="1" id="ls_'+d[0]+'" class="s-mw64"></label>'}).join('');
+  var lsVal=function(k){var n=Number($('ls_'+k).value);return isFinite(n)?Math.floor(n):0};
+  var lsSum=function(){var s=0;for(var i=0;i<LS_DIMS.length;i++)s+=lsVal(LS_DIMS[i][0]);return s};
+  var lsRenderSum=function(){var s=lsSum();var el=$('lsSum');el.textContent='合计 '+s+' / 100';el.style.color=s===100?'#059669':'#dc2626';$('lsSaveBtn').disabled=s!==100};
+  LS_DIMS.forEach(function(d){$('ls_'+d[0]).oninput=lsRenderSum});
+  var lsFill=function(w){LS_DIMS.forEach(function(d){$('ls_'+d[0]).value=w[d[0]]});lsRenderSum()};
+  var lsLoad=function(){api('/admin/api/lead-score/config').then(function(d){lsDefaults=d.defaults;lsFill(d.weights);LS_DIMS.forEach(function(x){LS_DIMS_MAX[x[0]]=Number(d.weights[x[0]])||0});$('lsMeta').textContent=d.updated_at?('上次调整：'+d.updated_at+'，当前生效权重如上（「恢复默认」= 代码默认）'):'未调整（使用代码默认权重）'}).catch(function(e){showMsg('lsMsg',e.message,false)})};
+  lsLoad();
+  $('lsDefaultsBtn').onclick=function(){if(lsDefaults)lsFill(lsDefaults)};
+  $('lsSaveBtn').onclick=function(){var w={};LS_DIMS.forEach(function(d){w[d[0]]=lsVal(d[0])});var b=$('lsSaveBtn');b.disabled=true;b.textContent='保存中…';
+    api('/admin/api/lead-score/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(w)}).then(function(d){showMsg('lsMsg','✅ 已保存（调整时间 '+d.updated_at+'）。存量客户评分仍为旧权重生成——建议点「重算存量评分」让分数跟进。',true);lsLoad()}).catch(function(e){showMsg('lsMsg',e.message,false)}).finally(function(){b.textContent='保存权重';lsRenderSum()})};
+  $('lsRescoreBtn').onclick=function(){if(!confirm('将按当前保存的权重重算全部已完成客户的评分：不相关客户归零，未完成客户不受影响，数据完整度分不重算（不重新研究）。确定？'))return;var b=$('lsRescoreBtn');b.disabled=true;b.textContent='重算中…';
+    api('/admin/api/lead-score/rescore',{method:'POST'}).then(function(d){showMsg('lsMsg','✅ 重算完成：扫描 '+d.scanned+' 家，有分 '+d.rescored+' 家，归零 '+d.zeroed+' 家',true);loadScoreCard();load()}).catch(function(e){showMsg('lsMsg',e.message,false)}).finally(function(){b.textContent='重算存量评分';b.disabled=false})};
   var load=function(){var p=new URLSearchParams({q:$('search').value,status:$('status').value,limit:String(state.limit),offset:String(state.offset)});api('/admin/api/customers?'+p.toString()).then(function(d){state.total=d.total;$('summary').textContent='共 '+d.total+' 条';$('rows').innerHTML=d.items.map(function(c){var did=c.display_id||'N/A';var score=c.lead_score;var scoreHtml=(score===null||score===undefined)?'—':(score>=70?'<span class="s-c16a34a-fw700">'+score+'</span>':score>=40?'<span class="s-cd97706-fw700">'+score+'</span>':'<span class="s-faint2">'+score+'</span>');return'<tr><td>'+esc(did)+'</td><td>'+esc(c.company_name||'-')+'</td><td><a href="'+esc(c.domain)+'" target="_blank">'+esc((c.domain||'').slice(0,35))+'</a></td><td>'+badge(c.status)+'</td><td>'+scoreHtml+'</td><td>'+esc((c.customer_segment||'-').slice(0,35))+'</td><td>'+esc((c.country||'-'))+'</td><td>'+esc((c.email||c.cellphone||'-').slice(0,25))+'</td><td><button class="button" data-open="'+c.id+'">查看详情</button></td></tr>'}).join('')||'<tr><td colspan="9">暂无数据</td></tr>';$('pageInfo').textContent=(state.total?state.offset+1:0)+'-'+Math.min(state.offset+state.limit,state.total)+' / '+state.total;$('prev').disabled=state.offset===0;$('next').disabled=state.offset+state.limit>=state.total}).catch(function(e){showMsg('listMessage',e.message,false)})};
   $('rows').addEventListener('click',function(ev){var t=ev.target.closest('[data-open]');if(t){window.openDetail(parseInt(t.getAttribute('data-open'),10))}});
   // Seed CSV import (docx ① Data Import)
@@ -3902,14 +4034,16 @@ const ADMIN_PANEL_HTML = `<!doctype html>
   // Bars reuse the histogram's score-fill widget (track + data-w fill).
   // A NULL/invalid breakdown — pre-Stage-43 rows, precheck skips,
   // migration-pending databases — hides the section; the total and the
-  // completeness axis above it keep rendering. Dimension maxes mirror the
-  // server's LEAD_SCORE_WEIGHTS (docs/phase5-lead-score-v2.md §4).
+  // completeness axis above it keep rendering. Phase 10 Stage 57: the
+  // dimension maxes are the SERVER's saved weights, fetched once per panel
+  // load (lsLoad fills LS_DIMS_MAX) — the Stage 44 JS mirror of
+  // LEAD_SCORE_WEIGHTS is gone; the literals in LS_DIMS_MAX are only the
+  // fail-open fallback when that fetch itself fails (pre-migration).
   var renderLeadScoreBreakdown=function(c){var b=null;if(c.lead_score_breakdown){try{b=JSON.parse(c.lead_score_breakdown)}catch(e){}}
     if(!b||b.version!=='lead-score-v2')return'';
-    var dims=[['ICP 契合','icp_fit',30],['产品匹配','product_fit',20],['决策人','buyer_role',10],['采购信号','buying_signal',15],['可触达','reachability',15],['战略价值','strategic_value',10]];
     var h='<div class="section-title">🎯 线索评分维度（六维拆解）</div><div class="s-dfx-fxdcol-g8">';
-    dims.forEach(function(d){var v=Math.max(0,Number(b[d[1]])||0);var pct=Math.round(v/d[2]*100);var fill=pct>=80?'sf-hi':pct>=40?'sf-mid':pct>0?'sf-low':'sf-none';
-      h+='<div><div class="s-dfx-jcb-g8-mb4"><span class="s-fw600-fs13">'+esc(d[0])+'</span><span class="s-fs12-c475569">'+v+' / '+d[2]+'</span></div>'
+    LS_DIMS.forEach(function(d){var mx=LS_DIMS_MAX[d[0]]||0;var v=Math.max(0,Number(b[d[0]])||0);var pct=mx>0?Math.round(v/mx*100):0;var fill=pct>=80?'sf-hi':pct>=40?'sf-mid':pct>0?'sf-low':'sf-none';
+      h+='<div><div class="s-dfx-jcb-g8-mb4"><span class="s-fw600-fs13">'+esc(d[1])+'</span><span class="s-fs12-c475569">'+v+' / '+mx+'</span></div>'
       +'<div class="s-bge2e8f0-br4-h8-ovh"><div class="score-fill '+fill+'" data-w="'+pct+'"></div></div></div>'});
     h+='</div>';return h};
   window.openDetail=function(id){api('/admin/api/customers/'+id).then(function(c){state.selected=id;state.dirty={};$('modalTitle').textContent='客户详情 — '+esc(c.company_name||c.domain||'');var body=buildModal(c);body+=renderLeadScoreBreakdown(c);body+=renderSignals(c.signals);body+=renderEvidence(c.evidence);body+=renderLinkedFacts(c.linked_facts);body+=renderVerifiedSocial(c.social_accounts_verified);body+='<div class="section-title">👥 联系人列表</div>';body+='<div id="contactsArea"></div>';$('modalBody').innerHTML=body;$('modalBody').querySelectorAll('.score-fill').forEach(function(el){el.style.width=el.getAttribute('data-w')+'%'});var ca=document.getElementById('contactsArea');if(ca)ca.innerHTML=renderContacts(c.contacts);wireMergeButton();$('modalMsg').classList.add('hidden');$('modal').classList.add('active');document.body.style.overflow='hidden';
