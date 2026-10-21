@@ -4937,7 +4937,7 @@ function loadCampaigns(){
     }});
     box.querySelectorAll('.cg-pause').forEach(function(b){b.onclick=function(){
       var id=b.dataset.id,paused=b.dataset.status==='paused';
-      if(!paused&&!confirm('暂停该群发任务？\n\n暂停后不能生成或发送；已发出的邮件无法撤回。'))return;
+      if(!paused&&!confirm('暂停该群发任务？\\n\\n暂停后不能生成或发送；已发出的邮件无法撤回。'))return;
       api('/admin/api/outreach/campaigns/'+id+'/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:paused?'draft':'paused'})})
         .then(function(){showToast(paused?'已恢复':'已暂停',true);loadCampaigns()})
         .catch(function(e){showToast(e.message,false)});
@@ -4945,8 +4945,8 @@ function loadCampaigns(){
     box.querySelectorAll('.cg-auto').forEach(function(b){b.onclick=function(){
       var id=b.dataset.id,on=b.dataset.on==='1';
       var msg=on
-        ?'停用该任务的自动推进？\n\n停用后系统不再自动生成/发送；已生成的草稿和已发出的邮件不受影响。'
-        :'开启自动推进？\n\n系统会在调研空闲时每 5 分钟自动生成并发送一小批（各 5 封/次，受 Gmail 每日配额限制），无需保持页面打开。\n\n⚠️ 草稿将不经人工审阅直接发送；已暂停的任务需先点「恢复」。';
+        ?'停用该任务的自动推进？\\n\\n停用后系统不再自动生成/发送；已生成的草稿和已发出的邮件不受影响。'
+        :'开启自动推进？\\n\\n系统会在调研空闲时每 5 分钟自动生成并发送一小批（各 5 封/次，受 Gmail 每日配额限制），无需保持页面打开。\\n\\n⚠️ 草稿将不经人工审阅直接发送；已暂停的任务需先点「恢复」。';
       if(!confirm(msg))return;
       api('/admin/api/outreach/campaigns/'+id+'/auto',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!on})})
         .then(function(){showToast(on?'已停用自动推进':'已开启自动推进',true);loadCampaigns()})
