@@ -46,6 +46,7 @@ import {
   listCampaignMembers,
   createCampaign,
   setCampaignStatus,
+  setCampaignAutoAdvance,
   deleteCampaign,
   runCampaignGenerate,
   runCampaignSend,
@@ -2620,6 +2621,13 @@ async function handleCampaignApi(request: Request, env: AdminEnv, auth: AdminAut
         await auditAdminAction(env, request, auth, "UPDATE_CAMPAIGN", "campaign", String(id), { status });
         return jsonResponse({ ok: true });
       }
+      if (action === "/auto" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const enabled = body.enabled === true;
+        await setCampaignAutoAdvance(env, id, enabled);
+        await auditAdminAction(env, request, auth, "UPDATE_CAMPAIGN", "campaign", String(id), { auto_advance: enabled });
+        return jsonResponse({ ok: true });
+      }
     }
 
     return jsonResponse({ detail: "Not Found" }, 404);
@@ -4870,16 +4878,18 @@ function loadCampaigns(){
     if(!campaigns.length){box.innerHTML='<div class="panel"><p class="s-gray0">还没有群发任务。用上面的筛选条件统计客群 → 创建群发任务。</p></div>';return}
     box.innerHTML=campaigns.map(function(c){
       var state=c.done?'<span class="badge badge-sent">已完成</span>':(c.status==='paused'?'<span class="badge badge-draft">已暂停</span>':'<span class="badge s-bgdbeafe-c1e40af" >进行中</span>');
+      var auto=c.auto_advance?' <span class="cp-chip">⚡ 自动推进</span>':'';
       var err=c.last_error?'<div class="s-fs12-cb91c1c-mt6">最近错误：'+esc(c.last_error)+'</div>':'';
       var canGen=c.pending>0,canSend=c.generated>0;
       return '<div class="cp-card'+(c.done?' done':'')+'">'
         +'<div class="s-between">'
-        +'<div><b class="s-fs15">'+esc(c.name)+'</b> <span class="cp-chip">'+esc(c.brand_name)+'</span> '+state
+         +'<div><b class="s-fs15">'+esc(c.name)+'</b> <span class="cp-chip">'+esc(c.brand_name)+'</span> '+state+auto
         +'<div class="cp-hint s-m2 0" >创建于 '+esc(c.created_at||'')+(c.group_id?' · 来自已保存客群':'')+'</div></div>'
         +'<div class="s-dfx-g6-aic-fxww">'
         +'<button class="btn btn-sm btn-secondary cg-gen" data-id="'+c.id+'"'+(canGen&&!c.done?'':' disabled cg-off')+'>🤖 生成草稿</button>'
         +'<button class="btn btn-sm btn-primary cg-send" data-id="'+c.id+'"'+(canSend&&!c.done?'':' disabled cg-off')+'>📤 继续发送</button>'
         +'<button class="btn btn-sm '+(c.status==='paused'?'btn-primary':'btn-secondary')+' cg-pause" data-id="'+c.id+'" data-status="'+esc(c.status)+'"'+(c.done?' disabled cg-off':'')+'>'+(c.status==='paused'?'▶ 恢复':'⏸ 暂停')+'</button>'
+        +'<button class="btn btn-sm '+(c.auto_advance?'btn-primary':'btn-secondary')+' cg-auto" data-id="'+c.id+'" data-on="'+(c.auto_advance?1:0)+'"'+(c.done?' disabled cg-off':'')+'>⚡ 自动推进</button>'
         +'<button class="btn btn-sm btn-secondary cg-members" data-id="'+c.id+'">名单</button>'
         +'<button class="btn btn-sm btn-danger cg-del" data-id="'+c.id+'">删除</button>'
         +'</div></div>'+cgBar(c)+err+'</div>';
@@ -4927,9 +4937,19 @@ function loadCampaigns(){
     }});
     box.querySelectorAll('.cg-pause').forEach(function(b){b.onclick=function(){
       var id=b.dataset.id,paused=b.dataset.status==='paused';
-      if(!paused&&!confirm('暂停该群发任务？\\n\\n暂停后不能生成或发送；已发出的邮件无法撤回。'))return;
+      if(!paused&&!confirm('暂停该群发任务？\n\n暂停后不能生成或发送；已发出的邮件无法撤回。'))return;
       api('/admin/api/outreach/campaigns/'+id+'/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:paused?'draft':'paused'})})
         .then(function(){showToast(paused?'已恢复':'已暂停',true);loadCampaigns()})
+        .catch(function(e){showToast(e.message,false)});
+    }});
+    box.querySelectorAll('.cg-auto').forEach(function(b){b.onclick=function(){
+      var id=b.dataset.id,on=b.dataset.on==='1';
+      var msg=on
+        ?'停用该任务的自动推进？\n\n停用后系统不再自动生成/发送；已生成的草稿和已发出的邮件不受影响。'
+        :'开启自动推进？\n\n系统会在调研空闲时每 5 分钟自动生成并发送一小批（各 5 封/次，受 Gmail 每日配额限制），无需保持页面打开。\n\n⚠️ 草稿将不经人工审阅直接发送；已暂停的任务需先点「恢复」。';
+      if(!confirm(msg))return;
+      api('/admin/api/outreach/campaigns/'+id+'/auto',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!on})})
+        .then(function(){showToast(on?'已停用自动推进':'已开启自动推进',true);loadCampaigns()})
         .catch(function(e){showToast(e.message,false)});
     }});
     box.querySelectorAll('.cg-members').forEach(function(b){b.onclick=function(){cgShowMembers(b.dataset.id)}});

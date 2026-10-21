@@ -100,7 +100,7 @@ async function makeDb() {
     CREATE TABLE outreach_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, description TEXT,
       filters TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE outreach_campaigns (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, brand_name TEXT,
-      group_id INTEGER, filters TEXT, total INTEGER, status TEXT, last_error TEXT,
+      group_id INTEGER, filters TEXT, total INTEGER, status TEXT, auto_advance INTEGER NOT NULL DEFAULT 0, last_error TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE outreach_campaign_members (campaign_id INTEGER, customer_id INTEGER, contact_id INTEGER, status TEXT,
       outreach_email_id INTEGER, error TEXT, PRIMARY KEY (campaign_id, customer_id));

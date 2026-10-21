@@ -514,6 +514,8 @@ CREATE TABLE IF NOT EXISTS outreach_campaigns (
   total INTEGER NOT NULL DEFAULT 0,
   -- draft | paused | done
   status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'paused', 'done')),
+  -- 1 = cron 自动推进（调研管线空闲时每 tick 生成并发送一小批）
+  auto_advance INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP

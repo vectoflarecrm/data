@@ -628,6 +628,8 @@ export interface CampaignRow {
   filters: string | null;
   total: number;
   status: string;
+  /** 1 = cron 自动推进（开发信自动推进开关，0 = 手动模式）。 */
+  auto_advance: number;
   last_error: string | null;
   created_at: string;
   updated_at: string;
@@ -640,6 +642,7 @@ export interface CampaignProgress {
   group_id: number | null;
   total: number;
   status: string;
+  auto_advance: number;
   last_error: string | null;
   created_at: string;
   updated_at: string;
@@ -680,7 +683,7 @@ async function progressFor(env: AdminEnv, campaign: CampaignRow): Promise<Campai
 
 export async function listCampaigns(env: AdminEnv, limit = 30): Promise<CampaignProgress[]> {
   const rows = await env.DB.prepare(
-    `SELECT id, name, brand_name, group_id, filters, total, status, last_error, created_at, updated_at
+    `SELECT id, name, brand_name, group_id, filters, total, status, auto_advance, last_error, created_at, updated_at
      FROM outreach_campaigns ORDER BY id DESC LIMIT ?`,
   ).bind(Math.min(Math.max(limit, 1), 100)).all<CampaignRow>();
   return Promise.all(rows.results.map((c) => progressFor(env, c)));
@@ -688,7 +691,7 @@ export async function listCampaigns(env: AdminEnv, limit = 30): Promise<Campaign
 
 export async function getCampaign(env: AdminEnv, id: number): Promise<CampaignProgress | null> {
   const row = await env.DB.prepare(
-    `SELECT id, name, brand_name, group_id, filters, total, status, last_error, created_at, updated_at
+    `SELECT id, name, brand_name, group_id, filters, total, status, auto_advance, last_error, created_at, updated_at
      FROM outreach_campaigns WHERE id = ?`,
   ).bind(id).first<CampaignRow>();
   return row ? progressFor(env, row) : null;
@@ -831,6 +834,14 @@ export async function setCampaignStatus(
   ).bind(status, id).run();
 }
 
+/* 开发信自动推进的开关：1 = cron 在调研管线空闲的 tick 里自动生成并发送一小批。
+ * 只改这一列 — 暂停/恢复仍由 setCampaignStatus 负责，暂停的任务即使开着自动推进也不会被碰。 */
+export async function setCampaignAutoAdvance(env: AdminEnv, id: number, enabled: boolean): Promise<void> {
+  await env.DB.prepare(
+    "UPDATE outreach_campaigns SET auto_advance = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+  ).bind(enabled ? 1 : 0, id).run();
+}
+
 export async function deleteCampaign(env: AdminEnv, id: number): Promise<void> {
   await env.DB.prepare("DELETE FROM outreach_campaign_members WHERE campaign_id = ?").bind(id).run();
   await env.DB.prepare("DELETE FROM outreach_campaigns WHERE id = ?").bind(id).run();
@@ -838,7 +849,7 @@ export async function deleteCampaign(env: AdminEnv, id: number): Promise<void> {
 
 async function requireCampaign(env: AdminEnv, id: number): Promise<CampaignRow> {
   const row = await env.DB.prepare(
-    `SELECT id, name, brand_name, group_id, filters, total, status, last_error, created_at, updated_at
+    `SELECT id, name, brand_name, group_id, filters, total, status, auto_advance, last_error, created_at, updated_at
      FROM outreach_campaigns WHERE id = ?`,
   ).bind(id).first<CampaignRow>();
   if (!row) throw new Error("群发任务不存在");
@@ -1281,4 +1292,56 @@ export async function runCampaignSend(
   } finally {
     await lock.release();
   }
+}
+
+/* ── Step 3: cron 自动推进 (开发信自动推进) ──────────────────────────────── */
+
+export interface AutoAdvanceReport {
+  /** 本 tick 向前推进的任务：新生成的草稿数与已发送数。 */
+  advanced: Array<{ campaign: number; generated: number; sent: number }>;
+  /** 被跳过的任务及原因（锁被占用 / 步骤报错 — 错误已由步骤本身写进
+   * last_error）。跳过只影响本 tick，下一个 tick 自动重试。 */
+  skipped: Array<{ campaign: number; reason: string }>;
+}
+
+/* cron tick 里调研管线的对应物：管理员点了「⚡ 自动推进」（auto_advance = 1）
+ * 且未暂停（status = 'draft'）的任务，每个 tick 走一小批生成 + 一小批发送。
+ * 两步完全复用手动 machinery — campaign 锁、单封邮件 claim、配额停机、
+ * pending 可重试语义 — 所以 tick 进行中管理员手动点「生成/发送」只是又一个
+ * 锁竞争者，绝不可能双发。 */
+export async function runCampaignAutoAdvance(
+  env: AdminEnv,
+  opts: { generateBatch?: number; sendBatch?: number; maxCampaigns?: number; deps?: Partial<CampaignDeps> } = {},
+): Promise<AutoAdvanceReport> {
+  const generateBatch = Math.min(Math.max(opts.generateBatch ?? 5, 1), 50);
+  const sendBatch = Math.min(Math.max(opts.sendBatch ?? 5, 1), 50);
+  const maxCampaigns = Math.min(Math.max(opts.maxCampaigns ?? 2, 1), 10);
+  const deps = opts.deps ?? {};
+  const rows = await env.DB.prepare(
+    `SELECT id FROM outreach_campaigns WHERE auto_advance = 1 AND status = 'draft' ORDER BY id LIMIT ?`,
+  ).bind(maxCampaigns).all<{ id: number }>();
+  const report: AutoAdvanceReport = { advanced: [], skipped: [] };
+  for (const row of rows.results) {
+    try {
+      const progress = await getCampaign(env, row.id);
+      // 已完成的任务只差一个手动「标记完成」，不再烧 AI/Gmail 配额。
+      if (!progress || progress.done) continue;
+      let generated = 0;
+      if (progress.pending > 0) {
+        generated = (await runCampaignGenerate(env, row.id, generateBatch, deps)).generated;
+      }
+      let sent = 0;
+      // 生成后重读进度：上面那批草稿正好可以在同一个 tick 里发出。
+      const after = await getCampaign(env, row.id);
+      if (after && !after.done && after.generated > 0) {
+        sent = (await runCampaignSend(env, row.id, sendBatch, deps)).generated;
+      }
+      report.advanced.push({ campaign: row.id, generated, sent });
+    } catch (e) {
+      // CampaignLockedError = 某个手动批次正持有该任务；其他失败已由步骤本身
+      // 记录在任务的 last_error 上。无论哪种，下一个 tick 都会重试。
+      report.skipped.push({ campaign: row.id, reason: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  return report;
 }

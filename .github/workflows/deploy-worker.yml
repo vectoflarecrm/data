@@ -602,6 +602,17 @@ jobs:
           norm="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_xinfo('outreach_campaign_members') WHERE name = 'contact_norm'")"
           echo "$norm" | grep -q '"n": 1' || { echo "Migration failed: contact_norm missing after rebuild"; exit 1; }
 
+      - name: Migrate outreach_campaigns auto_advance (campaign auto-advance)
+        # 开发信自动推进: additive NOT NULL DEFAULT 0 column — old rows read as
+        # "not opted in", so behavior is unchanged until an operator toggles the
+        # ⚡ button. Duplicate-column-tolerant ALTER like every Stage 17+ step;
+        # fresh installs already have the column from schema.sql.
+        run: |
+          npx wrangler d1 execute crm-ai-db --remote --command "ALTER TABLE outreach_campaigns ADD COLUMN auto_advance INTEGER NOT NULL DEFAULT 0" 2>&1 | grep -q 'duplicate column name' && echo "outreach_campaigns.auto_advance already exists" || true
+          info="$(npx wrangler d1 execute crm-ai-db --remote --json --command "SELECT COUNT(*) AS n FROM pragma_table_info('outreach_campaigns') WHERE name = 'auto_advance'")"
+          echo "outreach_campaigns auto_advance columns: $info"
+          echo "$info" | grep -q '"n": 1' || { echo "Migration failed: outreach_campaigns.auto_advance missing after ALTER"; exit 1; }
+
       - name: Typecheck
         run: npm run typecheck
 

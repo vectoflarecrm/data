@@ -25,6 +25,7 @@ import {
   resolveDataRetentionDays,
 } from "./data-retention";
 import { cleanupExpiredChallenges } from "./auth/webauthn";
+import { runCampaignAutoAdvance } from "./campaigns";
   import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, appendResearchSignals, appendResearchPersonas, appendResearchProfile, linkResearchFactsToContacts, hasCurrentResearchFacts, capResearchSourcesToBudget, readSavedResearchText, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, type ResearchPersonaEntry, type ResearchSolutionEntry, FACTS_PER_RUN_CAP } from "./research-run";
 
 export interface CustomerRow {
@@ -2766,7 +2767,21 @@ export default {
     // BATCH_SIZE=3 fits comfortably in the free-plan cron wall clock while
     // tripling throughput versus one-per-tick.
     const customers = await claimCustomers(env);
-    if (!customers.length) return;
+    if (!customers.length) {
+      // 开发信自动推进：调研管线本 tick 空闲，把整个子请求预算让给管理员
+      // 开启了「⚡ 自动推进」的群发任务（每 tick 一小批生成 + 一小批发送，
+      // 复用手动的锁/claim/配额机制 — 管理员同时手动点击也只是锁竞争者）。
+      // Fail-open：单个任务失败已由步骤写进 last_error，绝不断掉本 tick。
+      try {
+        const report = await runCampaignAutoAdvance({ ...env } as import("./admin").AdminEnv);
+        if (report.advanced.length || report.skipped.length) {
+          safeLog("log", `[auto-advance] advanced=${JSON.stringify(report.advanced)} skipped=${JSON.stringify(report.skipped)}`);
+        }
+      } catch (e) {
+        safeLog("error", "[auto-advance] tick failed, continuing", e instanceof Error ? e.message : String(e));
+      }
+      return;
+    }
     // Stage 9 (spec §10.1): the claim IS research starting — one audit row
     // per customer, with the cron as the system actor.
     for (const c of customers) {

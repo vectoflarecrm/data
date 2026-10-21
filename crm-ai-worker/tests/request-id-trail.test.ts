@@ -52,7 +52,7 @@ const CAMPAIGN_SCHEMA = `
     display_id TEXT, company_name TEXT, email_to TEXT, product_category TEXT, brand_name TEXT,
     subject TEXT, body TEXT, status TEXT DEFAULT 'draft', sent_at TEXT, created_at TEXT);
   CREATE TABLE outreach_campaigns (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, brand_name TEXT,
-    group_id INTEGER, filters TEXT, total INTEGER, status TEXT, last_error TEXT,
+    group_id INTEGER, filters TEXT, total INTEGER, status TEXT, auto_advance INTEGER NOT NULL DEFAULT 0, last_error TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
   CREATE TABLE outreach_campaign_members (campaign_id INTEGER, customer_id INTEGER, contact_id INTEGER, status TEXT,
     outreach_email_id INTEGER, error TEXT, PRIMARY KEY (campaign_id, customer_id));
