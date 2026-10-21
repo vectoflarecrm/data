@@ -51,6 +51,7 @@ interface MinimalDb {
       run(): Promise<unknown>;
     };
   };
+  batch?(statements: unknown[]): Promise<unknown>;
 }
 interface EnvWithDb {
   DB?: MinimalDb;
@@ -200,10 +201,34 @@ export async function noteProviderKeySuccess(env: unknown, provider: string, ent
   try {
     const db = (env as EnvWithDb).DB;
     if (!db) return;
-    await db.prepare(`UPDATE api_configs SET last_error = NULL, last_used_at = CURRENT_TIMESTAMP WHERE id = ?`)
-      .bind(entry.keyId).run();
-    await noteKeyUsage(env, provider, keyHealthName(provider, entry));
+    const successStmt = db.prepare(`UPDATE api_configs SET last_error = NULL, last_used_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(entry.keyId);
+    // Bulk email generation calls this once per generated email, and every
+    // D1 round trip draws from the Worker invocation's subrequest budget
+    // (free plan: ~50 per request — the reason large generate batches died
+    // after ~6 emails). One batch keeps the per-email success bookkeeping at
+    // a single subrequest; the fallback preserves the sequential behavior
+    // for DB stubs without batch support.
+    if (db.batch) {
+      await db.batch([
+        successStmt,
+        prepareKeyUsageInsert(db, provider, keyHealthName(provider, entry)),
+      ]);
+    } else {
+      await successStmt.run();
+      await noteKeyUsage(env, provider, keyHealthName(provider, entry));
+    }
   } catch { /* best effort */ }
+}
+
+/** Prepared statement counting one successful call on a key for the panel's
+ * monthly-usage card. Shared by noteProviderKeySuccess (batched) and
+ * noteKeyUsage (standalone run) so both write the exact same row. */
+function prepareKeyUsageInsert(db: MinimalDb, provider: string, healthName: string) {
+  return db.prepare(
+    `INSERT INTO api_key_usage (provider, key_index, day, success_count) VALUES (?, ?, date('now'), 1)
+     ON CONFLICT (provider, key_index, day) DO UPDATE SET success_count = success_count + 1`,
+  ).bind(provider, healthName);
 }
 
 // Track one successful call on a key for the panel's monthly-usage card.
@@ -212,9 +237,6 @@ export async function noteKeyUsage(env: unknown, provider: string, healthName: s
   try {
     const db = (env as EnvWithDb).DB;
     if (!db) return;
-    await db.prepare(
-      `INSERT INTO api_key_usage (provider, key_index, day, success_count) VALUES (?, ?, date('now'), 1)
-       ON CONFLICT (provider, key_index, day) DO UPDATE SET success_count = success_count + 1`,
-    ).bind(provider, healthName).run();
+    await prepareKeyUsageInsert(db, provider, healthName).run();
   } catch { /* best effort */ }
 }

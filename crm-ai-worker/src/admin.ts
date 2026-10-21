@@ -3785,7 +3785,7 @@ const ADMIN_LOGIN_HTML = `<!doctype html>
 const ADMIN_PANEL_HTML = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>D1 CRM 客户管理</title><style>
-:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#172033;background:#f4f7fb}*{box-sizing:border-box}body{margin:0}.top{background:#123b68;color:#fff;padding:18px 26px;display:flex;justify-content:space-between;gap:12px;align-items:center}.top h1{font-size:22px;margin:0}.wrap{max-width:1400px;margin:22px auto;padding:0 18px}.panel{background:#fff;border:1px solid #dce5f0;border-radius:12px;padding:18px;margin-bottom:18px}.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.toolbar input,.toolbar select{font:inherit;padding:10px;border:1px solid #cbd5e1;border-radius:8px}.toolbar input:not([type=checkbox]){min-width:240px}.button{background:#1677d2;color:#fff;border:0;border-radius:8px;padding:10px 15px;cursor:pointer;font:inherit}.button.secondary{background:#475569}.button.danger{background:#b91c1c}.button.small{padding:6px 12px;font-size:13px}table{width:100%;border-collapse:collapse;margin-top:14px}th,td{text-align:left;padding:10px;border-bottom:1px solid #e2e8f0;vertical-align:top;font-size:14px}th{background:#f8fafc;white-space:nowrap}td{max-width:300px;overflow-wrap:anywhere}.badge{display:inline-block;border-radius:999px;padding:3px 9px;background:#e2e8f0;font-size:12px}.badge-completed{background:#d1fae5;color:#065f46}.badge-pending{background:#fef3c7;color:#92400e}.badge-failed{background:#fee2e2;color:#991b1b}.badge-processing{background:#dbeafe;color:#1e40af}.notice{margin-top:12px;padding:10px;border-radius:8px;background:#eff6ff}.success{background:#ecfdf5;color:#065f46}.error{background:#fef2f2;color:#991b1b}.hidden{display:none}.pager{display:flex;justify-content:space-between;align-items:center;margin-top:14px;gap:12px}
+:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#172033;background:#f4f7fb}*{box-sizing:border-box}body{margin:0}.top{background:#eef3fa;color:#172033;border-bottom:1px solid #d3deed;padding:18px 26px;display:flex;justify-content:space-between;gap:12px;align-items:center}.top h1{font-size:22px;margin:0}.wrap{max-width:1400px;margin:22px auto;padding:0 18px}.panel{background:#fff;border:1px solid #dce5f0;border-radius:12px;padding:18px;margin-bottom:18px}.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.toolbar input,.toolbar select{font:inherit;padding:10px;border:1px solid #cbd5e1;border-radius:8px}.toolbar input:not([type=checkbox]){min-width:240px}.button{background:#1677d2;color:#fff;border:0;border-radius:8px;padding:10px 15px;cursor:pointer;font:inherit}.button.secondary{background:#475569}.button.danger{background:#b91c1c}.button.small{padding:6px 12px;font-size:13px}table{width:100%;border-collapse:collapse;margin-top:14px}th,td{text-align:left;padding:10px;border-bottom:1px solid #e2e8f0;vertical-align:top;font-size:14px}th{background:#f8fafc;white-space:nowrap}td{max-width:300px;overflow-wrap:anywhere}.badge{display:inline-block;border-radius:999px;padding:3px 9px;background:#e2e8f0;font-size:12px}.badge-completed{background:#d1fae5;color:#065f46}.badge-pending{background:#fef3c7;color:#92400e}.badge-failed{background:#fee2e2;color:#991b1b}.badge-processing{background:#dbeafe;color:#1e40af}.notice{margin-top:12px;padding:10px;border-radius:8px;background:#eff6ff}.success{background:#ecfdf5;color:#065f46}.error{background:#fef2f2;color:#991b1b}.hidden{display:none}.pager{display:flex;justify-content:space-between;align-items:center;margin-top:14px;gap:12px}
 .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1000;justify-content:center;align-items:flex-start;padding:30px 18px;overflow-y:auto}.modal-overlay.active{display:flex}.modal{background:#fff;border-radius:14px;width:min(800px,100%);box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden}.modal-header{background:#123b68;color:#fff;padding:18px 24px;display:flex;justify-content:space-between;align-items:center}.modal-header h2{margin:0;font-size:20px}.modal-body{padding:24px;max-height:70vh;overflow-y:auto}.modal-footer{padding:16px 24px;background:#f8fafc;border-top:1px solid #e2e8f0;display:flex;justify-content:flex-end;gap:10px}
 .field-row{display:flex;align-items:stretch;border-bottom:1px solid #e2e8f0;min-height:48px}.field-row:last-child{border-bottom:none}.field-label{width:180px;min-width:180px;padding:12px 16px;background:#f8fafc;font-weight:600;font-size:13px;color:#475569;display:flex;align-items:center;border-right:1px solid #e2e8f0}.field-content{flex:1;padding:12px 16px;display:flex;align-items:center;gap:8px;min-height:48px}.field-value{flex:1;font-size:14px;word-break:break-word;line-height:1.5}.field-value a{color:#1677d2;text-decoration:none}.field-value a:hover{text-decoration:underline}.field-input{flex:1;display:none;gap:8px;align-items:center}.field-input input,.field-input select,.field-input textarea{font:inherit;padding:8px 12px;border:1px solid #cbd5e1;border-radius:6px;width:100%}.field-input textarea{min-height:80px;resize:vertical}.field-input input,.field-input select{max-width:100%}.field-row.editing .field-value{display:none}.field-row.editing .field-input{display:flex}.field-row.readonly .field-label{color:#94a3b8}
 .cp-dd{position:relative;display:inline-block}
@@ -3813,7 +3813,12 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 .s-chiprow{font-size:13px;display:flex;align-items:center;gap:4px}
 .s-faint2{color:#9ca3af}
 .s-dfx-g12-aic{display:flex;gap:12px;align-items:center}
-.s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600{color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:8px 16px;border-radius:8px;font-weight:600}
+/* stage30 auto conversion produced a class name containing a space
+ * ("p8 16" from padding:8px 16px), which made the selector invalid —
+ * browsers dropped the whole rule and the header nav links rendered as
+ * unstyled default-blue anchors. Replaced with a single valid class. */
+.top-nav-link{color:#123b68;text-decoration:none;background:#ffffff;border:1px solid #b9c9e0;padding:8px 16px;border-radius:8px;font-weight:600}
+.top-nav-link:hover{border-color:#1677d2;color:#1677d2}
 .s-xw220{max-width:220px}
 .s-mb12{margin-bottom:12px}
 .s-mra{margin-right:auto}
@@ -3857,7 +3862,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 /* stage57 (Phase 10): weights-editor number inputs — narrow on purpose, the
  * .toolbar input rule's 240px min-width would stack the six inputs. */
 .s-mw64{min-width:64px;width:64px;padding:6px 8px}
-</style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div class="s-dfx-g12-aic"><a href="/admin/security" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">🛡️ 安全设置</a><a href="/admin/outreach" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">📧 开发信管理</a><a href="/admin/keys" class="s-cfff-tdn-bgrgba25525525515-p8 16-br8-fw600">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
+</style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div class="s-dfx-g12-aic"><a href="/admin/security" class="top-nav-link">🛡️ 安全设置</a><a href="/admin/outreach" class="top-nav-link">📧 开发信管理</a><a href="/admin/keys" class="top-nav-link">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
 <section class="panel"><h2>📥 客户数据导入（Seed CSV）</h2><p class="s-note">粘贴 CSV（需表头，支持列：company_name, country, domain/website, email, product）。原始数据永久保存在 customer_imports（不可变原始层）；域名或公司名匹配的行自动去重跳过，新公司以 pending 状态进入研究队列。</p><div class="toolbar"><input id="importFileName" placeholder="文件名备注（可选）" class="s-xw220"><button class="button" id="importBtn">导入并去重入队</button></div><textarea id="importCsv" rows="6" placeholder="company_name,country,website,email,product\nABC Sports,USA,,buyer@abcsports.com,SUP\nOcean Pro,Germany,oceanpro.de,,RIB"></textarea><div id="importMsg" class="notice hidden"></div></section>
 <section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p class="s-note">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围：「统计匹配」后可「重新入队」让管道二次研究高价值客户，「写开发信」把当前条件带入定向群发生成分批开发信，「导出全部数据」按当前条件下载全量 CSV。筛选项为下拉勾选，右侧数字是该条件当前命中的客户数（勾选「有邮箱」后只计有邮箱的）。</p><div class="toolbar"><span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span><span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span><span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span><select id="pfMinScore" class="s-mw130"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="50">最低分 ≥50</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select><label class="s-chiprow"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><label class="s-chiprow"><input type="checkbox" id="pfHasSignal"> 有购买信号</label><input id="pfPersonaRoles" placeholder="人物角色（逗号分隔，如：采购总监）" class="s-p8-bd1 ol cbd5e1-br6-fs13-mw180"><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button><button class="button" id="pfOutreach">✉️ 写开发信</button><button class="button secondary" id="pfExport">📥 导出全部数据</button></div><div id="pfResult" class="notice hidden"></div></section>
 <section class="panel"><h2>🎯 线索评分权重（Phase 10 可调）</h2><p class="s-note">六维权重决定评分结构：每维 0-100 的整数，六维合计必须恰好 100（总分 0-100 契约）。保存仅写入配置；已评分客户仍是旧权重结果——点「重算存量评分」按当前权重全量重算（不相关客户归零，未完成客户不受影响，数据完整度分不重算，不重新研究）。</p><div class="toolbar" id="lsInputs"></div><p class="s-note" id="lsMeta"></p><div class="toolbar"><span id="lsSum" class="s-fs12-fw700-mt2"></span><button class="button secondary" id="lsDefaultsBtn">恢复默认</button><button class="button" id="lsSaveBtn" disabled>保存权重</button><button class="button secondary" id="lsRescoreBtn">重算存量评分</button></div><div id="lsMsg" class="notice hidden"></div></section>
@@ -4331,7 +4336,7 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 <div class="section-title s-mt22" >群发任务</div>
 <div class="s-dfx-g8-aic-mb10-fxww">
 <label class="s-fs13">每批数量</label>
-<select id="cgBatch" class="s-input"><option value="5">5 封</option><option value="10" selected>10 封</option><option value="20">20 封</option><option value="30">30 封</option><option value="50">50 封</option></select>
+<select id="cgBatch" class="s-input"><option value="5" selected>5 封</option><option value="10">10 封</option><option value="20">20 封</option><option value="30">30 封</option><option value="50">50 封</option></select>
 <button class="btn btn-sm btn-secondary" id="cgRefresh">刷新</button>
 <span id="cgQuota" class="s-fs13-c475569"></span>
 </div>
@@ -4473,8 +4478,45 @@ function loadAttachments(brand){var box=document.querySelector('.att-list[data-b
 
 // Generate
 api('/admin/api/outreach/settings').then(function(d){var sel=document.getElementById('genBrand');sel.innerHTML='';d.settings.forEach(function(b){if(b.enabled){var opt=document.createElement('option');opt.value=b.brand_name;opt.textContent=b.brand_name+' ('+b.product_category+')';sel.appendChild(opt)}});if(!sel.options.length){sel.innerHTML='<option value="">-- 请先启用品牌 --</option>'}});
-document.getElementById('genBtn').onclick=function(){var brand=document.getElementById('genBrand').value;var limit=Number(document.getElementById('genLimit').value);if(!brand){showToast('请选择品牌',false);return}var btn=document.getElementById('genBtn');btn.disabled=true;btn.textContent='⏳ 生成中...';showMsg('genMsg','正在为 '+brand+' 生成开发信，请稍候...',false);
-api('/admin/api/outreach/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:brand,limit:limit})}).then(function(r){showMsg('genMsg','✅ 成功生成 '+r.generated+' 封开发信'+(r.errors.length?'，'+r.errors.length+' 条失败':''),true);showToast('生成完成: '+r.generated+'封',true)}).catch(function(e){showMsg('genMsg','❌ '+e.message,false);showToast(e.message,false)}).finally(function(){btn.disabled=false;btn.textContent='🚀 开始生成'})};
+// Generate — batched client-side. One Worker invocation has a hard budget of
+// subrequests (D1/fetch/DO calls, ~50 on the free plan); each generated email
+// costs ~6, so a single 10-email request dies around the 7th email (observed
+// as "只生成 6 封就停止"). Splitting into 5-per-request batches gives every
+// batch a fresh invocation budget and keeps each well under the cap.
+var GEN_BATCH_SIZE=5;
+document.getElementById('genBtn').onclick=function(){
+  var brand=document.getElementById('genBrand').value;
+  var total=Number(document.getElementById('genLimit').value);
+  if(!brand){showToast('请选择品牌',false);return}
+  if(!total||total<1){showToast('请选择生成数量',false);return}
+  var btn=document.getElementById('genBtn');
+  btn.disabled=true;btn.textContent='⏳ 生成中...';
+  var generated=0,failed=0,done=0,firstError='';
+  showMsg('genMsg','正在为 '+brand+' 分批生成开发信（每批 '+GEN_BATCH_SIZE+' 封），请勿关闭页面...',false);
+  function finish(err){
+    var ok=!err;
+    var msg=ok
+      ?('✅ 成功生成 '+generated+' 封开发信'+(failed?'，'+failed+' 条失败'+(firstError?'（'+firstError.slice(0,120)+'）':''):''))
+      :('❌ 已生成 '+generated+' 封后中断：'+err.message);
+    showMsg('genMsg',msg,ok);showToast(err?err.message:('生成完成: '+generated+'封'),ok);
+    btn.disabled=false;btn.textContent='🚀 开始生成';
+    loadStats();loadEmails();
+  }
+  (function next(){
+    var n=Math.min(GEN_BATCH_SIZE,total-done);
+    api('/admin/api/outreach/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brand:brand,limit:n})}).then(function(r){
+      generated+=r.generated||0;failed+=(r.errors?r.errors.length:0);
+      if(!firstError&&r.errors&&r.errors.length)firstError=String(r.errors[0]);
+      done+=n;
+      if(done>=total){finish(null);return}
+      // The whole batch failed (AI/provider down or rate-limited): retrying
+      // the next batch immediately would just burn the same errors again.
+      if((r.generated||0)===0&&r.errors&&r.errors.length>0){finish(null);return}
+      showMsg('genMsg','⏳ 已生成 '+generated+' 封（目标 '+total+'），继续...',true);
+      next();
+    }).catch(function(e){finish(e)});
+  })();
+};
 function showMsg(id,t,g){var e=document.getElementById(id);if(!e)return;e.textContent=t;e.className='notice '+(g?'success':'error');e.style.display='block'}
 
 // Email list
