@@ -5587,6 +5587,14 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 </div>
 
 <div class="panel">
+<div class="sec-head"><h2>📡 持续意向监测</h2><button class="btn btn-p" id="sigReload">刷新</button></div>
+<p class="hint">对重要客户（A/VIP 分级或有未结商机，自动入表）周期性搜索五类采购信号：新品发布 / 扩张动向 / 经销商招募 / 采购公告 / 渠道变化（DuckDuckGo，单次检查 5 条查询，默认 14 天冷却）。新信号自动记时间线 + 建待办；强信号（扩张/招经销/采购公告）会把 C 级公司自动上调为 B 级。可在公司详情里立即检查。</p>
+<table><thead><tr><th>公司</th><th>分级</th><th>监测</th><th>周期(天)</th><th>上次检查</th><th>有效信号</th><th>操作</th></tr></thead><tbody id="sigWatchRows"></tbody></table>
+<p class="hint" style="margin:12px 0 4px">最近信号（检测后 90 天内有效，来源去重）：</p>
+<table><thead><tr><th>公司</th><th>类型</th><th>信号内容</th><th>来源</th><th>检测时间</th></tr></thead><tbody id="sigRows"></tbody></table>
+</div>
+
+<div class="panel">
 <div class="sec-head"><h2>🏢 客户公司</h2>
 <div class="toolbar"><input id="coSearch" placeholder="搜索名称/域名/备注"><select id="coTier"><option value="">全部分级</option><option value="A">A</option><option value="B">B</option><option value="C">C</option><option value="VIP">VIP</option><option value="unqualified">未分级</option></select><select id="coStatus"><option value="">全部状态</option><option value="new">新线索</option><option value="enriched">已富化</option><option value="contacted">已联系</option><option value="qualified">已验证</option><option value="disqualified">已淘汰</option></select><button class="btn btn-p" id="coReload">刷新</button><button class="btn" id="coNew">➕ 新建公司</button></div></div>
 <p class="hint">⬆️ 线索提升：把研究管线（customers 表）里已调研完的线索一键转为销售公司 —— ID 填客户管理面板「客户ID」列的数字。提升过的线索会自动跳过（幂等），联系人、国家、行业、评分分级一并带入。</p>
@@ -5667,7 +5675,7 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 <script>
 (function(){
 'use strict';
-  var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[],funnel:null,sequences:[],domainChecks:[]};
+  var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[],funnel:null,sequences:[],domainChecks:[],signalWatch:[],signalList:[]};
 var STAGES=['inquiry','sample_quoted','pi_sent','deposit_paid','won','lost'];
 var STAGE_L={inquiry:'询盘',sample_quoted:'样品报价',pi_sent:'PI 已发',deposit_paid:'定金到账',won:'赢单',lost:'输单'};
 var TIER_L={A:'A级',B:'B级',C:'C级',VIP:'VIP',unqualified:'未分级'};
@@ -5948,14 +5956,55 @@ function renderDomains(companyCounts,contactCounts){
   $('dchkCounts').innerHTML='公司域名：'+(cc||'无')+'　｜　联系人邮箱：'+(ct||'无');
 }
 $('dchkReload').onclick=loadDomains;
+
+/* ── 持续意向监测（更新.txt ⑥） ─────────────────────────── */
+var ROLE_BADGE={owner:['老板/决策','b-cust'],procurement:['采购','b-a'],finance:['财务','b-b'],channel:['渠道','b-warn'],operations:['运营','b-unsub'],sales:['销售','b-b'],other:['其他','b-un'],unknown:['未识别','b-un']};
+var SIGNAL_TYPE_L={new_product:'新品发布',expansion:'扩张动向',distributor:'经销商招募',procurement:'采购公告',channel_change:'渠道变化'};
+function loadSignals(){
+  return api('/admin/api/crm/signals').then(function(b){
+    STATE.signalWatch=b.watch||[];STATE.signalList=b.signals||[];renderSignals();
+  });
+}
+function renderSignals(){
+  var w='';
+  for(var i=0;i<STATE.signalWatch.length;i++){
+    var s=STATE.signalWatch[i];
+    w+='<tr><td>'+esc(s.company_name)+'</td><td>'+tierBadge(s.tier)+'</td><td>'+(Number(s.enabled)?'<span class="badge b-a">监测中</span>':'<span class="badge b-un">已停用</span>')+'</td><td>'+Number(s.interval_days)+'</td><td>'+esc(String(s.last_checked_at||'尚未检查').slice(0,16).replace('T',' '))+'</td><td>'+Number(s.active_signals||0)+'</td><td><button class="btn btn-s btn-xs" data-act="sigToggle" data-id="'+esc(s.company_id)+'">'+(Number(s.enabled)?'停用':'启用')+'</button> <button class="btn btn-p btn-xs" data-act="sigCheck" data-id="'+esc(s.company_id)+'">立即检查</button></td></tr>';
+  }
+  $('sigWatchRows').innerHTML=w||'<tr><td colspan="7" class="hint">还没有监测中的公司。A/VIP 分级或创建未结商机后自动入表。</td></tr>';
+  var r='';
+  for(var j=0;j<STATE.signalList.length;j++){
+    var g=STATE.signalList[j];
+    r+='<tr><td>'+esc(g.company_name)+'</td><td><span class="badge b-warn">'+(SIGNAL_TYPE_L[g.signal_type]||esc(g.signal_type))+'</span></td><td>'+esc(String(g.signal_text||'').slice(0,90))+'</td><td>'+(g.source_url?'<a href="'+esc(g.source_url)+'" target="_blank" rel="noopener">链接</a>':'—')+'</td><td>'+esc(String(g.detected_at||'').slice(0,16).replace('T',' '))+'</td></tr>';
+  }
+  $('sigRows').innerHTML=r||'<tr><td colspan="5" class="hint">暂无信号。检查完成且命中关键词后展示在这里。</td></tr>';
+}
+$('sigReload').onclick=loadSignals;
+$('sigWatchRows').addEventListener('click',function(e){
+  var b=e.target.closest('[data-act]');if(!b)return;
+  var id=b.getAttribute('data-id');
+  if(b.getAttribute('data-act')==='sigToggle'){
+    var en=1;
+    for(var i=0;i<STATE.signalWatch.length;i++){
+      if(STATE.signalWatch[i].company_id===id){en=Number(STATE.signalWatch[i].enabled)?0:1;break;}
+    }
+    api('/admin/api/crm/companies/'+encodeURIComponent(id)+'/watch',{method:'PATCH',body:{enabled:en===1}}).then(function(){toast('监测配置已更新');loadSignals();}).catch(function(err){toast(err.message,true);});
+  }else if(b.getAttribute('data-act')==='sigCheck'){
+    toast('正在搜索信号…');
+    api('/admin/api/crm/companies/'+encodeURIComponent(id)+'/check-signals',{method:'POST'}).then(function(b2){
+      toast('检查完成：新增信号 '+Number(b2.report.new_signals)+' 条'+(b2.report.tier_bumped?'，公司分级已上调 B':''));
+      loadSignals();
+    }).catch(function(err){toast(err.message,true);});
+  }
+});
 function loadAll(){
-  return Promise.all([loadCompanies(),loadDeals(),loadTasks(),loadStats(),loadSequences(),loadDomains()]).catch(function(e){toast(e.message,true);});
+  return Promise.all([loadCompanies(),loadDeals(),loadTasks(),loadStats(),loadSequences(),loadDomains(),loadSignals()]).catch(function(e){toast(e.message,true);});
 }
 
 /* ── 公司详情 ───────────────────────────────────────────── */
 function openDetail(id){
   api('/admin/api/crm/companies/'+encodeURIComponent(id)).then(function(b){
-    var c=b.company,contacts=b.contacts||[],deals=b.deals||[],acts=b.activities||[];
+    var c=b.company,contacts=b.contacts||[],deals=b.deals||[],acts=b.activities||[],csg=b.signals||[];
     var h='<h3>'+esc(c.name)+' '+tierBadge(c.tier)+' '+statusBadge(c.lead_status)+(c.customer_since?' <span class="badge b-cust">正式客户 · '+esc(c.customer_since)+' 起</span>':'')+(Number(c.do_not_contact)?' <span class="badge b-dnc">禁止联系</span>':'')+'</h3>';
     h+='<p class="hint" style="margin:0 0 10px">ID '+esc(c.id)+' · '+esc(c.domain||'无域名')+' '+(c.domain?domailBadge(c.domain_email_status):'')+' · '+esc(c.country||'国家未知')+' · '+esc(c.industry||'行业未知')+(c.merged_from_ids?' · 已并入来源: '+esc(c.merged_from_ids):'')+'</p>';
     h+='<div class="grid2 f"><div><label>分级</label><select id="dTier">';
@@ -5972,7 +6021,7 @@ function openDetail(id){
       h+='<button class="btn btn-d" data-act="blockCo" data-id="'+esc(c.id)+'">🚫 标记公司禁止联系</button>';
     }
     h+='</div>';
-    h+='<h2 style="font-size:15px;margin:16px 0 8px">👤 联系人（'+contacts.length+'）</h2><table><thead><tr><th>姓名</th><th>职务</th><th>邮箱</th><th>电话/WhatsApp</th><th>状态</th><th>主联</th><th>操作</th></tr></thead><tbody>';
+    h+='<h2 style="font-size:15px;margin:16px 0 8px">👤 联系人（'+contacts.length+'）</h2><table><thead><tr><th>姓名</th><th>职务</th><th>角色</th><th>邮箱</th><th>电话/WhatsApp</th><th>状态</th><th>主联</th><th>操作</th></tr></thead><tbody>';
     for(var i=0;i<contacts.length;i++){
       var ct=contacts[i];
       var cst='';
@@ -5981,6 +6030,9 @@ function openDetail(id){
       if(ct.email_status==='invalid')cst+='<span class="badge b-warn">邮箱无效</span> ';
       if(ct.email&&ct.email_check_status&&ct.email_check_status!=='pending')cst+=domailBadge(ct.email_check_status)+' ';
       if(!cst)cst='<span class="hint">正常</span>';
+      var roleSel='<select data-rolect="'+esc(ct.id)+'" title="'+esc(ct.role_evidence||'自动按职位推断，可人工修正')+'" style="max-width:104px">';
+      for(var rk in ROLE_BADGE){roleSel+='<option value="'+rk+'"'+((ct.procurement_role||'unknown')===rk?' selected':'')+'>'+ROLE_BADGE[rk][0]+'</option>';}
+      roleSel+='</select>';
       var ctop='';
       if(Number(ct.do_not_contact)||ct.unsubscribed_at){
         ctop+='<button class="btn btn-s btn-xs" data-act="unblockCt" data-id="'+esc(ct.id)+'">解禁</button> ';
@@ -5993,7 +6045,7 @@ function openDetail(id){
       }else if(ct.email){
         ctop+='<button class="btn btn-s btn-xs" data-act="markEmailValid" data-id="'+esc(ct.id)+'">标有效</button> ';
       }
-      h+='<tr><td>'+esc(ct.full_name)+'</td><td>'+esc(ct.job_title||'—')+'</td><td>'+esc(ct.email||'—')+'</td><td>'+esc(ct.whatsapp_or_phone||'—')+'</td><td>'+cst+'</td><td>'+(Number(ct.is_primary)?'★':'')+'</td><td>'+ctop+(Number(ct.is_primary)?'':'<button class="btn btn-s btn-xs" data-act="mkPrimary" data-id="'+esc(ct.id)+'">设主联</button> ')+'<button class="btn btn-d btn-xs" data-act="delContact" data-id="'+esc(ct.id)+'">删</button></td></tr>';
+      h+='<tr><td>'+esc(ct.full_name)+'</td><td>'+esc(ct.job_title||'—')+'</td><td>'+roleSel+'</td><td>'+esc(ct.email||'—')+'</td><td>'+esc(ct.whatsapp_or_phone||'—')+'</td><td>'+cst+'</td><td>'+(Number(ct.is_primary)?'★':'')+'</td><td>'+ctop+(Number(ct.is_primary)?'':'<button class="btn btn-s btn-xs" data-act="mkPrimary" data-id="'+esc(ct.id)+'">设主联</button> ')+'<button class="btn btn-d btn-xs" data-act="delContact" data-id="'+esc(ct.id)+'">删</button></td></tr>';
     }
     h+='</tbody></table>';
     h+='<div class="grid2 f"><div><label>新联系人姓名 *</label><input id="dcName"></div><div><label>职务</label><input id="dcTitle"></div><div><label>邮箱</label><input id="dcEmail"></div><div><label>电话/WhatsApp</label><input id="dcPhone"></div></div>';
@@ -6006,10 +6058,24 @@ function openDetail(id){
       h+='</select><button class="btn btn-d" data-act="mergeContact" data-id="'+esc(c.id)+'">合并</button></div>';
       h+='<p class="hint">来源联系人的姓名保留、缺失字段（职务/邮箱/电话/LinkedIn）补到目标联系人，来源被删除，动作记入时间线。</p>';
     }
-    h+='<h2 style="font-size:15px;margin:16px 0 8px">💰 商机（'+deals.length+'）</h2><table><thead><tr><th>名称</th><th>阶段</th><th>金额</th><th>预计成交</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+    h+='<h2 style="font-size:15px;margin:16px 0 8px">💰 商机（'+deals.length+'）</h2><table><thead><tr><th>名称</th><th>阶段</th><th>金额</th><th>预计成交</th><th>联系人</th><th>状态</th><th>操作</th></tr></thead><tbody>';
     for(var k=0;k<deals.length;k++){
       var d=deals[k];
-      h+='<tr><td>'+esc(d.title)+'</td><td>'+STAGE_L[d.stage]+(d.lost_reason?'<div class="od" style="font-size:11px">✗ '+esc(d.lost_reason)+'</div>':'')+'</td><td>'+fmtAmt(d.amount)+'</td><td>'+esc(d.expected_close_date||'—')+'</td><td>'+(d.archived_at?'已归档 '+esc(d.archived_at):(d.won_at&&d.stage==='won'?'赢单 '+esc(d.won_at):'—'))+'</td><td><button class="btn btn-d btn-xs" data-act="delDeal" data-id="'+esc(d.id)+'">删</button></td></tr>';
+      var dcs=d.contacts||[];
+      var dcHtml='';
+      for(var q2=0;q2<dcs.length;q2++){
+        var drb=ROLE_BADGE[dcs[q2].procurement_role]||ROLE_BADGE.unknown;
+        dcHtml+='<span class="badge '+drb[1]+'" title="'+esc(dcs[q2].job_title||'')+'">'+esc(dcs[q2].full_name)+' <a href="javascript:void(0)" data-act="unlinkDc" data-id="'+esc(d.id)+'" data-cid="'+esc(dcs[q2].contact_id)+'" style="color:inherit;text-decoration:none">✕</a></span> ';
+      }
+      dcHtml+='<select data-dcpick="'+esc(d.id)+'" style="max-width:110px">';
+      var anyUnused=false;
+      for(var q3=0;q3<contacts.length;q3++){
+        var unused=true;
+        for(var q4=0;q4<dcs.length;q4++){if(dcs[q4].contact_id===contacts[q3].id){unused=false;break;}}
+        if(unused){dcHtml+='<option value="'+esc(contacts[q3].id)+'">'+esc(contacts[q3].full_name)+'</option>';anyUnused=true;}
+      }
+      dcHtml+='</select> <button class="btn btn-s btn-xs" data-act="linkDc" data-id="'+esc(d.id)+'"'+(anyUnused?'':' disabled')+'>＋关联</button>';
+      h+='<tr><td>'+esc(d.title)+'</td><td>'+STAGE_L[d.stage]+(d.lost_reason?'<div class="od" style="font-size:11px">✗ '+esc(d.lost_reason)+'</div>':'')+'</td><td>'+fmtAmt(d.amount)+'</td><td>'+esc(d.expected_close_date||'—')+'</td><td>'+dcHtml+'</td><td>'+(d.archived_at?'已归档 '+esc(d.archived_at):(d.won_at&&d.stage==='won'?'赢单 '+esc(d.won_at):'—'))+'</td><td><button class="btn btn-d btn-xs" data-act="delDeal" data-id="'+esc(d.id)+'">删</button></td></tr>';
     }
     h+='</tbody></tbody></table>';
     h+='<h2 style="font-size:15px;margin:16px 0 8px">🔀 销售序列</h2>';
@@ -6021,6 +6087,18 @@ function openDetail(id){
       h+='<option value="'+esc(sq.id)+'">'+esc(sq.name)+'（'+esc(sq.brand_name)+'，'+(sq.steps||[]).length+' 步）</option>';
     }
     h+='</select><button class="btn btn-p" data-act="enrollSeq" data-id="'+esc(c.id)+'">➕ 加入序列</button></div>';
+    h+='<h2 style="font-size:15px;margin:16px 0 8px">📡 采购信号（'+csg.length+'）</h2>';
+    if(csg.length){
+      h+='<table><thead><tr><th>类型</th><th>信号内容</th><th>来源</th><th>检测时间</th></tr></thead><tbody>';
+      for(var w2=0;w2<csg.length;w2++){
+        var sg=csg[w2];
+        h+='<tr><td><span class="badge b-warn">'+(SIGNAL_TYPE_L[sg.signal_type]||esc(sg.signal_type))+'</span></td><td>'+esc(String(sg.signal_text||'').slice(0,120))+'</td><td>'+(sg.source_url?'<a href="'+esc(sg.source_url)+'" target="_blank" rel="noopener">链接</a>':'—')+'</td><td>'+esc(String(sg.detected_at||'').slice(0,16).replace('T',' '))+'</td></tr>';
+      }
+      h+='</tbody></table>';
+    }else{
+      h+='<p class="hint">暂无有效信号（90 天内）。</p>';
+    }
+    h+='<button class="btn btn-p" data-act="checkSignals" data-id="'+esc(c.id)+'" style="margin-top:8px">📡 立即检查信号</button>';
     h+='<h2 style="font-size:15px;margin:16px 0 8px">🕘 时间线 / 动态</h2><ul class="tl">';
     for(var m=0;m<acts.length;m++){
       var a=acts[m];
@@ -6264,6 +6342,29 @@ $('dBody').addEventListener('click',function(e){
       var mid=document.querySelector('#dBody [data-act="merge"]').getAttribute('data-id');
       openDetail(mid);loadDomains();
     }).catch(function(err){toast(err.message,true);});
+  }else if(act==='checkSignals'){
+    toast('正在搜索采购信号…');
+    api('/admin/api/crm/companies/'+encodeURIComponent(id)+'/check-signals',{method:'POST'}).then(function(b2){
+      toast('检查完成：新增信号 '+Number(b2.report.new_signals)+' 条'+(b2.report.tier_bumped?'，公司分级已上调 B':''));
+      var mid=document.querySelector('#dBody [data-act="merge"]').getAttribute('data-id');
+      openDetail(mid);loadSignals();
+    }).catch(function(err){toast(err.message,true);});
+  }else if(act==='linkDc'){
+    var pick=document.querySelector('#dBody select[data-dcpick="'+id+'"]');
+    var cid2=pick?pick.value:'';
+    if(!cid2){toast('没有可关联的联系人',true);return;}
+    api('/admin/api/crm/deals/'+encodeURIComponent(id)+'/contacts',{method:'POST',body:{contact_id:cid2}}).then(function(){
+      toast('已关联到商机');
+      var mid=document.querySelector('#dBody [data-act="merge"]').getAttribute('data-id');
+      openDetail(mid);
+    }).catch(function(err){toast(err.message,true);});
+  }else if(act==='unlinkDc'){
+    var cid3=b.getAttribute('data-cid');
+    api('/admin/api/crm/deals/'+encodeURIComponent(id)+'/contacts/'+encodeURIComponent(cid3),{method:'DELETE'}).then(function(){
+      toast('已解除关联');
+      var mid=document.querySelector('#dBody [data-act="merge"]').getAttribute('data-id');
+      openDetail(mid);
+    }).catch(function(err){toast(err.message,true);});
   }else if(act==='mergeContact'){
     var src=$('cmSrc').value,tgt=$('cmTgt').value;
     if(!src||!tgt){toast('请选择要合并的两个联系人',true);return;}
@@ -6279,6 +6380,13 @@ $('dBody').addEventListener('click',function(e){
     if(!src){toast('请先选择要并入的公司',true);return;}
     if(!confirm('将把所选公司的联系人、商机、动态全部并入本公司并删除所选公司（单事务、可溯源）。确定继续？'))return;
     api('/admin/api/crm/companies/merge',{method:'POST',body:{target_company_id:id,source_company_id:src}}).then(function(){toast('合并完成');loadAll();openDetail(id);}).catch(function(err){toast(err.message,true);});
+  }
+});
+/* 角色下拉（⑦ 图谱）：切换即 PATCH 联系人 procurement_role。 */
+$('dBody').addEventListener('change',function(e){
+  var s=e.target;
+  if(s.tagName==='SELECT'&&s.getAttribute('data-rolect')){
+    api('/admin/api/crm/contacts/'+encodeURIComponent(s.getAttribute('data-rolect')),{method:'PATCH',body:{procurement_role:s.value}}).then(function(){toast('角色已更新');}).catch(function(err){toast(err.message,true);});
   }
 });
 document.querySelectorAll('.modal-back').forEach(function(m){

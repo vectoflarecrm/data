@@ -40,6 +40,13 @@ import {
   recheckContactEmailInDb,
   type DomainCheckResult,
 } from "./email-verify";
+import { inferProcurementRole, PROCUREMENT_ROLES, type ProcurementRole } from "./contact-roles";
+import {
+  checkCompanySignals,
+  listSignalOverview,
+  updateSignalWatch,
+  type SignalCheckReport,
+} from "./signal-monitor";
 
 export interface CrmCompanyRow {
   id: string;
@@ -80,7 +87,25 @@ export interface CrmContactRow {
   unsubscribed_at: string | null;
   /** 手动或退订自动标记的禁止联系开关。 */
   do_not_contact: number;
+  /** 0037 邮箱/域名检测结论（pending/valid/free_email/disposable/no_mx/dead_domain）。 */
+  email_check_status: string;
+  /** ⑦ 多角色图谱：owner/procurement/finance/channel/operations/sales/other/unknown。 */
+  procurement_role: string;
+  /** 角色判定依据（命中关键词或人工说明）。 */
+  role_evidence: string | null;
+  role_updated_at: string | null;
   created_at: string;
+}
+
+/** ⑦ 图谱边：crm_deal_contacts 行（商机 ↔ 联系人）。 */
+export interface DealContactEdge {
+  deal_id: string;
+  contact_id: string;
+  role_in_deal: string | null;
+  added_at: string;
+  full_name: string;
+  job_title: string | null;
+  procurement_role: string;
 }
 
 export interface CrmDealRow {
@@ -297,11 +322,39 @@ async function getCompany(env: AdminEnv, id: string): Promise<Response> {
   )
     .bind(id)
     .all<CrmActivityRow>();
+  // ⑦ 图谱边：这家公司各商机关联的联系人（crm_deal_contacts）。
+  const dealContacts = await env.DB.prepare(
+    `SELECT dc.deal_id, dc.contact_id, dc.role_in_deal, dc.added_at,
+            ct.full_name, ct.job_title, ct.procurement_role
+     FROM crm_deal_contacts dc
+     JOIN crm_contacts ct ON ct.id = dc.contact_id
+     JOIN crm_deals d ON d.id = dc.deal_id
+     WHERE d.company_id = ?1
+     ORDER BY dc.added_at ASC`,
+  )
+    .bind(id)
+    .all<DealContactEdge>();
+  const edges = new Map<string, DealContactEdge[]>();
+  for (const edge of dealContacts.results) {
+    const list = edges.get(edge.deal_id) ?? [];
+    list.push(edge);
+    edges.set(edge.deal_id, list);
+  }
+  const dealsWithContacts = deals.results.map((d) => ({ ...d, contacts: edges.get(d.id) ?? [] }));
+  // ⑥ 持续意向监测：这家公司最近的有效信号（过期信号不再展示）。
+  const signals = await env.DB.prepare(
+    `SELECT * FROM crm_signal_checks
+     WHERE company_id = ?1 AND expires_at > datetime('now')
+     ORDER BY detected_at DESC LIMIT 20`,
+  )
+    .bind(id)
+    .all();
   return jsonResponse({
     company,
     contacts: contacts.results,
-    deals: deals.results,
+    deals: dealsWithContacts,
     activities: activities.results,
+    signals: signals.results,
   });
 }
 
@@ -661,19 +714,25 @@ async function createContact(
       .run();
   }
   const id = crypto.randomUUID();
+  // ⑦ 多角色联系人图谱：按职位关键词自动推断采购角色（更新.txt 第 7 项）。
+  const jobTitle = optString(body.job_title, "job_title", 100);
+  const roleInference = inferProcurementRole(jobTitle);
   await env.DB.prepare(
-    `INSERT INTO crm_contacts (id, company_id, full_name, job_title, email, whatsapp_or_phone, linkedin_url, is_primary)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+    `INSERT INTO crm_contacts (id, company_id, full_name, job_title, email, whatsapp_or_phone, linkedin_url, is_primary, procurement_role, role_evidence, role_updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
   )
     .bind(
       id,
       companyId,
       reqString(body.full_name, "full_name", 200),
-      optString(body.job_title, "job_title", 100),
+      jobTitle,
       optString(body.email, "email", 200),
       optString(body.whatsapp_or_phone, "whatsapp_or_phone", 100),
       optString(body.linkedin_url, "linkedin_url", 300),
       isPrimary ? 1 : 0,
+      roleInference.role,
+      roleInference.evidence,
+      new Date().toISOString(),
     )
     .run();
   await auditAdminAction(env, request, auth, "CREATE_CRM_CONTACT", "crm_contact", id, {
@@ -700,6 +759,28 @@ async function updateContact(request: Request, env: AdminEnv, id: string): Promi
   if ("job_title" in body) {
     sets.push(`job_title = ?${sets.length + 2}`);
     binds.push(optString(body.job_title, "job_title", 100));
+    // ⑦ 联系人图谱：职位变更 → 重新推断采购角色（显式 procurement_role
+    // 优先：同一次请求里带显式角色时以显式值为准，不重复推断）。
+    if (!("procurement_role" in body)) {
+      const inference = inferProcurementRole(optString(body.job_title, "job_title", 100));
+      sets.push(
+        `procurement_role = ?${sets.length + 2}`,
+        `role_evidence = ?${sets.length + 3}`,
+        "role_updated_at = CURRENT_TIMESTAMP",
+      );
+      binds.push(inference.role, inference.evidence);
+    }
+  }
+  if ("procurement_role" in body) {
+    // 显式角色：允许人工覆盖自动推断（oneOf 校验 + 依据可选）。
+    const role = oneOf(body.procurement_role, PROCUREMENT_ROLES, "procurement_role") as ProcurementRole;
+    sets.push(`procurement_role = ?${sets.length + 2}`);
+    binds.push(role);
+    if ("role_evidence" in body) {
+      sets.push(`role_evidence = ?${sets.length + 2}`);
+      binds.push(optString(body.role_evidence, "role_evidence", 500));
+    }
+    sets.push("role_updated_at = CURRENT_TIMESTAMP");
   }
   if ("email" in body) {
     sets.push(`email = ?${sets.length + 2}`);
@@ -966,6 +1047,122 @@ async function deleteDeal(
     title: existing.title,
   });
   return jsonResponse({ ok: true });
+}
+
+/* ── ⑦ 商机 ↔ 联系人图谱边（crm_deal_contacts） ─────────────────────────── */
+
+async function addDealContact(
+  request: Request,
+  env: AdminEnv,
+  auth: AdminAuthContext,
+  dealId: string,
+): Promise<Response> {
+  const deal = await env.DB.prepare("SELECT * FROM crm_deals WHERE id = ?1")
+    .bind(dealId)
+    .first<CrmDealRow>();
+  if (!deal) throw new HttpError(404, "商机不存在");
+  const body = await readJsonBody(request);
+  const contactId = reqString(body.contact_id, "contact_id", 64);
+  const contact = await env.DB.prepare("SELECT * FROM crm_contacts WHERE id = ?1")
+    .bind(contactId)
+    .first<CrmContactRow>();
+  if (!contact) throw new HttpError(404, "联系人不存在");
+  // 图谱约束：联系人必须属于商机所在公司（跨公司关联没有业务意义）。
+  if (contact.company_id !== deal.company_id) {
+    throw new HttpError(400, "联系人必须属于商机所在公司");
+  }
+  const roleInDeal = optString(body.role_in_deal, "role_in_deal", 100);
+  const dup = await env.DB.prepare(
+    "SELECT id FROM crm_deal_contacts WHERE deal_id = ?1 AND contact_id = ?2",
+  ).bind(dealId, contactId).first<{ id: string }>();
+  if (dup) throw new HttpError(409, "该联系人已关联到此商机");
+  const edgeId = crypto.randomUUID();
+  await env.DB.prepare(
+    "INSERT INTO crm_deal_contacts (id, deal_id, contact_id, role_in_deal, added_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+  )
+    .bind(edgeId, dealId, contactId, roleInDeal, new Date().toISOString())
+    .run();
+  await auditAdminAction(env, request, auth, "LINK_DEAL_CONTACT", "crm_deal", dealId, {
+    contact_id: contactId,
+    full_name: contact.full_name,
+  });
+  const edge = await env.DB.prepare(
+    `SELECT dc.*, ct.full_name, ct.job_title, ct.procurement_role
+     FROM crm_deal_contacts dc JOIN crm_contacts ct ON ct.id = dc.contact_id
+     WHERE dc.id = ?1`,
+  ).bind(edgeId).first<DealContactEdge>();
+  return jsonResponse({ edge }, 201);
+}
+
+async function removeDealContact(
+  request: Request,
+  env: AdminEnv,
+  auth: AdminAuthContext,
+  dealId: string,
+  contactId: string,
+): Promise<Response> {
+  const deal = await env.DB.prepare("SELECT * FROM crm_deals WHERE id = ?1")
+    .bind(dealId)
+    .first<CrmDealRow>();
+  if (!deal) throw new HttpError(404, "商机不存在");
+  const existing = await env.DB.prepare(
+    "SELECT id FROM crm_deal_contacts WHERE deal_id = ?1 AND contact_id = ?2",
+  ).bind(dealId, contactId).first<{ id: string }>();
+  if (!existing) throw new HttpError(404, "该联系人未关联到此商机");
+  await env.DB.prepare("DELETE FROM crm_deal_contacts WHERE deal_id = ?1 AND contact_id = ?2")
+    .bind(dealId, contactId)
+    .run();
+  await auditAdminAction(env, request, auth, "UNLINK_DEAL_CONTACT", "crm_deal", dealId, {
+    contact_id: contactId,
+  });
+  return jsonResponse({ ok: true });
+}
+
+/* ── ⑥ 持续意向监测 HTTP handlers ───────────────────────────────────────── */
+
+async function forceSignalCheck(
+  request: Request,
+  env: AdminEnv,
+  auth: AdminAuthContext,
+  companyId: string,
+): Promise<Response> {
+  await requireCompany(env, companyId);
+  let report: SignalCheckReport;
+  try {
+    report = await checkCompanySignals(env, companyId, { force: true });
+  } catch (e) {
+    throw new HttpError(404, e instanceof Error ? e.message : String(e));
+  }
+  await auditAdminAction(env, request, auth, "CHECK_CRM_SIGNALS", "crm_company", companyId, {
+    new_signals: report.new_signals,
+    tier_bumped: report.tier_bumped,
+  });
+  return jsonResponse({ report });
+}
+
+async function setSignalWatch(
+  request: Request,
+  env: AdminEnv,
+  auth: AdminAuthContext,
+  companyId: string,
+): Promise<Response> {
+  const body = await readJsonBody(request);
+  const watchEnabled = optBool(body.enabled, "enabled");
+  const watchInterval = body.interval_days === undefined ? undefined : Number(body.interval_days);
+  let response: Response;
+  try {
+    response = await updateSignalWatch(env, companyId, {
+      enabled: watchEnabled ?? undefined,
+      interval_days: watchInterval,
+    });
+  } catch (e) {
+    throw new HttpError(404, e instanceof Error ? e.message : String(e));
+  }
+  await auditAdminAction(env, request, auth, "UPDATE_SIGNAL_WATCH", "crm_company", companyId, {
+    enabled: watchEnabled ?? null,
+    interval_days: watchInterval ?? null,
+  });
+  return response;
 }
 
 /* ── Activities (timeline + tasks) ──────────────────────────────────────── */
@@ -1652,6 +1849,9 @@ export async function handleCrmApi(
       if (id === "promote" && method === "POST") return await promoteLead(request, env, auth);
       if (id === "merge" && method === "POST") return await mergeCompanies(request, env, auth);
       if (id && sub === "recheck-domain" && method === "POST") return await recheckCompanyDomain(request, env, auth, id);
+      // ⑥ 持续意向监测：companies/:id/check-signals 立即检查；companies/:id/watch 改监测配置。
+      if (id && sub === "check-signals" && method === "POST") return await forceSignalCheck(request, env, auth, id);
+      if (id && sub === "watch" && method === "PATCH") return await setSignalWatch(request, env, auth, id);
       if (id && method === "GET") return await getCompany(env, id);
       if (id && method === "PATCH") return await updateCompany(request, env, auth, id);
       if (id && method === "DELETE") return await deleteCompany(request, env, auth, id);
@@ -1665,10 +1865,17 @@ export async function handleCrmApi(
     } else if (resource === "domains") {
       if (!id && method === "GET") return await listDomainChecks(env);
     } else if (resource === "deals") {
+      const sub = parts[5] ?? "";
       if (!id && method === "GET") return await listDeals(env, url);
       if (!id && method === "POST") return await createDeal(request, env, auth);
+      // ⑦ 图谱边：POST deals/:id/contacts 关联联系人；DELETE deals/:id/contacts/:cid 解除。
+      if (id && sub === "contacts" && method === "POST") return await addDealContact(request, env, auth, id);
+      if (id && sub === "contacts" && method === "DELETE") return await removeDealContact(request, env, auth, id, parts[6] ?? "");
       if (id && method === "PATCH") return await updateDeal(request, env, id);
       if (id && method === "DELETE") return await deleteDeal(request, env, auth, id);
+    } else if (resource === "signals") {
+      // ⑥ 持续意向监测：总览（监测列表 + 最近信号）。
+      if (!id && method === "GET") return await listSignalOverview(env);
     } else if (resource === "activities") {
       if (!id && method === "GET") return await listOpenTasks(env, url);
       if (!id && method === "POST") return await createActivity(request, env, auth);

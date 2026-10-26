@@ -90,6 +90,8 @@ async function makeDb() {
       email_status TEXT DEFAULT 'unknown', email_verified_at TEXT,
       email_check_status TEXT NOT NULL DEFAULT 'pending',
       unsubscribed_at TEXT, do_not_contact INTEGER DEFAULT 0,
+      procurement_role TEXT NOT NULL DEFAULT 'unknown',
+      role_evidence TEXT, role_updated_at TEXT,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE crm_deals (
@@ -104,6 +106,23 @@ async function makeDb() {
       deal_id TEXT, type TEXT DEFAULT 'manual_note', summary TEXT NOT NULL,
       due_date TEXT, is_completed INTEGER DEFAULT 0,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE crm_deal_contacts (
+      id TEXT PRIMARY KEY,
+      deal_id TEXT NOT NULL REFERENCES crm_deals(id) ON DELETE CASCADE,
+      contact_id TEXT NOT NULL REFERENCES crm_contacts(id) ON DELETE CASCADE,
+      role_in_deal TEXT, added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(deal_id, contact_id)
+    );
+    CREATE TABLE crm_signal_watch (
+      company_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1,
+      interval_days INTEGER NOT NULL DEFAULT 14, last_checked_at TEXT, last_error TEXT
+    );
+    CREATE TABLE crm_signal_checks (
+      id TEXT PRIMARY KEY, company_id TEXT NOT NULL, signal_type TEXT NOT NULL,
+      signal_text TEXT NOT NULL, source_url TEXT, detected_at TEXT NOT NULL,
+      expires_at TEXT, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(company_id, signal_type, source_url)
     );
   `);
   const env = { DB: new FakeD1(db) } as unknown as AdminEnv;

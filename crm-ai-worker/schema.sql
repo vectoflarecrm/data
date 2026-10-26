@@ -858,12 +858,17 @@ CREATE TABLE IF NOT EXISTS crm_contacts (
   unsubscribed_at TEXT,
   do_not_contact INTEGER DEFAULT 0,
   email_check_status TEXT NOT NULL DEFAULT 'pending',
+  -- 0037 ⑦ 多角色采购联系人图谱：按职位推断的采购角色 + 依据与更新时间。
+  procurement_role TEXT NOT NULL DEFAULT 'unknown',
+  role_evidence TEXT,
+  role_updated_at TEXT,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_contacts_company_id ON crm_contacts(company_id);
 CREATE INDEX IF NOT EXISTS idx_contacts_email_status ON crm_contacts(email_status);
 CREATE INDEX IF NOT EXISTS idx_contacts_email_check ON crm_contacts(email_check_status);
+CREATE INDEX IF NOT EXISTS idx_contacts_procurement_role ON crm_contacts(procurement_role);
 
 -- Deals: one row per opportunity, kanban stage machine
 -- inquiry → sample_quoted → pi_sent → deposit_paid → won | lost.
@@ -984,3 +989,45 @@ CREATE TABLE IF NOT EXISTS domain_dns_checks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_domain_dns_verdict ON domain_dns_checks(email_verdict);
+
+-- 0037 ⑦ 多角色采购联系人图谱：同一公司多位联系人关联到同一商机
+-- （采购/决策/使用者等角色边）。见 migrations/0037。
+CREATE TABLE IF NOT EXISTS crm_deal_contacts (
+  id TEXT PRIMARY KEY,
+  deal_id TEXT NOT NULL REFERENCES crm_deals(id) ON DELETE CASCADE,
+  contact_id TEXT NOT NULL REFERENCES crm_contacts(id) ON DELETE CASCADE,
+  role_in_deal TEXT,
+  added_at TEXT NOT NULL,
+  UNIQUE(deal_id, contact_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_deal_contacts_deal ON crm_deal_contacts(deal_id);
+CREATE INDEX IF NOT EXISTS idx_deal_contacts_contact ON crm_deal_contacts(contact_id);
+
+-- 0037 ⑥ 持续采购意向监测：重要客户（A/VIP 或有未结商机）自动入监测表，
+-- cron 空闲 tick 周期性搜索新品/扩张/经销商招募/采购公告/渠道变化信号；
+-- 新信号 → 时间线 + 待办 + C 级公司自动上调 B 级。见 migrations/0037。
+CREATE TABLE IF NOT EXISTS crm_signal_watch (
+  company_id TEXT PRIMARY KEY REFERENCES crm_companies(id) ON DELETE CASCADE,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  interval_days INTEGER NOT NULL DEFAULT 14,
+  last_checked_at TEXT,
+  last_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_watch_due
+  ON crm_signal_watch(enabled, last_checked_at);
+
+CREATE TABLE IF NOT EXISTS crm_signal_checks (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
+  signal_type TEXT NOT NULL,
+  signal_text TEXT NOT NULL,
+  source_url TEXT,
+  detected_at TEXT NOT NULL,
+  expires_at TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(company_id, signal_type, source_url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_checks_company ON crm_signal_checks(company_id, detected_at);

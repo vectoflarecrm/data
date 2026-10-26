@@ -30,6 +30,8 @@ import { noteResearchEnriched, listOverdueTasks } from "./crm-hooks";
 import { syncInboundGmail } from "./crm-gmail-sync";
 import { runSequenceTick } from "./sequences";
 import { runEmailScreeningTick } from "./email-verify";
+import { runSignalMonitorTick } from "./signal-monitor";
+import { backfillUnknownRoles } from "./contact-roles";
   import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, appendResearchSignals, appendResearchPersonas, appendResearchProfile, linkResearchFactsToContacts, hasCurrentResearchFacts, capResearchSourcesToBudget, readSavedResearchText, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, type ResearchPersonaEntry, type ResearchSolutionEntry, FACTS_PER_RUN_CAP } from "./research-run";
 
 export interface CustomerRow {
@@ -2819,6 +2821,19 @@ export default {
         await runEmailScreeningTick(env as unknown as import("./admin").AdminEnv);
       } catch (e) {
         safeLog("warn", "[email-verify] tick failed (fail-open)", e instanceof Error ? e.message : String(e));
+      }
+      // 持续采购意向监测（更新.txt ⑥，0037）：空闲 tick 顺带检查一家到期
+      // 的重要客户（DDG 搜索五类信号，冷却期自动跳过），并回填未知角色。
+      // fail-open：表缺失/搜索失败不影响本 tick 的其他任务。
+      try {
+        await runSignalMonitorTick(env as unknown as import("./admin").AdminEnv);
+      } catch (e) {
+        safeLog("warn", "[signal-monitor] tick failed (fail-open)", e instanceof Error ? e.message : String(e));
+      }
+      try {
+        await backfillUnknownRoles(env as unknown as import("./admin").AdminEnv);
+      } catch (e) {
+        safeLog("warn", "[contact-roles] backfill failed (fail-open)", e instanceof Error ? e.message : String(e));
       }
       return;
     }
