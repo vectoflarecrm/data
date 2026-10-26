@@ -19,6 +19,7 @@ import { chooseGmailAccount, getAccessToken, type ChosenAccount, type GmailEnv }
 import {
   classifyInboundEmail,
   extractBouncedAddress,
+  isQuoteRequest,
   markContactUnsubscribed,
   markEmailInvalid,
 } from "./contactability";
@@ -269,6 +270,7 @@ async function recordMessage(env: GmailEnv, mailbox: string, messageId: string, 
           ),
           seenInsert(env, mailbox, messageId, receivedIso),
         ]);
+        await runReplyAutomation(env, contact.company_id, classification.kind, fromEmail, subject, snippet, dateLabel);
         return true;
       }
 
@@ -288,6 +290,7 @@ async function recordMessage(env: GmailEnv, mailbox: string, messageId: string, 
             ).bind(crypto.randomUUID(), company.id, summary),
             seenInsert(env, mailbox, messageId, receivedIso),
           ]);
+          await runReplyAutomation(env, company.id, classification.kind, fromEmail, subject, snippet, dateLabel);
           return true;
         }
       }
@@ -314,6 +317,48 @@ async function recordSeenOnly(env: GmailEnv, mailbox: string, messageId: string,
     safeLog("warn", "[crm-gmail-sync] 去重行写入失败（fail-open）", error);
   }
   return false;
+}
+
+/** P1-6 行动自动化：兴趣/报价回复 → 自动创建跟进任务（同一来信人已有
+ * 未完成跟进任务时不重复建）+ lead_status 只升不降（new/enriched →
+ * contacted）。全部 fail-open，绝不影响来信时间线本身。 */
+async function runReplyAutomation(
+  env: GmailEnv,
+  companyId: string,
+  kind: string,
+  fromEmail: string,
+  subject: string,
+  snippet: string,
+  dateLabel: string,
+): Promise<void> {
+  if (kind !== "interest") return;
+  try {
+    const dup = await env.DB.prepare(
+      `SELECT id FROM crm_activities
+       WHERE company_id = ?1 AND type = 'task' AND is_completed = 0 AND summary LIKE '%' || ?2 || '%'
+       LIMIT 1`,
+    )
+      .bind(companyId, fromEmail)
+      .first<{ id: string }>();
+    if (!dup) {
+      const due = new Date(Date.now() + 2 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+      const label = isQuoteRequest(subject, snippet) ? "报价跟进" : "意向回复跟进";
+      await env.DB.prepare(
+        `INSERT INTO crm_activities (id, company_id, type, summary, due_date)
+         VALUES (?1, ?2, 'task', ?3, ?4)`,
+      )
+        .bind(crypto.randomUUID(), companyId, `${label}：${fromEmail}（${dateLabel}来信）— ${subject}`, due)
+        .run();
+    }
+    await env.DB.prepare(
+      `UPDATE crm_companies SET lead_status = 'contacted', updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?1 AND lead_status IN ('new', 'enriched')`,
+    )
+      .bind(companyId)
+      .run();
+  } catch (error) {
+    safeLog("warn", "[crm-gmail-sync] 意向回复行动自动化失败（fail-open）", error);
+  }
 }
 
 function seenInsert(env: GmailEnv, mailbox: string, messageId: string, receivedIso: string): D1PreparedStatement {

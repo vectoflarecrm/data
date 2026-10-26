@@ -424,4 +424,71 @@ describe("syncInboundGmail", () => {
     const activity = db.prepare("SELECT * FROM crm_activities").get() as any;
     expect(activity.summary).toContain("自动回复");
   });
+
+  it("creates a quote follow-up task and bumps lead_status for interest replies (deduped)", async () => {
+    const db = await makeDb();
+    seedAccount(db, "sales9@brand.com", "oauth_refresh");
+    seedSettings(db, "sales9@brand.com", "sales9@brand.com");
+    db.prepare("INSERT INTO crm_companies (id, name, domain, lead_status) VALUES ('c1', 'Acme', 'acme.com', 'new')").run();
+    db.prepare("INSERT INTO crm_contacts (id, company_id, full_name, email) VALUES ('ct1', 'c1', 'John', 'buyer@acme.com')").run();
+
+    stubFetch([
+      { match: (u) => u === TOKEN_URL, body: { access_token: "tok-9", expires_in: 3600 } },
+      { match: (u) => u.startsWith(`${API}/`) && u.includes("/messages?"), body: { messages: [{ id: "m8", threadId: "t8" }] } },
+      {
+        match: (u) => u.includes("/messages/m8?"),
+        body: gmailMessage("m8", "John <buyer@acme.com>", "Quotation request", "1770000006000", {
+          snippet: "Please send price list and catalog",
+        }),
+      },
+    ]);
+
+    await syncInboundGmail(makeEnv(db));
+    const tasks = db.prepare("SELECT * FROM crm_activities WHERE type = 'task'").all() as any[];
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].summary).toContain("报价跟进");
+    expect(tasks[0].summary).toContain("buyer@acme.com");
+    expect(tasks[0].due_date).toBeTruthy();
+    const co = db.prepare("SELECT lead_status FROM crm_companies WHERE id = 'c1'").get() as any;
+    expect(co.lead_status).toBe("contacted");
+
+    // 同一来信人的第二封兴趣回复：时间线照写，但不重复建任务。
+    stubFetch([
+      { match: (u) => u === TOKEN_URL, body: { access_token: "tok-10", expires_in: 3600 } },
+      { match: (u) => u.startsWith(`${API}/`) && u.includes("/messages?"), body: { messages: [{ id: "m9", threadId: "t9" }] } },
+      {
+        match: (u) => u.includes("/messages/m9?"),
+        body: gmailMessage("m9", "John <buyer@acme.com>", "Re: Quotation request", "1770000007000", {
+          snippet: "Also interested in samples",
+        }),
+      },
+    ]);
+    await syncInboundGmail(makeEnv(db));
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_activities WHERE type = 'task'").get() as any).n).toBe(1);
+  });
+
+  it("does not create tasks or bump lead_status for plain replies", async () => {
+    const db = await makeDb();
+    seedAccount(db, "sales10@brand.com", "oauth_refresh");
+    seedSettings(db, "sales10@brand.com", "sales10@brand.com");
+    db.prepare("INSERT INTO crm_companies (id, name, domain, lead_status) VALUES ('c1', 'Acme', 'acme.com', 'new')").run();
+    db.prepare("INSERT INTO crm_contacts (id, company_id, full_name, email) VALUES ('ct1', 'c1', 'John', 'buyer@acme.com')").run();
+
+    stubFetch([
+      { match: (u) => u === TOKEN_URL, body: { access_token: "tok-11", expires_in: 3600 } },
+      { match: (u) => u.startsWith(`${API}/`) && u.includes("/messages?"), body: { messages: [{ id: "m10", threadId: "t10" }] } },
+      {
+        match: (u) => u.includes("/messages/m10?"),
+        body: gmailMessage("m10", "John <buyer@acme.com>", "Thanks for reaching out", "1770000008000", {
+          snippet: "Not for now, maybe later",
+        }),
+      },
+    ]);
+
+    const report = await syncInboundGmail(makeEnv(db));
+    expect(report.matched).toBe(1);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_activities WHERE type = 'task'").get() as any).n).toBe(0);
+    const co = db.prepare("SELECT lead_status FROM crm_companies WHERE id = 'c1'").get() as any;
+    expect(co.lead_status).toBe("new");
+  });
 });

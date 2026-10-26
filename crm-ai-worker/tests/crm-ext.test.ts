@@ -206,6 +206,46 @@ describe("① 赢单/输单闭环", () => {
     expect(s.overdue_tasks).toBe(1);
     expect(r.body.won_monthly).toEqual([{ month: dateFromToday(0).slice(0, 7), total: 5000 }]);
   });
+
+  it("funnel metrics: null without gmail_send_log, full chain once it exists", async () => {
+    const { db, env } = await makeDb();
+
+    // fail-open：gmail_send_log 缺失时漏斗返回 null，其余统计照常。
+    let r = await call(env, "GET", "/admin/api/crm/stats");
+    expect(r.status).toBe(200);
+    expect(r.body.stats).toBeTruthy();
+    expect(r.body.funnel).toBeNull();
+
+    db.exec(`
+      CREATE TABLE gmail_send_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        outreach_email_id INTEGER,
+        recipient TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'sent',
+        detail TEXT,
+        sender_client_email TEXT,
+        request_id TEXT
+      );
+    `);
+    const c1 = await seedCompany(env, "c_1");
+    await seedDeal(env, c1.id, "赢单", { stage: "won", amount: 100 });
+    db.prepare("INSERT INTO crm_contacts (id, company_id, full_name, email) VALUES ('ct1', ?, 'J', 'a@acme.com')").run(c1.id);
+    db.prepare("INSERT INTO gmail_send_log (recipient, status) VALUES ('a@acme.com', 'sent')").run();
+    db.prepare("INSERT INTO gmail_send_log (recipient, status) VALUES ('a@acme.com', 'failed')").run();
+    db.prepare(
+      "INSERT INTO crm_activities (id, company_id, type, summary) VALUES ('act1', ?, 'email_received', '收到来信: x')",
+    ).run(c1.id);
+
+    r = await call(env, "GET", "/admin/api/crm/stats");
+    const f = r.body.funnel;
+    expect(f.companies).toBe(1);
+    expect(f.contacts).toBe(1);
+    expect(f.emails_sent).toBe(1); // failed 发信不计触达
+    expect(f.replies).toBe(1);
+    expect(f.deals).toBe(1);
+    expect(f.won).toBe(1);
+    expect(f.reply_rate).toBe(100);
+  });
 });
 
 /* ── ② 看板排序 + 归档 ─────────────────────────────────────────────────── */

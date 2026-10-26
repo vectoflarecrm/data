@@ -5535,6 +5535,10 @@ th{background:#f8fafc;font-weight:600;white-space:nowrap}
 .b-dnc{background:#fee2e2;color:#991b1b}
 .b-unsub{background:#ffedd5;color:#9a3412}
 .b-warn{background:#fef9c3;color:#854d0e}
+.funnel-row{display:flex;align-items:center;gap:10px;margin:7px 0;font-size:13px}
+.funnel-l{width:120px;color:#475569;font-weight:600;flex:none}
+.funnel-bar{height:14px;background:#0f766e;border-radius:0 7px 7px 0;min-width:2px}
+.funnel-v{white-space:nowrap}
 tr.grp td{background:#f0fdfa;font-weight:700;color:#0f766e;font-size:12px;padding:6px 8px}
 tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;padding:6px 8px}
 .chart{display:flex;align-items:flex-end;gap:10px;height:130px;padding:24px 6px 0}
@@ -5560,6 +5564,12 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 <div class="sec-head"><h2>📈 成交走势（近 6 个月）</h2></div>
 <p class="hint">每月赢单商机的金额合计（按赢单日期 won_at）。加权预测 = 进行中商机金额按阶段折算：询盘 10% · 样品报价 30% · PI 已发 50% · 定金到账 80%。</p>
 <div class="chart" id="wonChart"></div>
+</div>
+
+<div class="panel">
+<div class="sec-head"><h2>🔻 客户开发漏斗</h2></div>
+<p class="hint">口径：触达 = gmail_send_log 中 status='sent' 的发信次数（发送尝试，非送达数）；回复 = 时间线 email_received 条数；商机/赢单 = 未归档商机。回复率 = 回复 / 触达。</p>
+<div class="chart" id="funnelChart"></div>
 </div>
 
 <div class="panel">
@@ -5632,7 +5642,7 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 <script>
 (function(){
 'use strict';
-var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[]};
+ var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[],funnel:null};
 var STAGES=['inquiry','sample_quoted','pi_sent','deposit_paid','won','lost'];
 var STAGE_L={inquiry:'询盘',sample_quoted:'样品报价',pi_sent:'PI 已发',deposit_paid:'定金到账',won:'赢单',lost:'输单'};
 var TIER_L={A:'A级',B:'B级',C:'C级',VIP:'VIP',unqualified:'未分级'};
@@ -5755,7 +5765,24 @@ function renderStats(){
   $('stOverdue').style.color=Number(s.overdue_tasks)>0?'#dc2626':'';
 }
 function loadStats(){
-  return api('/admin/api/crm/stats').then(function(b){STATE.stats=b.stats||null;STATE.won=b.won_monthly||[];renderStats();renderChart();});
+  return api('/admin/api/crm/stats').then(function(b){STATE.stats=b.stats||null;STATE.won=b.won_monthly||[];STATE.funnel=b.funnel||null;renderStats();renderChart();renderFunnel();});
+}
+function renderFunnel(){
+  var el=$('funnelChart');if(!el)return;
+  var f=STATE.funnel;
+  if(!f){el.innerHTML='<p class="hint">暂无漏斗数据（发信日志不可用或尚未发信）。</p>';return;}
+  var stages=[['客户公司',f.companies],['联系人',f.contacts],['触达（发信）',f.emails_sent],['回复',f.replies],['商机',f.deals],['赢单',f.won]];
+  var max=1;
+  for(var i=0;i<stages.length;i++){if(Number(stages[i][1])>max)max=Number(stages[i][1]);}
+  var h='';
+  for(var j=0;j<stages.length;j++){
+    var pct=Math.round(Number(stages[j][1])/max*100);
+    var conv='';
+    if(j>0&&Number(stages[j-1][1])>0){conv=' <span class="hint">转化 '+Math.round(Number(stages[j][1])/Number(stages[j-1][1])*100)+'%</span>';}
+    h+='<div class="funnel-row"><span class="funnel-l">'+stages[j][0]+'</span><span class="funnel-bar" style="width:'+Math.max(pct,2)+'%"></span><span class="funnel-v">'+Number(stages[j][1]).toLocaleString()+conv+'</span></div>';
+  }
+  h+='<p class="hint" style="margin:10px 0 0">回复率（回复/触达）：<b>'+(f.reply_rate!==undefined?f.reply_rate:'–')+'%</b></p>';
+  el.innerHTML=h;
 }
 function renderChart(){
   var el=$('wonChart');if(!el)return;

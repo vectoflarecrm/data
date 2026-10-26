@@ -32,6 +32,12 @@ const AUTO_REPLY_RE = /(自动回复|不在办公室|out\s*of\s*office|vacation\
 const AUTO_SUBJECT_RE = /^(auto(?:matic)?[-:\s]?reply|自动回复)/i;
 const UNSUBSCRIBE_RE = /(退订|取消订阅|不要再[发寄]|请勿再次?发送|不再接收|移除我|remove\s+me|stop\s+(?:emailing|messaging|sending)|don'?t\s+(?:email|contact|send)|unsubscribe|不希望再收到)/i;
 const INTEREST_RE = /(报价|询价|价格表?|产品目录|目录|样品|订单|合作|有意|感兴趣|quotation|quote|price\s*list|interested|catalog(ue)?|sample|proforma|\bPI\b|合作意向|采购)/i;
+const QUOTE_RE = /(报价|询价|价格表?|quotation|quote|price\s*list|proforma|\bPI\b)/i;
+
+/** P1-6 细分：兴趣回复里是否明确要求报价/价格/PI —— 任务文案用「报价跟进」。 */
+export function isQuoteRequest(subject: string, snippet: string): boolean {
+  return QUOTE_RE.test(`${subject}\n${snippet}`);
+}
 
 /** 按邮件证据分类。头部证据（Auto-Submitted/Precedence）最可靠，先于
  * 正文关键词判定；正文里显式退订词优先于弱关键词的自动回复猜测。 */

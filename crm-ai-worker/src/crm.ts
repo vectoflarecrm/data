@@ -1072,7 +1072,51 @@ async function crmStats(env: AdminEnv): Promise<Response> {
      WHERE stage = 'won' AND won_at IS NOT NULL AND won_at >= date('now', '-5 months', 'start of month')
      GROUP BY month ORDER BY month`,
   ).all<{ month: string; total: number }>();
-  return jsonResponse({ stats: stats ?? null, won_monthly: won.results });
+  return jsonResponse({ stats: stats ?? null, won_monthly: won.results, funnel: await crmFunnel(env) });
+}
+
+/* P1-8 客户开发漏斗：公司 → 联系人 → 触达 → 回复 → 商机 → 赢单。
+ * 口径说明（避免「发送 ≠ 送达」的常见混淆）：触达 = gmail_send_log 里
+ * status='sent' 的发信次数（attempt 数，非送达数）；回复 = 时间线
+ * email_received 活动数；商机/赢单 = 未归档 crm_deals。全部 fail-open：
+ * gmail_send_log 缺失时返回 null，其余指标照常。 */
+export interface CrmFunnelRow {
+  companies: number;
+  contacts: number;
+  emails_sent: number;
+  replies: number;
+  deals: number;
+  won: number;
+  reply_rate: number;
+}
+
+async function crmFunnel(env: AdminEnv): Promise<CrmFunnelRow | null> {
+  try {
+    const emailsSent = (await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM gmail_send_log WHERE status = 'sent'",
+    ).first<{ n: number }>())?.n ?? 0;
+    const funnel = await env.DB.prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM crm_companies) AS companies,
+        (SELECT COUNT(*) FROM crm_contacts) AS contacts,
+        (SELECT COUNT(*) FROM crm_activities WHERE type = 'email_received') AS replies,
+        (SELECT COUNT(*) FROM crm_deals WHERE archived_at IS NULL AND stage NOT IN ('lost')) AS deals,
+        (SELECT COUNT(*) FROM crm_deals WHERE archived_at IS NULL AND stage = 'won') AS won`,
+    ).first<{ companies: number; contacts: number; replies: number; deals: number; won: number }>();
+    if (!funnel) return null;
+    const replyRate = emailsSent > 0 ? Math.round((funnel.replies / emailsSent) * 1000) / 10 : 0;
+    return {
+      companies: funnel.companies,
+      contacts: funnel.contacts,
+      emails_sent: emailsSent,
+      replies: funnel.replies,
+      deals: funnel.deals,
+      won: funnel.won,
+      reply_rate: replyRate,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /* ── CSV import（公司/联系人/商机，中英表头，自动去重） ─────────────────── */
