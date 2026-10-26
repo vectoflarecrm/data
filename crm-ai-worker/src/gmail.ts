@@ -46,6 +46,7 @@ const EMAIL_ADDRESS_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
 
 import { decryptSecret } from "./credential-crypto";
 import { reserveQuota, releaseReservation, activeReservations } from "./gmail-quota";
+import { isContactBlocked } from "./contactability";
 
 /* ── Base64URL helpers ── */
 
@@ -617,6 +618,15 @@ export async function sendOutreachEmail(
 ): Promise<SendResult> {
   if (!email.email_to) return { ok: false, error: "收件人为空" };
   if (!email.subject || !email.body) return { ok: false, error: "主题或正文为空" };
+
+  // 触达质量闭环（P0-2）：发送前统一策略检查 —— 退订 / 禁止联系 /
+  // invalid 邮箱一律拦截。放在凭据解析与配额预留之前：被拦截的发送
+  // 不消耗任何 Gmail 配额与上游 token。表缺失时 fail-open 放行。
+  const guard = await isContactBlocked(env, email.email_to);
+  if (guard.blocked) {
+    await logSend(env, email.id, email.email_to, "failed", `发送前拦截：${guard.reason}`, "", options?.requestId ?? null);
+    return { ok: false, error: `发送前拦截：${guard.reason}` };
+  }
 
   // Resolve the sending service account: brand binding → env secret → healthiest pool account.
   let account: ChosenAccount;

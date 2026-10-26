@@ -72,6 +72,7 @@ async function makeDb() {
       id TEXT PRIMARY KEY, name TEXT NOT NULL, domain TEXT UNIQUE, industry TEXT,
       country TEXT, tier TEXT DEFAULT 'unqualified', lead_status TEXT DEFAULT 'new',
       merged_from_ids TEXT, chinese_remarks TEXT, customer_since TEXT,
+      do_not_contact INTEGER DEFAULT 0,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -79,6 +80,8 @@ async function makeDb() {
       id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
       full_name TEXT NOT NULL, job_title TEXT, email TEXT, whatsapp_or_phone TEXT,
       linkedin_url TEXT, is_primary INTEGER DEFAULT 0,
+      email_status TEXT DEFAULT 'unknown', email_verified_at TEXT,
+      unsubscribed_at TEXT, do_not_contact INTEGER DEFAULT 0,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE crm_activities (
@@ -122,15 +125,23 @@ function seedSettings(db: any, sender: string, gmailAccount: string | null): voi
     .run(sender, gmailAccount);
 }
 
-function gmailMessage(id: string, from: string, subject: string, internalDate: string) {
+function gmailMessage(
+  id: string,
+  from: string,
+  subject: string,
+  internalDate: string,
+  extra?: { snippet?: string; headers?: Array<{ name: string; value: string }> },
+) {
   return {
     id,
     threadId: `t-${id}`,
     internalDate,
+    snippet: extra?.snippet,
     payload: {
       headers: [
         { name: "From", value: from },
         { name: "Subject", value: subject },
+        ...(extra?.headers ?? []),
       ],
     },
   };
@@ -314,5 +325,103 @@ describe("syncInboundGmail", () => {
     const report = await syncInboundGmail(makeEnv(db));
     expect(report).toEqual({ mailboxes: 0, processed: 0, matched: 0, errors: 0 });
     expect(fn.mock.calls).toHaveLength(0);
+  });
+
+  it("classifies a bounce: marks the original recipient invalid and logs to their company", async () => {
+    const db = await makeDb();
+    seedAccount(db, "sales6@brand.com", "oauth_refresh");
+    seedSettings(db, "sales6@brand.com", "sales6@brand.com");
+    db.prepare("INSERT INTO crm_companies (id, name, domain) VALUES ('c1', 'Acme', 'acme.com')").run();
+    db.prepare("INSERT INTO crm_contacts (id, company_id, full_name, email) VALUES ('ct1', 'c1', 'John', 'buyer@acme.com')").run();
+
+    stubFetch([
+      { match: (u) => u === TOKEN_URL, body: { access_token: "tok-6", expires_in: 3600 } },
+      { match: (u) => u.startsWith(`${API}/`) && u.includes("/messages?"), body: { messages: [{ id: "m4", threadId: "t4" }] } },
+      {
+        match: (u) => u.includes("/messages/m4?"),
+        body: gmailMessage(
+          "m4",
+          "Mail Delivery Subsystem <mailer-daemon@googlemail.com>",
+          "Delivery Status Notification (Failure)",
+          "1770000003000",
+          { snippet: "The address buyer@acme.com was not found. 550 5.1.1" },
+        ),
+      },
+    ]);
+
+    const report = await syncInboundGmail(makeEnv(db));
+    expect(report.matched).toBe(1);
+
+    const contact = db.prepare("SELECT * FROM crm_contacts WHERE id = 'ct1'").get() as any;
+    expect(contact.email_status).toBe("invalid");
+    expect(contact.email_verified_at).toBeTruthy();
+
+    const activity = db.prepare("SELECT * FROM crm_activities").get() as any;
+    expect(activity.company_id).toBe("c1");
+    expect(activity.summary).toContain("退信");
+    expect(activity.summary).toContain("buyer@acme.com");
+    expect(activity.summary).toContain("邮箱已标记无效");
+  });
+
+  it("classifies an unsubscribe request: suppresses the sender and annotates the timeline", async () => {
+    const db = await makeDb();
+    seedAccount(db, "sales7@brand.com", "oauth_refresh");
+    seedSettings(db, "sales7@brand.com", "sales7@brand.com");
+    db.prepare("INSERT INTO crm_companies (id, name, domain) VALUES ('c1', 'Acme', 'acme.com')").run();
+    db.prepare("INSERT INTO crm_contacts (id, company_id, full_name, email) VALUES ('ct1', 'c1', 'John', 'buyer@acme.com')").run();
+
+    stubFetch([
+      { match: (u) => u === TOKEN_URL, body: { access_token: "tok-7", expires_in: 3600 } },
+      { match: (u) => u.startsWith(`${API}/`) && u.includes("/messages?"), body: { messages: [{ id: "m5", threadId: "t5" }] } },
+      {
+        match: (u) => u.includes("/messages/m5?"),
+        body: gmailMessage(
+          "m5",
+          "John <buyer@acme.com>",
+          "Please unsubscribe me",
+          "1770000004000",
+          { snippet: "请不要再来邮件，取消订阅你们的产品目录。" },
+        ),
+      },
+    ]);
+
+    const report = await syncInboundGmail(makeEnv(db));
+    expect(report.matched).toBe(1);
+
+    const contact = db.prepare("SELECT * FROM crm_contacts WHERE id = 'ct1'").get() as any;
+    expect(contact.do_not_contact).toBe(1);
+    expect(contact.unsubscribed_at).toBeTruthy();
+
+    const activity = db.prepare("SELECT * FROM crm_activities").get() as any;
+    expect(activity.summary).toContain("退订请求");
+    expect(activity.summary).toContain("已自动标记禁止联系");
+  });
+
+  it("classifies an out-of-office auto-reply via the Auto-Submitted header", async () => {
+    const db = await makeDb();
+    seedAccount(db, "sales8@brand.com", "oauth_refresh");
+    seedSettings(db, "sales8@brand.com", "sales8@brand.com");
+    db.prepare("INSERT INTO crm_companies (id, name, domain) VALUES ('c1', 'Acme', 'acme.com')").run();
+    db.prepare("INSERT INTO crm_contacts (id, company_id, full_name, email) VALUES ('ct1', 'c1', 'John', 'buyer@acme.com')").run();
+
+    stubFetch([
+      { match: (u) => u === TOKEN_URL, body: { access_token: "tok-8", expires_in: 3600 } },
+      { match: (u) => u.startsWith(`${API}/`) && u.includes("/messages?"), body: { messages: [{ id: "m6", threadId: "t6" }] } },
+      {
+        match: (u) => u.includes("/messages/m6?"),
+        body: gmailMessage("m6", "John <buyer@acme.com>", "Out of office", "1770000005000", {
+          snippet: "I am on vacation until Monday. For urgent matters contact my colleague interested in your catalog.",
+          headers: [{ name: "Auto-Submitted", value: "auto-replied" }],
+        }),
+      },
+    ]);
+
+    const report = await syncInboundGmail(makeEnv(db));
+    expect(report.matched).toBe(1);
+    // 头部证据优先：虽含目录等意向词，仍按自动回复分类，且不标记禁联。
+    const contact = db.prepare("SELECT * FROM crm_contacts WHERE id = 'ct1'").get() as any;
+    expect(contact.do_not_contact).toBe(0);
+    const activity = db.prepare("SELECT * FROM crm_activities").get() as any;
+    expect(activity.summary).toContain("自动回复");
   });
 });

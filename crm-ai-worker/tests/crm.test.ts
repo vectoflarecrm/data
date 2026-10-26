@@ -78,6 +78,7 @@ async function makeDb() {
       id TEXT PRIMARY KEY, name TEXT NOT NULL, domain TEXT UNIQUE, industry TEXT,
       country TEXT, tier TEXT DEFAULT 'unqualified', lead_status TEXT DEFAULT 'new',
       merged_from_ids TEXT, chinese_remarks TEXT, customer_since TEXT,
+      do_not_contact INTEGER DEFAULT 0,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -85,6 +86,8 @@ async function makeDb() {
       id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
       full_name TEXT NOT NULL, job_title TEXT, email TEXT, whatsapp_or_phone TEXT,
       linkedin_url TEXT, is_primary INTEGER DEFAULT 0,
+      email_status TEXT DEFAULT 'unknown', email_verified_at TEXT,
+      unsubscribed_at TEXT, do_not_contact INTEGER DEFAULT 0,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE crm_deals (

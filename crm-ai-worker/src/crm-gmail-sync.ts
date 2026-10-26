@@ -16,6 +16,12 @@
 
 import { safeLog } from "./security/safe-log";
 import { chooseGmailAccount, getAccessToken, type ChosenAccount, type GmailEnv } from "./gmail";
+import {
+  classifyInboundEmail,
+  extractBouncedAddress,
+  markContactUnsubscribed,
+  markEmailInvalid,
+} from "./contactability";
 
 const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
@@ -46,6 +52,7 @@ interface MailboxPlan {
 interface GmailMessage {
   id: string;
   internalDate?: string;
+  snippet?: string;
   payload?: { headers?: Array<{ name: string; value: string }> };
 }
 
@@ -156,7 +163,7 @@ async function syncMailbox(env: GmailEnv, plan: MailboxPlan): Promise<{ processe
     const id = ids[i].id;
     if (seenIds.has(id)) continue;
     const msgResp = await fetchGmail(
-      `${GMAIL_API_BASE}/users/${userPath}/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`,
+      `${GMAIL_API_BASE}/users/${userPath}/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Auto-Submitted&metadataHeaders=Precedence`,
       token,
     );
     const msg = (await msgResp.json()) as GmailMessage;
@@ -172,21 +179,74 @@ async function syncMailbox(env: GmailEnv, plan: MailboxPlan): Promise<{ processe
 }
 
 /** 把一封来信匹配到 CRM（联系人邮箱 → 公司域名），写入时间线 + 去重行。
+ * 同时做回复自动分类（P1-6）与抑制动作（P0-2）：退信 → 原收件人
+ * email_status='invalid'；退订 → 来信人 do_not_contact。
  * 匹配成功时两个写入放在一个 D1 batch 里（原子）；没匹配上只记去重行。
  * 返回是否匹配到了 CRM 记录。 */
 async function recordMessage(env: GmailEnv, mailbox: string, messageId: string, msg: GmailMessage): Promise<boolean> {
   const headers = msg.payload?.headers ?? [];
-  const fromValue = headers.find((h) => h.name.toLowerCase() === "from")?.value ?? "";
-  const subject = (headers.find((h) => h.name.toLowerCase() === "subject")?.value ?? "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 200);
+  const header = (name: string): string => headers.find((h) => h.name.toLowerCase() === name)?.value ?? "";
+  const fromValue = header("from");
+  const subject = header("subject").replace(/\s+/g, " ").trim().slice(0, 200);
   const fromEmail = parseFromAddress(fromValue);
+  const snippet = (msg.snippet ?? "").replace(/\s+/g, " ").trim().slice(0, 400);
   const internalDate = Number(msg.internalDate);
   const receivedMs = Number.isFinite(internalDate) ? internalDate : Date.now();
   const receivedIso = new Date(receivedMs).toISOString();
   const dateLabel = receivedIso.slice(0, 10);
-  const summary = `收到来信: ${subject || "(无主题)"}（来自 ${fromEmail || fromValue.slice(0, 120)}，${dateLabel}）`;
+
+  const classification = classifyInboundEmail({
+    fromEmail,
+    subject,
+    autoSubmitted: header("auto-submitted"),
+    precedence: header("precedence"),
+    snippet,
+  });
+
+  // 退信：时间线记在被退回联系人所属的公司（发件人是 mailer-daemon，无意义）。
+  if (classification.kind === "bounce") {
+    const bounced = extractBouncedAddress(`${subject} ${snippet}`);
+    if (bounced) {
+      await markEmailInvalid(env, bounced);
+      try {
+        const contact = await env.DB.prepare(
+          `SELECT company_id FROM crm_contacts WHERE lower(IFNULL(email, '')) = ?1 LIMIT 1`,
+        )
+          .bind(bounced)
+          .first<{ company_id: string }>();
+        if (contact) {
+          await env.DB.batch([
+            env.DB.prepare(
+              `INSERT INTO crm_activities (id, company_id, type, summary)
+               VALUES (?1, ?2, 'email_received', ?3)`,
+            ).bind(
+              crypto.randomUUID(),
+              contact.company_id,
+              `【退信】发送至 ${bounced} 的邮件被退回（${dateLabel}），邮箱已标记无效`,
+            ),
+            seenInsert(env, mailbox, messageId, receivedIso),
+          ]);
+          return true;
+        }
+      } catch (error) {
+        // 时间线写入失败：不记去重行，下一 tick 重试（不会丢来信）。
+        safeLog("warn", `[crm-gmail-sync] 退信时间线写入失败（下 tick 重试）`, error);
+        return false;
+      }
+    }
+    // 提取不到被退回地址或与 CRM 无关：只记去重行，不写时间线。
+    return recordSeenOnly(env, mailbox, messageId, receivedIso);
+  }
+
+  // 退订请求：立即将来信人标记禁止联系（发送前统一检查会拦截后续发送）。
+  let unsubNote = "";
+  if (classification.kind === "unsubscribe" && fromEmail) {
+    const marked = await markContactUnsubscribed(env, fromEmail);
+    if (marked) unsubNote = "，已自动标记禁止联系";
+  }
+
+  const prefix = classification.label ? `【${classification.label}】` : "";
+  const summary = `${prefix}收到来信: ${subject || "(无主题)"}（来自 ${fromEmail || fromValue.slice(0, 120)}，${dateLabel}）${unsubNote}`;
 
   if (fromEmail) {
     try {
@@ -239,6 +299,11 @@ async function recordMessage(env: GmailEnv, mailbox: string, messageId: string, 
   }
 
   // 与 CRM 无关的来信：只记去重行，不写时间线。
+  return recordSeenOnly(env, mailbox, messageId, receivedIso);
+}
+
+/** 只记去重行（与 CRM 无关或无需时间线的来信），fail-open。 */
+async function recordSeenOnly(env: GmailEnv, mailbox: string, messageId: string, receivedIso: string): Promise<boolean> {
   try {
     await env.DB.prepare(
       `INSERT OR IGNORE INTO crm_mail_seen (mailbox, message_id, received_at) VALUES (?1, ?2, ?3)`,

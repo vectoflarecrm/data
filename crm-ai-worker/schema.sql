@@ -832,6 +832,7 @@ CREATE TABLE IF NOT EXISTS crm_companies (
   merged_from_ids TEXT,
   chinese_remarks TEXT,
   customer_since TEXT,
+  do_not_contact INTEGER DEFAULT 0,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -850,10 +851,15 @@ CREATE TABLE IF NOT EXISTS crm_contacts (
   whatsapp_or_phone TEXT,
   linkedin_url TEXT,
   is_primary INTEGER DEFAULT 0,
+  email_status TEXT DEFAULT 'unknown',
+  email_verified_at TEXT,
+  unsubscribed_at TEXT,
+  do_not_contact INTEGER DEFAULT 0,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_contacts_company_id ON crm_contacts(company_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_email_status ON crm_contacts(email_status);
 
 -- Deals: one row per opportunity, kanban stage machine
 -- inquiry → sample_quoted → pi_sent → deposit_paid → won | lost.

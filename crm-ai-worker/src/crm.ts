@@ -38,6 +38,8 @@ export interface CrmCompanyRow {
   chinese_remarks: string | null;
   /** Set the day the first deal was won — the company is a paying customer. */
   customer_since: string | null;
+  /** 触达质量闭环：公司级禁止联系（含域名级发送前拦截）。 */
+  do_not_contact: number;
   created_at: string;
   updated_at: string;
 }
@@ -56,6 +58,13 @@ export interface CrmContactRow {
   whatsapp_or_phone: string | null;
   linkedin_url: string | null;
   is_primary: number;
+  /** 触达质量闭环：unknown/valid/invalid（退信自动标 invalid）。 */
+  email_status: string;
+  email_verified_at: string | null;
+  /** 客户退订的时间；写入后发送前统一检查将拦截。 */
+  unsubscribed_at: string | null;
+  /** 手动或退订自动标记的禁止联系开关。 */
+  do_not_contact: number;
   created_at: string;
 }
 
@@ -112,6 +121,8 @@ const LEAD_STATUSES = [
 /** Caller-facing activity types. Internal log rows (manual_note default,
  * lead_promoted, company_merged) are produced by the server itself. */
 const ACTIVITY_TYPES = ["note", "task", "call", "meeting"] as const;
+/** 触达质量闭环：邮箱状态机（退信自动标 invalid，发送前拦截）。 */
+const EMAIL_STATUSES = ["unknown", "valid", "invalid"] as const;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -322,6 +333,12 @@ async function updateCompany(
   if ("chinese_remarks" in body) {
     sets.push(`chinese_remarks = ?${sets.length + 2}`);
     binds.push(optString(body.chinese_remarks, "chinese_remarks", 8000));
+  }
+  if ("do_not_contact" in body) {
+    const dnc = optBool(body.do_not_contact, "do_not_contact");
+    if (dnc === null) throw new HttpError(400, "do_not_contact 需要布尔值");
+    sets.push(`do_not_contact = ?${sets.length + 2}`);
+    binds.push(dnc ? 1 : 0);
   }
   if (!sets.length) throw new HttpError(400, "没有可更新字段");
   sets.push("updated_at = CURRENT_TIMESTAMP");
@@ -674,6 +691,23 @@ async function updateContact(request: Request, env: AdminEnv, id: string): Promi
   if ("linkedin_url" in body) {
     sets.push(`linkedin_url = ?${sets.length + 2}`);
     binds.push(optString(body.linkedin_url, "linkedin_url", 300));
+  }
+  if ("do_not_contact" in body) {
+    const dnc = optBool(body.do_not_contact, "do_not_contact");
+    if (dnc === null) throw new HttpError(400, "do_not_contact 需要布尔值");
+    if (dnc) {
+      sets.push("do_not_contact = 1");
+    } else {
+      // 管理员明确解除禁联 = 同时清除退订状态（否则发送前检查仍会拦截）。
+      sets.push("do_not_contact = 0", "unsubscribed_at = NULL");
+    }
+  }
+  if ("email_status" in body) {
+    const status = oneOf(body.email_status, EMAIL_STATUSES, "email_status");
+    sets.push(`email_status = ?${sets.length + 2}`);
+    binds.push(status);
+    sets.push(`email_verified_at = ?${sets.length + 2}`);
+    binds.push(status === "unknown" ? null : new Date().toISOString());
   }
   const isPrimary = optBool(body.is_primary, "is_primary");
   if (isPrimary === true) {
