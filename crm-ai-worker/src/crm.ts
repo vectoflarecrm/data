@@ -25,6 +25,15 @@ import {
   type AdminEnv,
 } from "./admin";
 import { safeLog } from "./security/safe-log";
+import {
+  createSequenceInDb,
+  deleteSequenceInDb,
+  enrollInSequence,
+  listEnrollmentsFor,
+  listSequencesWithCounts,
+  setEnrollmentStatusInDb,
+  setSequenceEnabledInDb,
+} from "./sequences";
 
 export interface CrmCompanyRow {
   id: string;
@@ -1462,6 +1471,96 @@ async function importCrmCsv(
 }
 
 
+/* ── 多步销售序列 HTTP handlers（引擎在 src/sequences.ts） ───────────────── */
+
+async function createSequence(request: Request, env: AdminEnv, auth: AdminAuthContext): Promise<Response> {
+  const body = await readJsonBody(request);
+  const name = reqString(body.name, "name", 100);
+  const brandName = reqString(body.brand_name, "brand_name", 100);
+  let created: { id: string; steps: number };
+  try {
+    created = await createSequenceInDb(env, {
+      name,
+      brand_name: brandName,
+      steps: Array.isArray(body.steps) ? body.steps : [],
+    });
+  } catch (e) {
+    throw new HttpError(400, e instanceof Error ? e.message : String(e));
+  }
+  await auditAdminAction(env, request, auth, "CREATE_CRM_SEQUENCE", "crm_sequence", created.id, {
+    name,
+    steps: created.steps,
+  });
+  return jsonResponse({ sequence: { id: created.id, steps: created.steps } }, 201);
+}
+
+async function updateSequence(request: Request, env: AdminEnv, auth: AdminAuthContext, id: string): Promise<Response> {
+  const body = await readJsonBody(request);
+  const enabled = optBool(body.enabled, "enabled");
+  try {
+    if (enabled !== null) await setSequenceEnabledInDb(env, id, enabled);
+    else throw new Error("仅支持 enabled 布尔字段");
+  } catch (e) {
+    throw new HttpError(400, e instanceof Error ? e.message : String(e));
+  }
+  await auditAdminAction(env, request, auth, "UPDATE_CRM_SEQUENCE", "crm_sequence", id, { enabled });
+  return jsonResponse({ ok: true });
+}
+
+async function deleteSequence(request: Request, env: AdminEnv, auth: AdminAuthContext, id: string): Promise<Response> {
+  try {
+    await deleteSequenceInDb(env, id);
+  } catch (e) {
+    throw new HttpError(404, e instanceof Error ? e.message : String(e));
+  }
+  await auditAdminAction(env, request, auth, "DELETE_CRM_SEQUENCE", "crm_sequence", id, null);
+  return jsonResponse({ ok: true });
+}
+
+async function enrollCompanyInSequence(
+  request: Request,
+  env: AdminEnv,
+  auth: AdminAuthContext,
+  sequenceId: string,
+): Promise<Response> {
+  const body = await readJsonBody(request);
+  const companyId = reqString(body.company_id, "company_id", 64);
+  const requested: { contact_id?: string; contact_email?: string } = {};
+  const contactId = optString(body.contact_id, "contact_id", 64);
+  if (contactId) requested.contact_id = contactId;
+  const contactEmail = optString(body.contact_email, "contact_email", 200);
+  if (contactEmail) requested.contact_email = contactEmail;
+  let r: Awaited<ReturnType<typeof enrollInSequence>>;
+  try {
+    r = await enrollInSequence(env, sequenceId, companyId, requested);
+  } catch (e) {
+    throw new HttpError(400, e instanceof Error ? e.message : String(e));
+  }
+  await auditAdminAction(env, request, auth, "CRM_SEQUENCE_ENROLL", "crm_sequence_enrollment", r.enrollment.id, {
+    sequence_id: sequenceId,
+    company_id: companyId,
+    contact_email: r.enrollment.contact_email,
+  });
+  return jsonResponse({ enrollment: r.enrollment, re_enrolled: r.reEnrolled }, 201);
+}
+
+async function updateEnrollment(request: Request, env: AdminEnv, auth: AdminAuthContext, id: string): Promise<Response> {
+  const body = await readJsonBody(request);
+  const status = oneOf(body.status, ["active", "paused", "stopped"] as const, "status");
+  const reason = optString(body.reason, "reason", 300);
+  try {
+    await setEnrollmentStatusInDb(env, id, status, reason);
+  } catch (e) {
+    throw new HttpError(404, e instanceof Error ? e.message : String(e));
+  }
+  await auditAdminAction(env, request, auth, "UPDATE_CRM_ENROLLMENT", "crm_sequence_enrollment", id, {
+    status,
+    reason,
+  });
+  return jsonResponse({ ok: true });
+}
+
+
 /* ── Router ─────────────────────────────────────────────────────────────── */
 
 export async function handleCrmApi(
@@ -1503,6 +1602,16 @@ export async function handleCrmApi(
       if (!id && method === "POST") return await createActivity(request, env, auth);
       if (id && method === "PATCH") return await updateActivity(request, env, id);
       if (id && method === "DELETE") return await deleteActivity(env, id);
+    } else if (resource === "sequences") {
+      const sub = parts[5] ?? "";
+      if (!id && method === "GET") return await listSequencesWithCounts(env);
+      if (!id && method === "POST") return await createSequence(request, env, auth);
+      if (id && sub === "enroll" && method === "POST") return await enrollCompanyInSequence(request, env, auth, id);
+      if (id && sub === "enrollments" && method === "GET") return await listEnrollmentsFor(env, id);
+      if (id && method === "PATCH") return await updateSequence(request, env, auth, id);
+      if (id && method === "DELETE") return await deleteSequence(request, env, auth, id);
+    } else if (resource === "enrollments") {
+      if (id && method === "PATCH") return await updateEnrollment(request, env, auth, id);
     }
     return jsonResponse({ detail: "Not Found" }, 404);
   } catch (error) {

@@ -5573,6 +5573,13 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 </div>
 
 <div class="panel">
+<div class="sec-head"><h2>🔀 销售序列</h2>
+<div class="toolbar"><button class="btn" id="seqNew">➕ 新建序列</button><button class="btn btn-p" id="seqReload">刷新</button></div></div>
+<p class="hint">多步自动跟进：按步骤天数依次发送模板邮件（占位符 {{company}} {{contact_name}} {{country}} {{domain}} {{sender_name}}）；客户回复、退订/禁联、连续发送失败自动终止；发信复用 Gmail 配额与发送前拦截。在公司详情里把公司加入序列。</p>
+<table><thead><tr><th>序列</th><th>品牌</th><th>步骤</th><th>进行中/总数</th><th>状态</th><th>操作</th></tr></thead><tbody id="seqRows"></tbody></table>
+</div>
+
+<div class="panel">
 <div class="sec-head"><h2>🏢 客户公司</h2>
 <div class="toolbar"><input id="coSearch" placeholder="搜索名称/域名/备注"><select id="coTier"><option value="">全部分级</option><option value="A">A</option><option value="B">B</option><option value="C">C</option><option value="VIP">VIP</option><option value="unqualified">未分级</option></select><select id="coStatus"><option value="">全部状态</option><option value="new">新线索</option><option value="enriched">已富化</option><option value="contacted">已联系</option><option value="qualified">已验证</option><option value="disqualified">已淘汰</option></select><button class="btn btn-p" id="coReload">刷新</button><button class="btn" id="coNew">➕ 新建公司</button></div></div>
 <p class="hint">⬆️ 线索提升：把研究管线（customers 表）里已调研完的线索一键转为销售公司 —— ID 填客户管理面板「客户ID」列的数字。提升过的线索会自动跳过（幂等），联系人、国家、行业、评分分级一并带入。</p>
@@ -5634,15 +5641,26 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 </div></div>
 
 <div class="modal-back" id="mDetail"><div class="modal">
-<div id="dBody"></div>
-</div></div>
+  <div id="dBody"></div>
+  </div></div>
+
+<div class="modal-back" id="mSeqNew"><div class="modal">
+  <h3>➕ 新建销售序列</h3>
+  <div id="snBody"></div>
+  </div></div>
+
+<div class="modal-back" id="mSeq"><div class="modal">
+  <h3>序列入册明细</h3>
+  <div id="sqBody"></div>
+  </div></div>
+
 
 <div class="toast" id="toast"></div>
 
 <script>
 (function(){
 'use strict';
- var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[],funnel:null};
+ var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[],funnel:null,sequences:[]};
 var STAGES=['inquiry','sample_quoted','pi_sent','deposit_paid','won','lost'];
 var STAGE_L={inquiry:'询盘',sample_quoted:'样品报价',pi_sent:'PI 已发',deposit_paid:'定金到账',won:'赢单',lost:'输单'};
 var TIER_L={A:'A级',B:'B级',C:'C级',VIP:'VIP',unqualified:'未分级'};
@@ -5784,6 +5802,99 @@ function renderFunnel(){
   h+='<p class="hint" style="margin:10px 0 0">回复率（回复/触达）：<b>'+(f.reply_rate!==undefined?f.reply_rate:'–')+'%</b></p>';
   el.innerHTML=h;
 }
+
+/* ── 销售序列 ───────────────────────────────────────────── */
+function loadSequences(){
+  return api('/admin/api/crm/sequences').then(function(b){STATE.sequences=b.sequences||[];renderSequences();});
+}
+function renderSequences(){
+  var rows='';
+  for(var i=0;i<STATE.sequences.length;i++){
+    var s=STATE.sequences[i];
+    var steps='';
+    var sl=s.steps||[];
+    for(var j=0;j<sl.length;j++){
+      steps+='D+'+Number(sl[j].day_offset)+' '+esc(String(sl[j].subject).slice(0,22))+(j<sl.length-1?' → ':'');
+    }
+    rows+='<tr><td>'+esc(s.name)+'</td><td>'+esc(s.brand_name)+'</td><td>'+steps+'</td><td>'+Number(s.active_count)+' / '+Number(s.total_count)+'</td><td>'+(Number(s.enabled)?'<span class="badge b-a">启用</span>':'<span class="badge b-un">停用</span>')+'</td><td><button class="btn btn-s btn-xs" data-act="seqDetail" data-id="'+esc(s.id)+'">明细</button> <button class="btn btn-s btn-xs" data-act="seqToggle" data-id="'+esc(s.id)+'">'+(Number(s.enabled)?'停用':'启用')+'</button> <button class="btn btn-d btn-xs" data-act="seqDel" data-id="'+esc(s.id)+'">删</button></td></tr>';
+  }
+  $('seqRows').innerHTML=rows||'<tr><td colspan="6" class="hint">还没有序列。点「➕ 新建序列」创建一个多步自动跟进。</td></tr>';
+}
+$('seqReload').onclick=loadSequences;
+$('seqRows').addEventListener('click',function(e){
+  var b=e.target.closest('[data-act]');if(!b)return;
+  var act=b.getAttribute('data-act'),id=b.getAttribute('data-id');
+  if(act==='seqDetail'){
+    openSeqDetail(id);
+  }else if(act==='seqToggle'){
+    var en=1;
+    for(var i=0;i<STATE.sequences.length;i++){
+      if(STATE.sequences[i].id===id){en=Number(STATE.sequences[i].enabled)?0:1;break;}
+    }
+    api('/admin/api/crm/sequences/'+encodeURIComponent(id),{method:'PATCH',body:{enabled:en===1}}).then(function(){toast('已更新');loadSequences();}).catch(function(err){toast(err.message,true);});
+  }else if(act==='seqDel'){
+    if(!confirm('确定删除该序列及其全部入册记录？已发送的邮件和时间线不受影响。'))return;
+    api('/admin/api/crm/sequences/'+encodeURIComponent(id),{method:'DELETE'}).then(function(){toast('已删除');loadSequences();}).catch(function(err){toast(err.message,true);});
+  }
+});
+$('seqNew').onclick=function(){
+  var h='<div class="f"><label>序列名称 *</label><input id="sqName" placeholder="如：桨板经销商三步开发"></div>';
+  h+='<div class="f"><label>品牌 brand_name *（须与开发信设置一致，用于选择发件邮箱）</label><input id="sqBrand"></div>';
+  h+='<p class="hint">至少填写第 1 步；天数为入册后第 N 天发送（0 = 下一 tick 立即发）。占位符：{{company}} {{contact_name}} {{country}} {{domain}} {{sender_name}}。</p>';
+  var defs=[0,3,7];
+  for(var i=0;i<3;i++){
+    h+='<div class="f" style="border-top:1px solid #e2e8f0;padding-top:8px;margin-top:8px"><label>步骤 '+(i+1)+'（第 <input id="sqDay'+i+'" type="number" min="0" max="90" value="'+defs[i]+'" style="width:64px;display:inline-block"> 天）</label>';
+    h+='<input id="sqSubj'+i+'" placeholder="主题，如：{{company}} 采购合作意向">';
+    h+='<textarea id="sqBodyT'+i+'" rows="3" style="margin-top:4px" placeholder="正文…"></textarea></div>';
+  }
+  h+='<div class="mrow"><button class="btn btn-s" data-close="mSeqNew">取消</button><button class="btn btn-p" id="sqSave">保存序列</button></div>';
+  $('snBody').innerHTML=h;
+  $('sqSave').onclick=saveSeqNew;
+  openModal('mSeqNew');
+};
+function saveSeqNew(){
+  var steps=[];
+  for(var i=0;i<3;i++){
+    var subj=$('sqSubj'+i).value.trim(),body=$('sqBodyT'+i).value.trim();
+    if(!subj&&!body)continue;
+    steps.push({day_offset:Number($('sqDay'+i).value||0),subject:subj,body:body});
+  }
+  var payload={name:$('sqName').value.trim(),brand_name:$('sqBrand').value.trim(),steps:steps};
+  if(!payload.name||!payload.brand_name||!steps.length){toast('名称、品牌和至少一个步骤必填',true);return;}
+  api('/admin/api/crm/sequences',{method:'POST',body:payload}).then(function(){
+    closeModal('mSeqNew');toast('序列已创建，在公司详情里即可入册');loadSequences();
+  }).catch(function(err){toast(err.message,true);});
+}
+var curSeqId=null;
+function openSeqDetail(id){
+  curSeqId=id;
+  api('/admin/api/crm/sequences/'+encodeURIComponent(id)+'/enrollments').then(function(b){
+    var ens=b.enrollments||[];
+    var h='<table><thead><tr><th>公司</th><th>邮箱</th><th>步骤</th><th>下次发送</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+    for(var i=0;i<ens.length;i++){
+      var en=ens[i];
+      var st=en.status==='active'?'<span class="badge b-a">进行中</span>':en.status==='paused'?'<span class="badge b-warn">已暂停</span>':en.status==='completed'?'<span class="badge b-cust">已完成</span>':'<span class="badge b-dnc">已终止</span>';
+      var btns='';
+      if(en.status==='active')btns='<button class="btn btn-s btn-xs" data-act="enPause" data-id="'+esc(en.id)+'">暂停</button> <button class="btn btn-d btn-xs" data-act="enStop" data-id="'+esc(en.id)+'">停止</button>';
+      else if(en.status==='paused')btns='<button class="btn btn-p btn-xs" data-act="enResume" data-id="'+esc(en.id)+'">恢复</button> <button class="btn btn-d btn-xs" data-act="enStop" data-id="'+esc(en.id)+'">停止</button>';
+      h+='<tr><td>'+esc(en.company_name||en.company_id)+'</td><td>'+esc(en.contact_email)+'</td><td>'+(Number(en.current_step)+1)+'</td><td>'+esc(String(en.next_due_at).slice(0,16).replace('T',' '))+'</td><td>'+st+(en.stop_reason?'<div class="hint" style="margin:2px 0 0">'+esc(en.stop_reason)+'</div>':'')+'</td><td>'+btns+'</td></tr>';
+    }
+    h+='</tbody></table><div class="mrow"><button class="btn btn-s" data-close="mSeq">关闭</button></div>';
+    $('sqBody').innerHTML=h;
+    openModal('mSeq');
+  }).catch(function(err){toast(err.message,true);});
+}
+$('snBody').addEventListener('click',function(e){
+  var cs=e.target.closest('[data-close]');
+  if(cs){closeModal(cs.getAttribute('data-close'));}
+});
+$('sqBody').addEventListener('click',function(e){
+  var cs=e.target.closest('[data-close]');if(cs){closeModal(cs.getAttribute('data-close'));return;}
+  var b=e.target.closest('[data-act]');if(!b)return;
+  var act=b.getAttribute('data-act'),id=b.getAttribute('data-id');
+  var status=act==='enPause'?'paused':act==='enResume'?'active':'stopped';
+  api('/admin/api/crm/enrollments/'+encodeURIComponent(id),{method:'PATCH',body:{status:status,reason:act==='enStop'?'人工停止':null}}).then(function(){toast('已更新');openSeqDetail(curSeqId);}).catch(function(err){toast(err.message,true);});
+});
 function renderChart(){
   var el=$('wonChart');if(!el)return;
   var map={};for(var i=0;i<STATE.won.length;i++){map[STATE.won[i].month]=Number(STATE.won[i].total||0);}
@@ -5802,7 +5913,7 @@ function renderChart(){
   el.innerHTML=h;
 }
 function loadAll(){
-  return Promise.all([loadCompanies(),loadDeals(),loadTasks(),loadStats()]).catch(function(e){toast(e.message,true);});
+  return Promise.all([loadCompanies(),loadDeals(),loadTasks(),loadStats(),loadSequences()]).catch(function(e){toast(e.message,true);});
 }
 
 /* ── 公司详情 ───────────────────────────────────────────── */
@@ -5862,6 +5973,15 @@ function openDetail(id){
       h+='<tr><td>'+esc(d.title)+'</td><td>'+STAGE_L[d.stage]+(d.lost_reason?'<div class="od" style="font-size:11px">✗ '+esc(d.lost_reason)+'</div>':'')+'</td><td>'+fmtAmt(d.amount)+'</td><td>'+esc(d.expected_close_date||'—')+'</td><td>'+(d.archived_at?'已归档 '+esc(d.archived_at):(d.won_at&&d.stage==='won'?'赢单 '+esc(d.won_at):'—'))+'</td><td><button class="btn btn-d btn-xs" data-act="delDeal" data-id="'+esc(d.id)+'">删</button></td></tr>';
     }
     h+='</tbody></tbody></table>';
+    h+='<h2 style="font-size:15px;margin:16px 0 8px">🔀 销售序列</h2>';
+    h+='<p class="hint">加入多步自动跟进：按步骤设定天数依次发送开发信（用主联系人邮箱）；客户回复、退订/禁联或连续发送失败会自动终止。</p>';
+    h+='<div class="toolbar"><select id="dSeqPick" style="max-width:340px"><option value="">选择序列…</option>';
+    for(var s3=0;s3<STATE.sequences.length;s3++){
+      var sq=STATE.sequences[s3];
+      if(!Number(sq.enabled))continue;
+      h+='<option value="'+esc(sq.id)+'">'+esc(sq.name)+'（'+esc(sq.brand_name)+'，'+(sq.steps||[]).length+' 步）</option>';
+    }
+    h+='</select><button class="btn btn-p" data-act="enrollSeq" data-id="'+esc(c.id)+'">➕ 加入序列</button></div>';
     h+='<h2 style="font-size:15px;margin:16px 0 8px">🕘 时间线 / 动态</h2><ul class="tl">';
     for(var m=0;m<acts.length;m++){
       var a=acts[m];
@@ -6098,6 +6218,10 @@ $('dBody').addEventListener('click',function(e){
     if(src===tgt){toast('来源与目标不能是同一个联系人',true);return;}
     if(!confirm('将把来源联系人并入目标联系人并删除来源（缺失字段自动补齐）。确定继续？'))return;
     api('/admin/api/crm/contacts/merge',{method:'POST',body:{target_contact_id:tgt,source_contact_id:src}}).then(function(){toast('联系人已合并');openDetail(id);loadCompanies().then(renderStats);}).catch(function(err){toast(err.message,true);});
+  }else if(act==='enrollSeq'){
+    var sid=$('dSeqPick').value;
+    if(!sid){toast('请先选择一个序列',true);return;}
+    api('/admin/api/crm/sequences/'+encodeURIComponent(sid)+'/enroll',{method:'POST',body:{company_id:id}}).then(function(r){toast(r.re_enrolled?'已重新入册：从头开始执行':'已加入序列，将按步骤天数自动跟进');loadSequences();}).catch(function(err){toast(err.message,true);});
   }else if(act==='merge'){
     var src=$('dMergeSrc').value;
     if(!src){toast('请先选择要并入的公司',true);return;}

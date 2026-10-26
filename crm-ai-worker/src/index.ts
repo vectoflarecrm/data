@@ -28,6 +28,7 @@ import { cleanupExpiredChallenges } from "./auth/webauthn";
 import { runCampaignAutoAdvance } from "./campaigns";
 import { noteResearchEnriched, listOverdueTasks } from "./crm-hooks";
 import { syncInboundGmail } from "./crm-gmail-sync";
+import { runSequenceTick } from "./sequences";
   import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, appendResearchSignals, appendResearchPersonas, appendResearchProfile, linkResearchFactsToContacts, hasCurrentResearchFacts, capResearchSourcesToBudget, readSavedResearchText, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, type ResearchPersonaEntry, type ResearchSolutionEntry, FACTS_PER_RUN_CAP } from "./research-run";
 
 export interface CustomerRow {
@@ -2802,6 +2803,13 @@ export default {
         await syncInboundGmail(env as unknown as import("./gmail").GmailEnv);
       } catch (e) {
         safeLog("warn", "[crm-gmail-sync] tick failed (fail-open)", e instanceof Error ? e.message : String(e));
+      }
+      // 多步销售序列（更新.txt 第 3 项）：先同步收件箱再推进序列 ——
+      // 这样「客户回复 → 序列终止」在同一 tick 内即可生效。fail-open。
+      try {
+        await runSequenceTick(env as unknown as import("./admin").AdminEnv);
+      } catch (e) {
+        safeLog("warn", "[sequences] tick failed (fail-open)", e instanceof Error ? e.message : String(e));
       }
       return;
     }
