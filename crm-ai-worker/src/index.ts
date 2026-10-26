@@ -29,6 +29,7 @@ import { runCampaignAutoAdvance } from "./campaigns";
 import { noteResearchEnriched, listOverdueTasks } from "./crm-hooks";
 import { syncInboundGmail } from "./crm-gmail-sync";
 import { runSequenceTick } from "./sequences";
+import { runEmailScreeningTick } from "./email-verify";
   import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, appendResearchSignals, appendResearchPersonas, appendResearchProfile, linkResearchFactsToContacts, hasCurrentResearchFacts, capResearchSourcesToBudget, readSavedResearchText, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, type ResearchPersonaEntry, type ResearchSolutionEntry, FACTS_PER_RUN_CAP } from "./research-run";
 
 export interface CustomerRow {
@@ -2810,6 +2811,14 @@ export default {
         await runSequenceTick(env as unknown as import("./admin").AdminEnv);
       } catch (e) {
         safeLog("warn", "[sequences] tick failed (fail-open)", e instanceof Error ? e.message : String(e));
+      }
+      // 邮箱/域名检测（0036）：空闲 tick 顺带筛查 pending 的公司域名与
+      // 联系人邮箱（DoH 查询，按预算限流）。fail-open：表缺失/DoH 失败
+      // 绝不影响本 tick 的其他任务。
+      try {
+        await runEmailScreeningTick(env as unknown as import("./admin").AdminEnv);
+      } catch (e) {
+        safeLog("warn", "[email-verify] tick failed (fail-open)", e instanceof Error ? e.message : String(e));
       }
       return;
     }

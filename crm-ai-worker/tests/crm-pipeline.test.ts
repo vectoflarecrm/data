@@ -62,6 +62,7 @@ const CRM_DDL = `
     country TEXT, tier TEXT DEFAULT 'unqualified', lead_status TEXT DEFAULT 'new',
     merged_from_ids TEXT, chinese_remarks TEXT, customer_since TEXT,
     do_not_contact INTEGER DEFAULT 0,
+    domain_email_status TEXT NOT NULL DEFAULT 'pending',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
   );

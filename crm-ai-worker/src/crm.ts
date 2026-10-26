@@ -34,6 +34,12 @@ import {
   setEnrollmentStatusInDb,
   setSequenceEnabledInDb,
 } from "./sequences";
+import {
+  listDomainChecks,
+  recheckCompanyDomainInDb,
+  recheckContactEmailInDb,
+  type DomainCheckResult,
+} from "./email-verify";
 
 export interface CrmCompanyRow {
   id: string;
@@ -322,6 +328,8 @@ async function updateCompany(
     }
     sets.push(`domain = ?${sets.length + 2}`);
     binds.push(domain);
+    // 邮箱检测（0036）：域名新增/修改 → 重新进入检测队列。
+    sets.push("domain_email_status = 'pending'");
   }
   if ("industry" in body) {
     sets.push(`industry = ?${sets.length + 2}`);
@@ -597,6 +605,7 @@ async function mergeContacts(
   // ONE D1 batch (合并.txt): the target only takes what it is missing —
   // its own non-null fields always win (COALESCE), is_primary escalates but
   // never demotes (MAX) — then the timeline row and the source delete.
+  // 邮箱检测（0036）：目标邮箱原为空、被来源邮箱补齐 → 重置为待检测。
   await env.DB.batch([
     env.DB.prepare(
       `UPDATE crm_contacts SET
@@ -604,7 +613,10 @@ async function mergeContacts(
          email = COALESCE(email, ?3),
          whatsapp_or_phone = COALESCE(whatsapp_or_phone, ?4),
          linkedin_url = COALESCE(linkedin_url, ?5),
-         is_primary = MAX(is_primary, ?6)
+         is_primary = MAX(is_primary, ?6),
+         email_check_status = CASE
+           WHEN email IS NULL AND ?3 IS NOT NULL THEN 'pending'
+           ELSE email_check_status END
        WHERE id = ?1`,
     ).bind(
       targetId,
@@ -692,6 +704,8 @@ async function updateContact(request: Request, env: AdminEnv, id: string): Promi
   if ("email" in body) {
     sets.push(`email = ?${sets.length + 2}`);
     binds.push(optString(body.email, "email", 200));
+    // 邮箱检测（0036）：邮箱新增/修改 → 重新进入检测队列。
+    sets.push("email_check_status = 'pending'");
   }
   if ("whatsapp_or_phone" in body) {
     sets.push(`whatsapp_or_phone = ?${sets.length + 2}`);
@@ -1561,6 +1575,58 @@ async function updateEnrollment(request: Request, env: AdminEnv, auth: AdminAuth
 }
 
 
+/* ── 邮箱/域名检测 HTTP handlers（引擎在 src/email-verify.ts） ───────────── */
+
+function checkToSummary(check: DomainCheckResult): Record<string, unknown> {
+  return {
+    domain: check.domain,
+    verdict: check.verdict,
+    mx_provider: check.mx_provider,
+    has_mx_record: check.has_mx_record,
+    has_a_record: check.has_a_record,
+    has_spf_record: check.has_spf_record,
+    feedback_notes: check.feedback_notes,
+  };
+}
+
+async function recheckCompanyDomain(
+  request: Request,
+  env: AdminEnv,
+  auth: AdminAuthContext,
+  id: string,
+): Promise<Response> {
+  let check: DomainCheckResult;
+  try {
+    check = await recheckCompanyDomainInDb(env, id);
+  } catch (e) {
+    throw new HttpError(404, e instanceof Error ? e.message : String(e));
+  }
+  await auditAdminAction(env, request, auth, "RECHECK_COMPANY_DOMAIN", "crm_company", id, {
+    domain: check.domain,
+    verdict: check.verdict,
+  });
+  return jsonResponse({ check: checkToSummary(check) });
+}
+
+async function recheckContactEmail(
+  request: Request,
+  env: AdminEnv,
+  auth: AdminAuthContext,
+  id: string,
+): Promise<Response> {
+  let check: DomainCheckResult;
+  try {
+    check = await recheckContactEmailInDb(env, id);
+  } catch (e) {
+    throw new HttpError(404, e instanceof Error ? e.message : String(e));
+  }
+  await auditAdminAction(env, request, auth, "RECHECK_CONTACT_EMAIL", "crm_contact", id, {
+    verdict: check.verdict,
+  });
+  return jsonResponse({ check: checkToSummary(check) });
+}
+
+
 /* ── Router ─────────────────────────────────────────────────────────────── */
 
 export async function handleCrmApi(
@@ -1580,18 +1646,24 @@ export async function handleCrmApi(
     } else if (resource === "import") {
       if (method === "POST") return await importCrmCsv(request, env, auth);
     } else if (resource === "companies") {
+      const sub = parts[5] ?? "";
       if (!id && method === "GET") return await listCompanies(url, env);
       if (!id && method === "POST") return await createCompany(request, env, auth);
       if (id === "promote" && method === "POST") return await promoteLead(request, env, auth);
       if (id === "merge" && method === "POST") return await mergeCompanies(request, env, auth);
+      if (id && sub === "recheck-domain" && method === "POST") return await recheckCompanyDomain(request, env, auth, id);
       if (id && method === "GET") return await getCompany(env, id);
       if (id && method === "PATCH") return await updateCompany(request, env, auth, id);
       if (id && method === "DELETE") return await deleteCompany(request, env, auth, id);
     } else if (resource === "contacts") {
+      const sub = parts[5] ?? "";
       if (id === "merge" && method === "POST") return await mergeContacts(request, env, auth);
       if (!id && method === "POST") return await createContact(request, env, auth);
+      if (id && sub === "recheck-email" && method === "POST") return await recheckContactEmail(request, env, auth, id);
       if (id && method === "PATCH") return await updateContact(request, env, id);
       if (id && method === "DELETE") return await deleteContact(env, id);
+    } else if (resource === "domains") {
+      if (!id && method === "GET") return await listDomainChecks(env);
     } else if (resource === "deals") {
       if (!id && method === "GET") return await listDeals(env, url);
       if (!id && method === "POST") return await createDeal(request, env, auth);

@@ -5580,6 +5580,13 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 </div>
 
 <div class="panel">
+<div class="sec-head"><h2>📮 邮箱检测</h2><button class="btn btn-p" id="dchkReload">刷新</button></div>
+<p class="hint">公司域名与联系人邮箱的可信度筛查（DNS over HTTPS）：A / MX / SPF 记录、MX 邮局指纹（Google / Microsoft 365 / Zoho…）、免费邮箱、一次性邮箱识别。新增或修改的域名/邮箱自动进入检测队列，由 5 分钟定时任务逐步筛查；也可在公司详情里手动重检。仅 dead_domain / no_mx / disposable 会记入时间线提醒。</p>
+<div class="hint" id="dchkCounts"></div>
+<table><thead><tr><th>域名</th><th>判定</th><th>邮局</th><th>A</th><th>MX</th><th>SPF</th><th>检测时间</th></tr></thead><tbody id="dchkRows"></tbody></table>
+</div>
+
+<div class="panel">
 <div class="sec-head"><h2>🏢 客户公司</h2>
 <div class="toolbar"><input id="coSearch" placeholder="搜索名称/域名/备注"><select id="coTier"><option value="">全部分级</option><option value="A">A</option><option value="B">B</option><option value="C">C</option><option value="VIP">VIP</option><option value="unqualified">未分级</option></select><select id="coStatus"><option value="">全部状态</option><option value="new">新线索</option><option value="enriched">已富化</option><option value="contacted">已联系</option><option value="qualified">已验证</option><option value="disqualified">已淘汰</option></select><button class="btn btn-p" id="coReload">刷新</button><button class="btn" id="coNew">➕ 新建公司</button></div></div>
 <p class="hint">⬆️ 线索提升：把研究管线（customers 表）里已调研完的线索一键转为销售公司 —— ID 填客户管理面板「客户ID」列的数字。提升过的线索会自动跳过（幂等），联系人、国家、行业、评分分级一并带入。</p>
@@ -5660,7 +5667,7 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 <script>
 (function(){
 'use strict';
- var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[],funnel:null,sequences:[]};
+  var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[],funnel:null,sequences:[],domainChecks:[]};
 var STAGES=['inquiry','sample_quoted','pi_sent','deposit_paid','won','lost'];
 var STAGE_L={inquiry:'询盘',sample_quoted:'样品报价',pi_sent:'PI 已发',deposit_paid:'定金到账',won:'赢单',lost:'输单'};
 var TIER_L={A:'A级',B:'B级',C:'C级',VIP:'VIP',unqualified:'未分级'};
@@ -5912,8 +5919,37 @@ function renderChart(){
   }
   el.innerHTML=h;
 }
+/* ── 邮箱/域名检测 ───────────────────────────────────────── */
+var DOMAIL_STATUS_L={pending:'待检测',valid:'邮箱有效',free_email:'免费邮箱',disposable:'一次性邮箱',no_mx:'无收件邮局',dead_domain:'域名失效'};
+function domailBadge(s){
+  if(s==='valid')return '<span class="badge b-a">邮箱有效</span>';
+  if(s==='free_email')return '<span class="badge b-b">免费邮箱</span>';
+  if(s==='disposable')return '<span class="badge b-unsub">一次性邮箱</span>';
+  if(s==='no_mx')return '<span class="badge b-warn">无收件邮局</span>';
+  if(s==='dead_domain')return '<span class="badge b-dnc">域名失效</span>';
+  return '<span class="badge b-un">待检测</span>';
+}
+function loadDomains(){
+  return api('/admin/api/crm/domains').then(function(b){
+    STATE.domainChecks=b.checks||[];
+    renderDomains(b.company_counts||[],b.contact_counts||[]);
+  });
+}
+function renderDomains(companyCounts,contactCounts){
+  var rows='';
+  for(var i=0;i<STATE.domainChecks.length;i++){
+    var d=STATE.domainChecks[i];
+    rows+='<tr><td>'+esc(d.domain)+'</td><td>'+domailBadge(d.verdict)+'</td><td>'+esc(d.mx_provider||'—')+'</td><td>'+(Number(d.has_a_record)?'✓':'✗')+'</td><td>'+(Number(d.has_mx_record)?'✓':'✗')+'</td><td>'+(Number(d.has_spf_record)?'✓':'✗')+'</td><td>'+esc(String(d.last_checked_at||'').slice(0,16).replace('T',' '))+'</td></tr>';
+  }
+  $('dchkRows').innerHTML=rows||'<tr><td colspan="7" class="hint">还没有检测记录。新增/修改域名或邮箱后，定时任务会自动筛查。</td></tr>';
+  var cc='',ct='';
+  for(var j=0;j<companyCounts.length;j++){cc+=DOMAIL_STATUS_L[companyCounts[j].status]||companyCounts[j].status;cc+=' '+Number(companyCounts[j].n)+(j<companyCounts.length-1?' · ':'');}
+  for(var k=0;k<contactCounts.length;k++){ct+=DOMAIL_STATUS_L[contactCounts[k].status]||contactCounts[k].status;ct+=' '+Number(contactCounts[k].n)+(k<contactCounts.length-1?' · ':'');}
+  $('dchkCounts').innerHTML='公司域名：'+(cc||'无')+'　｜　联系人邮箱：'+(ct||'无');
+}
+$('dchkReload').onclick=loadDomains;
 function loadAll(){
-  return Promise.all([loadCompanies(),loadDeals(),loadTasks(),loadStats(),loadSequences()]).catch(function(e){toast(e.message,true);});
+  return Promise.all([loadCompanies(),loadDeals(),loadTasks(),loadStats(),loadSequences(),loadDomains()]).catch(function(e){toast(e.message,true);});
 }
 
 /* ── 公司详情 ───────────────────────────────────────────── */
@@ -5921,7 +5957,7 @@ function openDetail(id){
   api('/admin/api/crm/companies/'+encodeURIComponent(id)).then(function(b){
     var c=b.company,contacts=b.contacts||[],deals=b.deals||[],acts=b.activities||[];
     var h='<h3>'+esc(c.name)+' '+tierBadge(c.tier)+' '+statusBadge(c.lead_status)+(c.customer_since?' <span class="badge b-cust">正式客户 · '+esc(c.customer_since)+' 起</span>':'')+(Number(c.do_not_contact)?' <span class="badge b-dnc">禁止联系</span>':'')+'</h3>';
-    h+='<p class="hint" style="margin:0 0 10px">ID '+esc(c.id)+' · '+esc(c.domain||'无域名')+' · '+esc(c.country||'国家未知')+' · '+esc(c.industry||'行业未知')+(c.merged_from_ids?' · 已并入来源: '+esc(c.merged_from_ids):'')+'</p>';
+    h+='<p class="hint" style="margin:0 0 10px">ID '+esc(c.id)+' · '+esc(c.domain||'无域名')+' '+(c.domain?domailBadge(c.domain_email_status):'')+' · '+esc(c.country||'国家未知')+' · '+esc(c.industry||'行业未知')+(c.merged_from_ids?' · 已并入来源: '+esc(c.merged_from_ids):'')+'</p>';
     h+='<div class="grid2 f"><div><label>分级</label><select id="dTier">';
     ['A','B','C','VIP','unqualified'].forEach(function(t){h+='<option value="'+t+'"'+(t===c.tier?' selected':'')+'>'+TIER_L[t]+'</option>';});
     h+='</select></div><div><label>销售状态</label><select id="dStatus">';
@@ -5929,6 +5965,7 @@ function openDetail(id){
     h+='</select></div></div>';
     h+='<div class="f"><label>中文备注（合并历史也记录在这里）</label><textarea id="dRemarks">'+esc(c.chinese_remarks||'')+'</textarea></div>';
     h+='<div class="mrow" style="justify-content:flex-start"><button class="btn btn-p" data-act="saveCo" data-id="'+esc(c.id)+'">保存公司信息</button>';
+    if(c.domain)h+='<button class="btn btn-s" data-act="recheckDomain" data-id="'+esc(c.id)+'">🔍 重检域名</button>';
     if(Number(c.do_not_contact)){
       h+='<button class="btn btn-s" data-act="unblockCo" data-id="'+esc(c.id)+'">解除公司禁联</button>';
     }else{
@@ -5941,7 +5978,8 @@ function openDetail(id){
       var cst='';
       if(Number(ct.do_not_contact))cst+='<span class="badge b-dnc">禁联</span> ';
       else if(ct.unsubscribed_at)cst+='<span class="badge b-unsub">已退订</span> ';
-      if(ct.email_status==='invalid')cst+='<span class="badge b-warn">邮箱无效</span>';
+      if(ct.email_status==='invalid')cst+='<span class="badge b-warn">邮箱无效</span> ';
+      if(ct.email&&ct.email_check_status&&ct.email_check_status!=='pending')cst+=domailBadge(ct.email_check_status)+' ';
       if(!cst)cst='<span class="hint">正常</span>';
       var ctop='';
       if(Number(ct.do_not_contact)||ct.unsubscribed_at){
@@ -5949,6 +5987,7 @@ function openDetail(id){
       }else{
         ctop+='<button class="btn btn-s btn-xs" data-act="blockCt" data-id="'+esc(ct.id)+'">禁联</button> ';
       }
+      if(ct.email)ctop+='<button class="btn btn-s btn-xs" data-act="recheckEmail" data-id="'+esc(ct.id)+'">重检邮箱</button> ';
       if(ct.email&&ct.email_status!=='invalid'){
         ctop+='<button class="btn btn-s btn-xs" data-act="markEmailInvalid" data-id="'+esc(ct.id)+'">标无效</button> ';
       }else if(ct.email){
@@ -6212,6 +6251,19 @@ $('dBody').addEventListener('click',function(e){
     var body2={company_id:id,type:$('daType').value,summary:$('daSummary').value};
     if($('daDue').value&&body2.type==='task')body2.due_date=$('daDue').value;
     api('/admin/api/crm/activities',{method:'POST',body:body2}).then(function(){toast('已记录');openDetail(id);loadTasks().then(renderStats);}).catch(function(err){toast(err.message,true);});
+  }else if(act==='recheckDomain'){
+    toast('正在检测域名…');
+    api('/admin/api/crm/companies/'+encodeURIComponent(id)+'/recheck-domain',{method:'POST'}).then(function(b){
+      toast('域名检测：'+(DOMAIL_STATUS_L[b.check.verdict]||b.check.verdict));
+      openDetail(id);loadDomains();
+    }).catch(function(err){toast(err.message,true);});
+  }else if(act==='recheckEmail'){
+    toast('正在检测邮箱…');
+    api('/admin/api/crm/contacts/'+encodeURIComponent(id)+'/recheck-email',{method:'POST'}).then(function(b){
+      toast('邮箱检测：'+(DOMAIL_STATUS_L[b.check.verdict]||b.check.verdict));
+      var mid=document.querySelector('#dBody [data-act="merge"]').getAttribute('data-id');
+      openDetail(mid);loadDomains();
+    }).catch(function(err){toast(err.message,true);});
   }else if(act==='mergeContact'){
     var src=$('cmSrc').value,tgt=$('cmTgt').value;
     if(!src||!tgt){toast('请选择要合并的两个联系人',true);return;}

@@ -833,12 +833,14 @@ CREATE TABLE IF NOT EXISTS crm_companies (
   chinese_remarks TEXT,
   customer_since TEXT,
   do_not_contact INTEGER DEFAULT 0,
+  domain_email_status TEXT NOT NULL DEFAULT 'pending',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_companies_domain ON crm_companies(domain);
 CREATE INDEX IF NOT EXISTS idx_companies_lead_status ON crm_companies(lead_status);
+CREATE INDEX IF NOT EXISTS idx_companies_domain_email ON crm_companies(domain_email_status);
 
 -- Contacts: decision makers per company. The first promoted pipeline
 -- contact is is_primary = 1 (the import-time channel).
@@ -855,11 +857,13 @@ CREATE TABLE IF NOT EXISTS crm_contacts (
   email_verified_at TEXT,
   unsubscribed_at TEXT,
   do_not_contact INTEGER DEFAULT 0,
+  email_check_status TEXT NOT NULL DEFAULT 'pending',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_contacts_company_id ON crm_contacts(company_id);
 CREATE INDEX IF NOT EXISTS idx_contacts_email_status ON crm_contacts(email_status);
+CREATE INDEX IF NOT EXISTS idx_contacts_email_check ON crm_contacts(email_check_status);
 
 -- Deals: one row per opportunity, kanban stage machine
 -- inquiry → sample_quoted → pi_sent → deposit_paid → won | lost.
@@ -960,3 +964,23 @@ CREATE TABLE IF NOT EXISTS crm_sequence_enrollments (
 
 CREATE INDEX IF NOT EXISTS idx_seq_enrollments_due
   ON crm_sequence_enrollments(status, next_due_at);
+
+-- 0036 邮箱/域名检测（CRM/email/emailcheck.txt + throwaway 的 DoH 思路）：
+-- domain_dns_checks 是按域名去重的 DoH 检测缓存（A/MX/SPF + 邮局指纹 +
+-- 免费/一次性邮箱识别），公司域名与联系人邮箱共用；结论回写
+-- crm_companies.domain_email_status / crm_contacts.email_check_status。
+CREATE TABLE IF NOT EXISTS domain_dns_checks (
+  domain TEXT PRIMARY KEY,
+  has_a_record INTEGER NOT NULL DEFAULT 0,
+  has_mx_record INTEGER NOT NULL DEFAULT 0,
+  has_spf_record INTEGER NOT NULL DEFAULT 0,
+  mx_provider TEXT,
+  mx_records_json TEXT,
+  is_free INTEGER NOT NULL DEFAULT 0,
+  is_disposable INTEGER NOT NULL DEFAULT 0,
+  email_verdict TEXT NOT NULL DEFAULT 'pending',
+  feedback_notes TEXT,
+  last_checked_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_domain_dns_verdict ON domain_dns_checks(email_verdict);

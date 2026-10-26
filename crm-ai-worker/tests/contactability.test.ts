@@ -55,12 +55,14 @@ async function makeDb() {
   db.exec(`
     CREATE TABLE crm_companies (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, domain TEXT UNIQUE,
-      do_not_contact INTEGER DEFAULT 0
+      do_not_contact INTEGER DEFAULT 0,
+      domain_email_status TEXT NOT NULL DEFAULT 'pending'
     );
     CREATE TABLE crm_contacts (
       id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
       full_name TEXT NOT NULL, email TEXT,
       email_status TEXT DEFAULT 'unknown', email_verified_at TEXT,
+      email_check_status TEXT NOT NULL DEFAULT 'pending',
       unsubscribed_at TEXT, do_not_contact INTEGER DEFAULT 0
     );
   `);
