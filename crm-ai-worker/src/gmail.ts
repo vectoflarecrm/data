@@ -108,8 +108,12 @@ export async function getAccessToken(
   secret: string,
   senderEmail: string,
   credentialType: "service_account" | "oauth_refresh" = "service_account",
+  /** Inbound sync reads need gmail.readonly instead of gmail.send; ignored
+   * for oauth_refresh (the consented refresh token governs its scopes). */
+  scopeOverride?: string,
 ): Promise<string> {
-  const cacheKey = `${credentialType}:${clientEmail}:${senderEmail}`;
+  const scope = scopeOverride?.trim() || GMAIL_SCOPE;
+  const cacheKey = `${credentialType}:${clientEmail}:${senderEmail}:${scope}`;
   const cached = tokenCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now() + TOKEN_SAFETY_WINDOW_MS) {
     return cached.token;
@@ -123,7 +127,7 @@ export async function getAccessToken(
     if (!clientId) {
       throw new Error("缺少 GMAIL_OAUTH_CLIENT_ID Secret：OAuth 令牌账号需要配套的 OAuth 客户端 ID（面板/secrets 页可写）");
     }
-    return await exchangeRefreshToken(clientEmail, secret, clientId, clientSecret);
+    return await exchangeRefreshToken(clientEmail, secret, clientId, clientSecret, scope);
   }
 
   const privateKeyPem = secret;
@@ -133,7 +137,7 @@ export async function getAccessToken(
     JSON.stringify({
       iss: clientEmail,
       sub: senderEmail, // domain-wide delegation impersonation
-      scope: GMAIL_SCOPE,
+      scope,
       aud: TOKEN_URL,
       iat: now,
       exp: now + 3600,
@@ -176,6 +180,7 @@ async function exchangeRefreshToken(
   refreshToken: string,
   clientId: string,
   clientSecret: string,
+  scope = GMAIL_SCOPE,
 ): Promise<string> {
   const resp = await fetch(TOKEN_URL, {
     method: "POST",
@@ -194,7 +199,7 @@ async function exchangeRefreshToken(
   const data = (await resp.json()) as { access_token?: string; expires_in?: number };
   if (!data.access_token) throw new Error(`OAuth refresh token 响应缺少 access_token（${mailbox}）`);
   const expiresAt = Date.now() + (data.expires_in ?? 3600) * 1000;
-  tokenCache.set(`oauth_refresh:${mailbox}:${mailbox}`, { token: data.access_token, expiresAt });
+  tokenCache.set(`oauth_refresh:${mailbox}:${mailbox}:${scope}`, { token: data.access_token, expiresAt });
   return data.access_token;
 }
 

@@ -27,6 +27,7 @@ import {
 import { cleanupExpiredChallenges } from "./auth/webauthn";
 import { runCampaignAutoAdvance } from "./campaigns";
 import { noteResearchEnriched, listOverdueTasks } from "./crm-hooks";
+import { syncInboundGmail } from "./crm-gmail-sync";
   import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, appendResearchSignals, appendResearchPersonas, appendResearchProfile, linkResearchFactsToContacts, hasCurrentResearchFacts, capResearchSourcesToBudget, readSavedResearchText, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, type ResearchPersonaEntry, type ResearchSolutionEntry, FACTS_PER_RUN_CAP } from "./research-run";
 
 export interface CustomerRow {
@@ -2793,6 +2794,14 @@ export default {
               .map((t) => `${t.due_date} ${t.company_name ?? "?"} — ${t.summary}`)
               .join("; "),
         );
+      }
+      // ⑦ Gmail 入站同步：空闲 tick 顺带拉取各品牌发件邮箱的收件箱，
+      // 把客户回复匹配成 CRM 时间线（email_received）。内部 fail-open：
+      // gmail.readonly 未授权 → 退避计数，绝不影响本 tick。
+      try {
+        await syncInboundGmail(env as unknown as import("./gmail").GmailEnv);
+      } catch (e) {
+        safeLog("warn", "[crm-gmail-sync] tick failed (fail-open)", e instanceof Error ? e.message : String(e));
       }
       return;
     }

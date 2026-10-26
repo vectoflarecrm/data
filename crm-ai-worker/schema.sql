@@ -831,6 +831,7 @@ CREATE TABLE IF NOT EXISTS crm_companies (
   lead_status TEXT DEFAULT 'new',
   merged_from_ids TEXT,
   chinese_remarks TEXT,
+  customer_since TEXT,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -856,6 +857,9 @@ CREATE INDEX IF NOT EXISTS idx_contacts_company_id ON crm_contacts(company_id);
 
 -- Deals: one row per opportunity, kanban stage machine
 -- inquiry → sample_quoted → pi_sent → deposit_paid → won | lost.
+-- position is fractional (REAL) so a drop between two cards always fits;
+-- won_at/customer_since + lost_reason carry the win/loss outcome, archived_at
+-- keeps finished deals out of the kanban without deleting history.
 CREATE TABLE IF NOT EXISTS crm_deals (
   id TEXT PRIMARY KEY,
   company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
@@ -864,6 +868,10 @@ CREATE TABLE IF NOT EXISTS crm_deals (
   amount REAL,
   incoterms TEXT,
   expected_close_date TEXT,
+  lost_reason TEXT,
+  won_at TEXT,
+  position REAL,
+  archived_at TEXT,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -888,3 +896,22 @@ CREATE TABLE IF NOT EXISTS crm_activities (
 
 CREATE INDEX IF NOT EXISTS idx_activities_company_id ON crm_activities(company_id);
 CREATE INDEX IF NOT EXISTS idx_activities_open_tasks ON crm_activities(is_completed, due_date);
+
+-- Gmail inbound sync (⑦): per-mailbox cursor + processed-message dedupe so
+-- overlapping cron ticks stay idempotent. See migrations/0033.
+CREATE TABLE IF NOT EXISTS crm_mail_sync (
+  mailbox TEXT PRIMARY KEY,
+  last_internal_date INTEGER NOT NULL DEFAULT 0,
+  last_run_at TEXT,
+  last_error TEXT,
+  error_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS crm_mail_seen (
+  mailbox TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  received_at TEXT,
+  PRIMARY KEY (mailbox, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_crm_mail_seen_mailbox ON crm_mail_seen(mailbox);

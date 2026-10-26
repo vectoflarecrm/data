@@ -77,7 +77,7 @@ async function makeDb() {
     CREATE TABLE crm_companies (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, domain TEXT UNIQUE, industry TEXT,
       country TEXT, tier TEXT DEFAULT 'unqualified', lead_status TEXT DEFAULT 'new',
-      merged_from_ids TEXT, chinese_remarks TEXT,
+      merged_from_ids TEXT, chinese_remarks TEXT, customer_since TEXT,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -90,7 +90,7 @@ async function makeDb() {
     CREATE TABLE crm_deals (
       id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
       title TEXT NOT NULL, stage TEXT DEFAULT 'inquiry', amount REAL, incoterms TEXT,
-      expected_close_date TEXT,
+      expected_close_date TEXT, lost_reason TEXT, won_at TEXT, position REAL, archived_at TEXT,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );

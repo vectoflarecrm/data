@@ -36,6 +36,8 @@ export interface CrmCompanyRow {
   lead_status: string;
   merged_from_ids: string | null;
   chinese_remarks: string | null;
+  /** Set the day the first deal was won — the company is a paying customer. */
+  customer_since: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -65,6 +67,14 @@ export interface CrmDealRow {
   amount: number | null;
   incoterms: string | null;
   expected_close_date: string | null;
+  /** Structured loss reason — only meaningful while stage === 'lost'. */
+  lost_reason: string | null;
+  /** Day the deal entered the 'won' stage (YYYY-MM-DD, powers the chart). */
+  won_at: string | null;
+  /** Fractional kanban order within a stage (drag & drop). */
+  position: number | null;
+  /** Set when the deal left the kanban without being deleted. */
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -104,6 +114,11 @@ const LEAD_STATUSES = [
 const ACTIVITY_TYPES = ["note", "task", "call", "meeting"] as const;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** UTC today as YYYY-MM-DD — the one date format the CRM layer accepts. */
+function todayStr(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
 class HttpError extends Error {
   status: number;
@@ -529,6 +544,68 @@ async function mergeCompanies(
   return jsonResponse({ company });
 }
 
+/* ── Contact merge（重复联系人去重，Atomic CRM 风格） ───────────────────── */
+
+async function mergeContacts(
+  request: Request,
+  env: AdminEnv,
+  auth: AdminAuthContext,
+): Promise<Response> {
+  const body = await readJsonBody(request);
+  const targetId = reqString(body.target_contact_id, "target_contact_id", 64);
+  const sourceId = reqString(body.source_contact_id, "source_contact_id", 64);
+  if (targetId === sourceId) throw new HttpError(400, "目标与来源不能是同一个联系人");
+
+  const target = await env.DB.prepare("SELECT * FROM crm_contacts WHERE id = ?1")
+    .bind(targetId)
+    .first<CrmContactRow>();
+  if (!target) throw new HttpError(404, "目标联系人不存在");
+  const source = await env.DB.prepare("SELECT * FROM crm_contacts WHERE id = ?1")
+    .bind(sourceId)
+    .first<CrmContactRow>();
+  if (!source) throw new HttpError(404, "来源联系人不存在");
+
+  const crossCompany = source.company_id !== target.company_id;
+  const summary = `合并重复联系人: 「${source.full_name}」并入「${target.full_name}」${crossCompany ? `（原属公司 ${source.company_id}）` : ""}`;
+
+  // ONE D1 batch (合并.txt): the target only takes what it is missing —
+  // its own non-null fields always win (COALESCE), is_primary escalates but
+  // never demotes (MAX) — then the timeline row and the source delete.
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE crm_contacts SET
+         job_title = COALESCE(job_title, ?2),
+         email = COALESCE(email, ?3),
+         whatsapp_or_phone = COALESCE(whatsapp_or_phone, ?4),
+         linkedin_url = COALESCE(linkedin_url, ?5),
+         is_primary = MAX(is_primary, ?6)
+       WHERE id = ?1`,
+    ).bind(
+      targetId,
+      source.job_title,
+      source.email,
+      source.whatsapp_or_phone,
+      source.linkedin_url,
+      source.is_primary,
+    ),
+    env.DB.prepare(
+      `INSERT INTO crm_activities (id, company_id, type, summary)
+       VALUES (?1, ?2, 'note', ?3)`,
+    ).bind(crypto.randomUUID(), target.company_id, summary),
+    env.DB.prepare("DELETE FROM crm_contacts WHERE id = ?1").bind(sourceId),
+  ]);
+
+  await auditAdminAction(env, request, auth, "MERGE_CRM_CONTACT", "crm_contact", targetId, {
+    target_contact_id: targetId,
+    source_contact_id: sourceId,
+    cross_company: crossCompany,
+  });
+  const contact = await env.DB.prepare("SELECT * FROM crm_contacts WHERE id = ?1")
+    .bind(targetId)
+    .first<CrmContactRow>();
+  return jsonResponse({ contact });
+}
+
 /* ── Contacts ───────────────────────────────────────────────────────────── */
 
 async function createContact(
@@ -628,11 +705,14 @@ async function deleteContact(env: AdminEnv, id: string): Promise<Response> {
 
 /* ── Deals ──────────────────────────────────────────────────────────────── */
 
-async function listDeals(env: AdminEnv): Promise<Response> {
+async function listDeals(env: AdminEnv, url: URL): Promise<Response> {
+  const archived = url.searchParams.get("archived") === "1";
+  const where = archived ? "d.archived_at IS NOT NULL" : "d.archived_at IS NULL";
   const rows = await env.DB.prepare(
     `SELECT d.*, c.name AS company_name
      FROM crm_deals d JOIN crm_companies c ON c.id = d.company_id
-     ORDER BY d.updated_at DESC LIMIT 500`,
+     WHERE ${where}
+     ORDER BY d.position ASC, d.created_at ASC LIMIT 500`,
   ).all<CrmDealRow & { company_name: string }>();
   return jsonResponse({ deals: rows.results });
 }
@@ -646,10 +726,15 @@ async function createDeal(
   const companyId = reqString(body.company_id, "company_id", 64);
   await requireCompany(env, companyId);
   const stage = body.stage === undefined ? "inquiry" : oneOf(body.stage, DEAL_STAGES, "stage");
+  const lostReason = optString(body.lost_reason, "lost_reason", 200);
+  if (lostReason && stage !== "lost") {
+    throw new HttpError(400, "只有输单商机才能填写输单原因");
+  }
   const id = crypto.randomUUID();
   await env.DB.prepare(
-    `INSERT INTO crm_deals (id, company_id, title, stage, amount, incoterms, expected_close_date)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+    `INSERT INTO crm_deals (id, company_id, title, stage, amount, incoterms, expected_close_date, lost_reason, won_at, position)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+       (SELECT IFNULL(MAX(d.position), 0) + 1 FROM crm_deals d WHERE d.stage = ?4))`,
   )
     .bind(
       id,
@@ -659,8 +744,33 @@ async function createDeal(
       optAmount(body.amount),
       optString(body.incoterms, "incoterms", 50),
       optDate(body.expected_close_date, "expected_close_date"),
+      lostReason,
+      stage === "won" ? todayStr() : null,
     )
     .run();
+  // A deal born in a terminal stage is already an outcome — record it the
+  // same way a stage move would (timeline + customer flip on won).
+  if (stage === "won") {
+    await markCompanyCustomer(env, companyId);
+    await env.DB.prepare(
+      `INSERT INTO crm_activities (id, company_id, deal_id, type, summary)
+       VALUES (?1, ?2, ?3, 'note', ?4)`,
+    )
+      .bind(crypto.randomUUID(), companyId, id, "商机直接以赢单创建 🎉，公司转正式客户")
+      .run();
+  } else if (stage === "lost") {
+    await env.DB.prepare(
+      `INSERT INTO crm_activities (id, company_id, deal_id, type, summary)
+       VALUES (?1, ?2, ?3, 'note', ?4)`,
+    )
+      .bind(
+        crypto.randomUUID(),
+        companyId,
+        id,
+        `商机以输单创建${lostReason ? `（原因: ${lostReason}）` : ""}`,
+      )
+      .run();
+  }
   await auditAdminAction(env, request, auth, "CREATE_CRM_DEAL", "crm_deal", id, {
     company_id: companyId,
   });
@@ -668,6 +778,19 @@ async function createDeal(
     .bind(id)
     .first<CrmDealRow>();
   return jsonResponse({ deal }, 201);
+}
+
+/** Won side effect (OpenCRM-style): the company becomes a paying customer on
+ * the day of its FIRST win — never overwritten by later wins, never touching
+ * a date an operator set deliberately. */
+async function markCompanyCustomer(env: AdminEnv, companyId: string): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE crm_companies
+     SET customer_since = ?1, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?2 AND customer_since IS NULL`,
+  )
+    .bind(todayStr(), companyId)
+    .run();
 }
 
 async function updateDeal(request: Request, env: AdminEnv, id: string): Promise<Response> {
@@ -680,27 +803,63 @@ async function updateDeal(request: Request, env: AdminEnv, id: string): Promise<
   let stageChangedTo: string | null = null;
   const sets: string[] = [];
   const binds: unknown[] = [];
+  // Placeholder numbering follows binds.length (NOT sets.length): some sets
+  // are literal (`lost_reason = NULL`) and would otherwise skew ?N — a value
+  // would bind to the wrong parameter and silently NULL a column.
   if ("title" in body) {
-    sets.push(`title = ?${sets.length + 2}`);
+    sets.push(`title = ?${binds.length + 2}`);
     binds.push(reqString(body.title, "title", 200));
   }
+  let newStage: string | null = null;
   if ("stage" in body) {
     const stage = oneOf(body.stage, DEAL_STAGES, "stage");
     if (stage !== existing.stage) stageChangedTo = stage;
-    sets.push(`stage = ?${sets.length + 2}`);
+    newStage = stage;
+    sets.push(`stage = ?${binds.length + 2}`);
     binds.push(stage);
   }
+  const finalStage = newStage ?? existing.stage;
+  let lostReason: string | null = null;
+  if ("lost_reason" in body) {
+    lostReason = optString(body.lost_reason, "lost_reason", 200);
+    if (lostReason && finalStage !== "lost") {
+      throw new HttpError(400, "只有输单商机才能填写输单原因");
+    }
+    sets.push(`lost_reason = ?${binds.length + 2}`);
+    binds.push(lostReason);
+  }
+  // Reopened deals must not keep a stale loss reason — the reason describes
+  // the loss, and a deal back in the pipeline is no longer lost. (An explicit
+  // lost_reason together with a non-lost stage is rejected above.)
+  if (stageChangedTo && stageChangedTo !== "lost") sets.push("lost_reason = NULL");
+  if (stageChangedTo === "won") {
+    sets.push(`won_at = ?${binds.length + 2}`);
+    binds.push(todayStr());
+  }
   if ("amount" in body) {
-    sets.push(`amount = ?${sets.length + 2}`);
+    sets.push(`amount = ?${binds.length + 2}`);
     binds.push(optAmount(body.amount));
   }
   if ("incoterms" in body) {
-    sets.push(`incoterms = ?${sets.length + 2}`);
+    sets.push(`incoterms = ?${binds.length + 2}`);
     binds.push(optString(body.incoterms, "incoterms", 50));
   }
   if ("expected_close_date" in body) {
-    sets.push(`expected_close_date = ?${sets.length + 2}`);
+    sets.push(`expected_close_date = ?${binds.length + 2}`);
     binds.push(optDate(body.expected_close_date, "expected_close_date"));
+  }
+  if ("position" in body) {
+    const pos = Number(body.position);
+    if (!Number.isFinite(pos) || pos < 0) throw new HttpError(400, "position 必须是非负数字");
+    sets.push(`position = ?${binds.length + 2}`);
+    binds.push(pos);
+  }
+  const archived = optBool(body.archived, "archived");
+  if (archived === true) {
+    sets.push(`archived_at = ?${binds.length + 2}`);
+    binds.push(todayStr());
+  } else if (archived === false) {
+    sets.push("archived_at = NULL");
   }
   if (!sets.length) throw new HttpError(400, "没有可更新字段");
   sets.push("updated_at = CURRENT_TIMESTAMP");
@@ -711,17 +870,22 @@ async function updateDeal(request: Request, env: AdminEnv, id: string): Promise<
   // Stage moves are timeline events — the panel timeline and the audit trail
   // should tell the same story.
   if (stageChangedTo) {
+    let summary: string;
+    if (stageChangedTo === "won") {
+      summary = `商机「${existing.title}」赢单 🎉（${existing.stage} → won），公司转正式客户`;
+    } else if (stageChangedTo === "lost") {
+      const reason = lostReason ?? null;
+      summary = `商机「${existing.title}」输单（${existing.stage} → lost）${reason ? `，原因: ${reason}` : ""}`;
+    } else {
+      summary = `商机「${existing.title}」阶段推进: ${existing.stage} → ${stageChangedTo}`;
+    }
     await env.DB.prepare(
       `INSERT INTO crm_activities (id, company_id, deal_id, type, summary)
        VALUES (?1, ?2, ?3, 'note', ?4)`,
     )
-      .bind(
-        crypto.randomUUID(),
-        existing.company_id,
-        id,
-        `商机「${existing.title}」阶段推进: ${existing.stage} → ${stageChangedTo}`,
-      )
+      .bind(crypto.randomUUID(), existing.company_id, id, summary)
       .run();
+    if (stageChangedTo === "won") await markCompanyCustomer(env, existing.company_id);
   }
   const deal = await env.DB.prepare("SELECT * FROM crm_deals WHERE id = ?1")
     .bind(id)
@@ -808,10 +972,23 @@ async function updateActivity(request: Request, env: AdminEnv, id: string): Prom
     .first<CrmActivityRow>();
   if (!existing) throw new HttpError(404, "动态不存在");
   const body = await readJsonBody(request);
+  const sets: string[] = [];
+  const binds: unknown[] = [];
   const isCompleted = optBool(body.is_completed, "is_completed");
-  if (isCompleted === null) throw new HttpError(400, "没有可更新字段");
-  await env.DB.prepare("UPDATE crm_activities SET is_completed = ?1 WHERE id = ?2")
-    .bind(isCompleted ? 1 : 0, id)
+  if (isCompleted !== null) {
+    sets.push(`is_completed = ?${sets.length + 2}`);
+    binds.push(isCompleted ? 1 : 0);
+  }
+  if ("due_date" in body) {
+    // Reschedule (panel「→明天」snooze). Dates only make sense on open loop
+    // items — a note/call row must stay a pure timeline entry.
+    if (existing.type !== "task") throw new HttpError(400, "due_date 只能用于任务");
+    sets.push(`due_date = ?${sets.length + 2}`);
+    binds.push(optDate(body.due_date, "due_date"));
+  }
+  if (!sets.length) throw new HttpError(400, "没有可更新字段");
+  await env.DB.prepare(`UPDATE crm_activities SET ${sets.join(", ")} WHERE id = ?1`)
+    .bind(id, ...binds)
     .run();
   const activity = await env.DB.prepare("SELECT * FROM crm_activities WHERE id = ?1")
     .bind(id)
@@ -828,6 +1005,385 @@ async function deleteActivity(env: AdminEnv, id: string): Promise<Response> {
   return jsonResponse({ ok: true });
 }
 
+/* ── Aggregate stats（面板统计卡 + 成交走势图） ─────────────────────────── */
+
+interface CrmStatsRow {
+  companies_total: number;
+  customers_won: number;
+  open_deals: number;
+  pipeline_amount: number;
+  /** Weighted forecast: open deals discounted by stage
+   * (inquiry 10% / sample_quoted 30% / pi_sent 50% / deposit_paid 80%). */
+  forecast_amount: number;
+  open_tasks: number;
+  overdue_tasks: number;
+}
+
+async function crmStats(env: AdminEnv): Promise<Response> {
+  const stats = await env.DB.prepare(
+    `SELECT
+      (SELECT COUNT(*) FROM crm_companies) AS companies_total,
+      (SELECT COUNT(*) FROM crm_companies WHERE customer_since IS NOT NULL) AS customers_won,
+      (SELECT COUNT(*) FROM crm_deals WHERE stage NOT IN ('won','lost') AND archived_at IS NULL) AS open_deals,
+      (SELECT IFNULL(SUM(amount), 0) FROM crm_deals WHERE stage NOT IN ('won','lost') AND archived_at IS NULL) AS pipeline_amount,
+      (SELECT IFNULL(SUM(amount * CASE stage WHEN 'inquiry' THEN 0.1 WHEN 'sample_quoted' THEN 0.3 WHEN 'pi_sent' THEN 0.5 ELSE 0.8 END), 0)
+        FROM crm_deals WHERE stage NOT IN ('won','lost') AND archived_at IS NULL) AS forecast_amount,
+      (SELECT COUNT(*) FROM crm_activities WHERE type = 'task' AND is_completed = 0) AS open_tasks,
+      (SELECT COUNT(*) FROM crm_activities WHERE type = 'task' AND is_completed = 0
+        AND due_date IS NOT NULL AND due_date < date('now')) AS overdue_tasks`,
+  ).first<CrmStatsRow>();
+  const won = await env.DB.prepare(
+    `SELECT strftime('%Y-%m', won_at) AS month, IFNULL(SUM(amount), 0) AS total
+     FROM crm_deals
+     WHERE stage = 'won' AND won_at IS NOT NULL AND won_at >= date('now', '-5 months', 'start of month')
+     GROUP BY month ORDER BY month`,
+  ).all<{ month: string; total: number }>();
+  return jsonResponse({ stats: stats ?? null, won_monthly: won.results });
+}
+
+/* ── CSV import（公司/联系人/商机，中英表头，自动去重） ─────────────────── */
+
+/** RFC4180-ish CSV parser: quoted cells, "" escapes, CR/LF/CRLF all fine.
+ * The BOM that Excel/Notepad prepend to UTF-8 exports is stripped. */
+export function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let quoted = false;
+  const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') {
+          cell += '"';
+          i++;
+        } else quoted = false;
+      } else cell += ch;
+    } else if (ch === '"') {
+      quoted = true;
+    } else if (ch === ",") {
+      row.push(cell);
+      cell = "";
+    } else if (ch === "\n") {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+    } else if (ch !== "\r") {
+      cell += ch;
+    }
+  }
+  if (cell !== "" || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+  // Blank lines (trailing newline etc.) are noise, not data.
+  return rows.filter((r) => r.some((c) => c.trim() !== ""));
+}
+
+const IMPORT_ENTITIES = ["companies", "contacts", "deals"] as const;
+type ImportEntity = (typeof IMPORT_ENTITIES)[number];
+
+/** Column aliases per entity — English and Chinese headers both accepted. */
+const IMPORT_HEADERS: Record<ImportEntity, Record<string, string>> = {
+  companies: {
+    name: "name", 名称: "name", 公司名称: "name", 公司: "name",
+    domain: "domain", 域名: "domain",
+    country: "country", 国家: "country",
+    industry: "industry", 行业: "industry",
+    tier: "tier", 分级: "tier",
+    chinese_remarks: "chinese_remarks", 备注: "chinese_remarks", 中文备注: "chinese_remarks",
+  },
+  contacts: {
+    company: "company", 公司: "company", 公司名称: "company", company_name: "company",
+    full_name: "full_name", 姓名: "full_name", 联系人: "full_name",
+    job_title: "job_title", 职务: "job_title", title: "job_title",
+    email: "email", 邮箱: "email",
+    whatsapp_or_phone: "whatsapp_or_phone", 电话: "whatsapp_or_phone", phone: "whatsapp_or_phone",
+    whatsapp: "whatsapp_or_phone", 手机: "whatsapp_or_phone",
+    linkedin_url: "linkedin_url", linkedin: "linkedin_url",
+    is_primary: "is_primary", 主联: "is_primary",
+  },
+  deals: {
+    company: "company", 公司: "company", 公司名称: "company", company_name: "company",
+    title: "title", 名称: "title", 商机名称: "title", 商机: "title",
+    stage: "stage", 阶段: "stage",
+    amount: "amount", 金额: "amount",
+    incoterms: "incoterms", 条款: "incoterms", 贸易条款: "incoterms",
+    expected_close_date: "expected_close_date", 预计成交: "expected_close_date",
+    预计成交日: "expected_close_date",
+    lost_reason: "lost_reason", 输单原因: "lost_reason",
+  },
+};
+
+interface ImportCompanyCache {
+  byName: Map<string, string>; // lowercased name → id
+  byDomain: Map<string, string>; // lowercased domain → id
+}
+
+async function loadCompanyCache(env: AdminEnv): Promise<ImportCompanyCache> {
+  const rows = await env.DB.prepare(
+    "SELECT id, name, domain FROM crm_companies LIMIT 20000",
+  ).all<{ id: string; name: string; domain: string | null }>();
+  const cache: ImportCompanyCache = { byName: new Map(), byDomain: new Map() };
+  for (const r of rows.results) {
+    cache.byName.set(r.name.toLowerCase(), r.id);
+    if (r.domain) cache.byDomain.set(r.domain.toLowerCase(), r.id);
+  }
+  return cache;
+}
+
+interface ImportResult {
+  created: number;
+  skipped: number;
+  errors: string[];
+}
+
+const IMPORT_ROW_LIMIT = 1000;
+
+async function importCrmCsv(
+  request: Request,
+  env: AdminEnv,
+  auth: AdminAuthContext,
+): Promise<Response> {
+  const body = await readJsonBody(request);
+  const entity = oneOf(body.entity, IMPORT_ENTITIES, "entity");
+  const csv = reqString(body.csv, "csv", 400_000);
+  const rows = parseCsv(csv);
+  if (rows.length < 2) throw new HttpError(400, "CSV 至少需要表头 + 一行数据");
+  if (rows.length - 1 > IMPORT_ROW_LIMIT) {
+    throw new HttpError(400, `CSV 最多 ${IMPORT_ROW_LIMIT} 行数据`);
+  }
+
+  const aliases = IMPORT_HEADERS[entity];
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  const keyByIndex = header.map((h) => aliases[h] ?? null);
+  const keys = new Set(keyByIndex.filter((k): k is string => k !== null));
+  const requireKey = (key: string, label: string) => {
+    if (!keys.has(key)) {
+      throw new HttpError(400, `缺少必需列「${label}」，可用表头: ${Object.keys(aliases).join(" / ")}`);
+    }
+  };
+  if (entity === "companies") requireKey("name", "名称");
+  else if (entity === "contacts") {
+    requireKey("full_name", "姓名");
+    requireKey("company", "公司");
+  } else {
+    requireKey("title", "名称");
+    requireKey("company", "公司");
+  }
+
+  const result: ImportResult = { created: 0, skipped: 0, errors: [] };
+  type CrmStatement = ReturnType<AdminEnv["DB"]["prepare"]>;
+  const statements: CrmStatement[] = [];
+  let companiesCreated = 0;
+  const companies = await loadCompanyCache(env);
+
+  const resolveCompany = (
+    rec: Record<string, string>,
+    rowIndex: number,
+  ): { id: string } | { error: string } => {
+    const name = (rec.company ?? "").trim();
+    const domain = (rec.domain ?? "").trim().toLowerCase();
+    if (!name && !domain) return { error: `第 ${rowIndex} 行: 缺少公司名称/域名` };
+    if (domain && companies.byDomain.has(domain)) return { id: companies.byDomain.get(domain)! };
+    if (name && companies.byName.has(name.toLowerCase())) return { id: companies.byName.get(name.toLowerCase())! };
+    // Auto-create the company (OpenCRM import behavior): contacts/deals rows
+    // name a company that does not exist yet — create it so the row imports.
+    const id = crypto.randomUUID();
+    const companyName = name || domain;
+    if (name) companies.byName.set(name.toLowerCase(), id);
+    if (domain) companies.byDomain.set(domain, id);
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'new')`,
+      ).bind(
+        id,
+        companyName,
+        domain || null,
+        (rec.industry ?? "").trim() || null,
+        (rec.country ?? "").trim() || null,
+        "unqualified",
+      ),
+    );
+    companiesCreated++;
+    return { id };
+  };
+
+  if (entity === "companies") {
+    for (let i = 1; i < rows.length; i++) {
+      const rec: Record<string, string> = {};
+      for (let c = 0; c < keyByIndex.length; c++) {
+        if (keyByIndex[c]) rec[keyByIndex[c]!] = rows[i][c] ?? "";
+      }
+      const rowIndex = i + 1;
+      const name = (rec.name ?? "").trim();
+      const domain = (rec.domain ?? "").trim().toLowerCase();
+      if (!name) {
+        result.errors.push(`第 ${rowIndex} 行: 缺少公司名称`);
+        continue;
+      }
+      if (companies.byName.has(name.toLowerCase()) || (domain && companies.byDomain.has(domain))) {
+        result.skipped++;
+        continue;
+      }
+      const tierRaw = (rec.tier ?? "").trim();
+      const tier = (TIERS as readonly string[]).includes(tierRaw) ? tierRaw : "unqualified";
+      const id = crypto.randomUUID();
+      companies.byName.set(name.toLowerCase(), id);
+      if (domain) companies.byDomain.set(domain, id);
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status, chinese_remarks)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'new', ?7)`,
+        ).bind(
+          id,
+          name,
+          domain || null,
+          (rec.industry ?? "").trim() || null,
+          (rec.country ?? "").trim() || null,
+          tier,
+          (rec.chinese_remarks ?? "").trim() || null,
+        ),
+      );
+      result.created++;
+    }
+  } else if (entity === "contacts") {
+    // Dedupe key: same company + same email (when present).
+    const existing = await env.DB.prepare(
+      "SELECT company_id, LOWER(IFNULL(email, '')) AS lemail FROM crm_contacts LIMIT 50000",
+    ).all<{ company_id: string; lemail: string }>();
+    const seen = new Set(existing.results.map((r) => `${r.company_id}|${r.lemail}`));
+    for (let i = 1; i < rows.length; i++) {
+      const rec: Record<string, string> = {};
+      for (let c = 0; c < keyByIndex.length; c++) {
+        if (keyByIndex[c]) rec[keyByIndex[c]!] = rows[i][c] ?? "";
+      }
+      const rowIndex = i + 1;
+      const fullName = (rec.full_name ?? "").trim();
+      if (!fullName) {
+        result.errors.push(`第 ${rowIndex} 行: 缺少联系人姓名`);
+        continue;
+      }
+      const resolved = resolveCompany(rec, rowIndex);
+      if ("error" in resolved) {
+        result.errors.push(resolved.error);
+        continue;
+      }
+      const email = (rec.email ?? "").trim().toLowerCase();
+      if (email && seen.has(`${resolved.id}|${email}`)) {
+        result.skipped++;
+        continue;
+      }
+      if (email) seen.add(`${resolved.id}|${email}`);
+      const isPrimary = ["1", "true", "是", "y", "yes"].includes((rec.is_primary ?? "").trim().toLowerCase())
+        ? 1
+        : 0;
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO crm_contacts (id, company_id, full_name, job_title, email, whatsapp_or_phone, linkedin_url, is_primary)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+        ).bind(
+          crypto.randomUUID(),
+          resolved.id,
+          fullName,
+          (rec.job_title ?? "").trim() || null,
+          (rec.email ?? "").trim() || null,
+          (rec.whatsapp_or_phone ?? "").trim() || null,
+          (rec.linkedin_url ?? "").trim() || null,
+          isPrimary,
+        ),
+      );
+      result.created++;
+    }
+  } else {
+    // deals: per-stage position counters keep the imported kanban ordered.
+    const maxPos = new Map<string, number>();
+    const posRows = await env.DB.prepare(
+      "SELECT stage, MAX(position) AS m FROM crm_deals GROUP BY stage",
+    ).all<{ stage: string; m: number | null }>();
+    for (const r of posRows.results) maxPos.set(r.stage, r.m ?? 0);
+    for (let i = 1; i < rows.length; i++) {
+      const rec: Record<string, string> = {};
+      for (let c = 0; c < keyByIndex.length; c++) {
+        if (keyByIndex[c]) rec[keyByIndex[c]!] = rows[i][c] ?? "";
+      }
+      const rowIndex = i + 1;
+      const title = (rec.title ?? "").trim();
+      if (!title) {
+        result.errors.push(`第 ${rowIndex} 行: 缺少商机名称`);
+        continue;
+      }
+      const resolved = resolveCompany(rec, rowIndex);
+      if ("error" in resolved) {
+        result.errors.push(resolved.error);
+        continue;
+      }
+      const stageRaw = (rec.stage ?? "").trim();
+      const stage = (DEAL_STAGES as readonly string[]).includes(stageRaw) ? stageRaw : "inquiry";
+      const amountRaw = (rec.amount ?? "").trim();
+      const amountNum = Number(amountRaw.replace(/[$,\s]/g, ""));
+      const amount = amountRaw && Number.isFinite(amountNum) ? amountNum : null;
+      const dateRaw = (rec.expected_close_date ?? "").trim();
+      const closeDate = DATE_RE.test(dateRaw) ? dateRaw : null;
+      const lostReason = stage === "lost" ? (rec.lost_reason ?? "").trim() || null : null;
+      const pos = (maxPos.get(stage) ?? 0) + 1;
+      maxPos.set(stage, pos);
+      const dealId = crypto.randomUUID();
+      const statementsDeal = [
+        env.DB.prepare(
+          `INSERT INTO crm_deals (id, company_id, title, stage, amount, incoterms, expected_close_date, lost_reason, won_at, position)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
+        ).bind(
+          dealId,
+          resolved.id,
+          title,
+          stage,
+          amount,
+          (rec.incoterms ?? "").trim() || null,
+          closeDate,
+          lostReason,
+          stage === "won" ? todayStr() : null,
+          pos,
+        ),
+      ];
+      if (stage === "won") {
+        statementsDeal.push(
+          env.DB.prepare(
+            `UPDATE crm_companies SET customer_since = ?1, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?2 AND customer_since IS NULL`,
+          ).bind(todayStr(), resolved.id),
+        );
+      }
+      statements.push(...statementsDeal);
+      result.created++;
+    }
+  }
+
+  // One chunked batch per 50 statements — a single mega-batch would exceed
+  // D1's per-call statement budget on large imports.
+  for (let i = 0; i < statements.length; i += 50) {
+    await env.DB.batch(statements.slice(i, i + 50));
+  }
+
+  await auditAdminAction(env, request, auth, "CRM_CSV_IMPORT", `crm_${entity}`, null, {
+    rows: rows.length - 1,
+    created: result.created,
+    skipped: result.skipped,
+    errors: result.errors.length,
+  });
+  return jsonResponse({
+    created: result.created,
+    companies_created: companiesCreated,
+    skipped: result.skipped,
+    error_total: result.errors.length,
+    errors: result.errors.slice(0, 20),
+  });
+}
+
+
 /* ── Router ─────────────────────────────────────────────────────────────── */
 
 export async function handleCrmApi(
@@ -842,7 +1398,11 @@ export async function handleCrmApi(
     const id = parts[4] ?? "";
     const method = request.method;
 
-    if (resource === "companies") {
+    if (resource === "stats") {
+      if (method === "GET") return await crmStats(env);
+    } else if (resource === "import") {
+      if (method === "POST") return await importCrmCsv(request, env, auth);
+    } else if (resource === "companies") {
       if (!id && method === "GET") return await listCompanies(url, env);
       if (!id && method === "POST") return await createCompany(request, env, auth);
       if (id === "promote" && method === "POST") return await promoteLead(request, env, auth);
@@ -851,11 +1411,12 @@ export async function handleCrmApi(
       if (id && method === "PATCH") return await updateCompany(request, env, auth, id);
       if (id && method === "DELETE") return await deleteCompany(request, env, auth, id);
     } else if (resource === "contacts") {
+      if (id === "merge" && method === "POST") return await mergeContacts(request, env, auth);
       if (!id && method === "POST") return await createContact(request, env, auth);
       if (id && method === "PATCH") return await updateContact(request, env, id);
       if (id && method === "DELETE") return await deleteContact(env, id);
     } else if (resource === "deals") {
-      if (!id && method === "GET") return await listDeals(env);
+      if (!id && method === "GET") return await listDeals(env, url);
       if (!id && method === "POST") return await createDeal(request, env, auth);
       if (id && method === "PATCH") return await updateDeal(request, env, id);
       if (id && method === "DELETE") return await deleteDeal(request, env, auth, id);

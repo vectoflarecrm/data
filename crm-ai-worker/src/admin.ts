@@ -5531,16 +5531,32 @@ th{background:#f8fafc;font-weight:600;white-space:nowrap}
 .kcard[draggable="true"]{cursor:grab}
 .kcard.dragging{opacity:.45}
 .kcol.dragover{outline:2px dashed #0f766e;outline-offset:-4px;background:#f0fdfa}
+.b-cust{background:#dcfce7;color:#166534}
+tr.grp td{background:#f0fdfa;font-weight:700;color:#0f766e;font-size:12px;padding:6px 8px}
+tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;padding:6px 8px}
+.chart{display:flex;align-items:flex-end;gap:10px;height:130px;padding:24px 6px 0}
+.bar-w{flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:100%;min-width:0}
+.bar{position:relative;background:#0f766e;border-radius:4px 4px 0 0;min-height:2px}
+.bar .v{position:absolute;top:-20px;left:50%;transform:translateX(-50%);font-size:11px;color:#0f766e;white-space:nowrap;font-weight:700}
+.bar-l{font-size:11px;color:#6b7280;text-align:center;margin-top:4px}
 @media(max-width:700px){.top{flex-direction:column}.grid2{grid-template-columns:1fr}}
 </style></head><body>
 <header class="top"><h1>🎯 CRM 销售作战室</h1><div><a href="/admin">← 客户管理</a>&nbsp;&nbsp;<a href="/admin/outreach">📧 开发信</a>&nbsp;&nbsp;<form method="post" action="/admin/logout"><button type="submit">退出登录</button></form></div></header>
 <main class="wrap">
 <div class="stats">
 <div class="stat-card"><div class="stat-value" id="stCompanies">–</div><div class="stat-label">客户公司</div></div>
+<div class="stat-card"><div class="stat-value" id="stCustomersWon">–</div><div class="stat-label">成交客户</div></div>
 <div class="stat-card"><div class="stat-value" id="stOpenDeals">–</div><div class="stat-label">进行中商机</div></div>
 <div class="stat-card"><div class="stat-value" id="stPipeline">–</div><div class="stat-label">管道金额（进行中）</div></div>
+<div class="stat-card"><div class="stat-value" id="stForecast">–</div><div class="stat-label">加权预测</div></div>
 <div class="stat-card"><div class="stat-value" id="stTasks">–</div><div class="stat-label">待办任务</div></div>
 <div class="stat-card"><div class="stat-value" id="stOverdue">–</div><div class="stat-label">逾期任务</div></div>
+</div>
+
+<div class="panel">
+<div class="sec-head"><h2>📈 成交走势（近 6 个月）</h2></div>
+<p class="hint">每月赢单商机的金额合计（按赢单日期 won_at）。加权预测 = 进行中商机金额按阶段折算：询盘 10% · 样品报价 30% · PI 已发 50% · 定金到账 80%。</p>
+<div class="chart" id="wonChart"></div>
 </div>
 
 <div class="panel">
@@ -5554,14 +5570,30 @@ th{background:#f8fafc;font-weight:600;white-space:nowrap}
 
 <div class="panel">
 <div class="sec-head"><h2>📊 商机看板</h2><button class="btn btn-p" id="dealNew">➕ 新建商机</button></div>
-<p class="hint">阶段流转：询盘 → 样品报价 → PI 已发 → 定金到账 → 赢单 / 输单。用卡片上的下拉框切换阶段（会记入公司时间线），赢/输单后卡片归档到对应列。</p>
+<p class="hint">阶段流转：询盘 → 样品报价 → PI 已发 → 定金到账 → 赢单 / 输单。拖拽卡片可换阶段、也可在列内排序；输单时会询问输单原因，赢单后公司自动转为成交客户。每列标题右侧是商机数与金额小计。</p>
 <div class="kanban" id="kanban"></div>
 </div>
 
 <div class="panel">
+<div class="sec-head"><h2>🗄 已归档商机</h2><button class="btn btn-s" id="archToggle">展开</button></div>
+<div id="archBody" style="display:none">
+<p class="hint">赢单/输单结案后的商机点卡片上的「归档」让它离开看板；这里可恢复或彻底删除（时间线记录不受影响）。</p>
+<table><thead><tr><th>名称</th><th>公司</th><th>阶段</th><th>金额</th><th>归档日</th><th>操作</th></tr></thead><tbody id="archRows"></tbody></table>
+</div>
+</div>
+
+<div class="panel">
 <h2>✅ 待办任务</h2>
-<p class="hint">公司时间线里 type=task 的未完成事项，按到期日排序。完成后自动从列表消失（时间线仍保留记录）。</p>
+<p class="hint">公司时间线里 type=task 的未完成事项。按到期日分组：逾期 / 今天 / 明天 / 未来 7 天 / 更晚 / 无期限。可用「→明天」一键顺延，逾期任务红色高亮。</p>
 <table><thead><tr><th>到期日</th><th>公司</th><th>任务</th><th>操作</th></tr></thead><tbody id="taskRows"></tbody></table>
+</div>
+
+<div class="panel">
+<div class="sec-head"><h2>📥 CSV 导入</h2></div>
+<p class="hint">支持公司 / 联系人 / 商机三种实体。表头可用中文或英文（公司导入：名称、域名、国家、行业、分级、备注；联系人导入：公司、姓名、职务、邮箱、电话、LinkedIn、主联；商机导入：公司、名称、阶段、金额、条款、预计成交、输单原因）。公司按名称/域名自动去重；联系人和商机的公司不存在时自动创建；未知阶段回落到询盘。</p>
+<div class="toolbar"><select id="impEntity"><option value="companies">导入公司</option><option value="contacts">导入联系人</option><option value="deals">导入商机</option></select><input type="file" id="impFile" accept=".csv,text/csv,text/plain"><button class="btn btn-p" id="impBtn">开始导入</button></div>
+<div class="f"><textarea id="impCsv" placeholder="选择上面的文件，或把 CSV 内容（表头 + 数据行）直接粘贴到这里…"></textarea></div>
+<div class="hint" id="impMsg"></div>
 </div>
 </main>
 
@@ -5597,12 +5629,12 @@ th{background:#f8fafc;font-weight:600;white-space:nowrap}
 <script>
 (function(){
 'use strict';
-var STATE={companies:[],total:0,deals:[],tasks:[]};
+var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[]};
 var STAGES=['inquiry','sample_quoted','pi_sent','deposit_paid','won','lost'];
 var STAGE_L={inquiry:'询盘',sample_quoted:'样品报价',pi_sent:'PI 已发',deposit_paid:'定金到账',won:'赢单',lost:'输单'};
 var TIER_L={A:'A级',B:'B级',C:'C级',VIP:'VIP',unqualified:'未分级'};
 var STATUS_L={new:'新线索',enriched:'已富化',contacted:'已联系',qualified:'已验证',disqualified:'已淘汰'};
-var TYPE_L={note:'备注',manual_note:'备注',task:'任务',call:'通话',meeting:'会议',lead_promoted:'线索提升',company_merged:'公司合并'};
+var TYPE_L={note:'备注',manual_note:'备注',task:'任务',call:'通话',meeting:'会议',lead_promoted:'线索提升',company_merged:'公司合并',cold_email_sent:'开发信已发',ai_enrichment:'AI 调研',email_received:'收到邮件'};
 
 function esc(v){return String(v===null||v===undefined?'':v).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function $(id){return document.getElementById(id);}
@@ -5634,7 +5666,7 @@ function renderCompanies(){
   var rows='';
   for(var i=0;i<STATE.companies.length;i++){
     var c=STATE.companies[i];
-    rows+='<tr><td><strong>'+esc(c.name)+'</strong><div class="hint" style="margin:0">'+esc(c.id)+'</div></td><td>'+esc(c.country||'—')+'</td><td>'+tierBadge(c.tier)+'</td><td>'+statusBadge(c.lead_status)+'</td><td>'+esc(c.domain||'—')+'</td><td>'+Number(c.open_deals||0)+'</td><td>'+Number(c.open_tasks||0)+'</td><td><button class="btn btn-p btn-xs" data-act="detail" data-id="'+esc(c.id)+'">详情</button> <button class="btn btn-d btn-xs" data-act="delCo" data-id="'+esc(c.id)+'">删除</button></td></tr>';
+    rows+='<tr><td><strong>'+esc(c.name)+'</strong><div class="hint" style="margin:0">'+esc(c.id)+'</div></td><td>'+esc(c.country||'—')+'</td><td>'+tierBadge(c.tier)+'</td><td>'+statusBadge(c.lead_status)+(c.customer_since?' <span class="badge b-cust" title="自 '+esc(c.customer_since)+' 起成交">客户</span>':'')+'</td><td>'+esc(c.domain||'—')+'</td><td>'+Number(c.open_deals||0)+'</td><td>'+Number(c.open_tasks||0)+'</td><td><button class="btn btn-p btn-xs" data-act="detail" data-id="'+esc(c.id)+'">详情</button> <button class="btn btn-d btn-xs" data-act="delCo" data-id="'+esc(c.id)+'">删除</button></td></tr>';
   }
   $('coRows').innerHTML=rows||'<tr><td colspan="8" class="hint">暂无公司 — 先从下面的「提升线索」开始，或点右上角「新建公司」。</td></tr>';
   $('coHint').textContent='共 '+STATE.total+' 家公司'+(STATE.total>STATE.companies.length?'（当前显示前 '+STATE.companies.length+' 家）':'');
@@ -5642,66 +5674,112 @@ function renderCompanies(){
 function loadDeals(){
   return api('/admin/api/crm/deals').then(function(b){STATE.deals=b.deals||[];renderKanban();});
 }
+function loadArchived(){
+  return api('/admin/api/crm/deals?archived=1').then(function(b){
+    var rows='',list=b.deals||[];
+    for(var i=0;i<list.length;i++){
+      var d=list[i];
+      rows+='<tr><td>'+esc(d.title)+(d.lost_reason?'<div class="od" style="font-size:11px">✗ '+esc(d.lost_reason)+'</div>':'')+'</td><td>'+esc(d.company_name)+'</td><td>'+STAGE_L[d.stage]+'</td><td>'+fmtAmt(d.amount)+'</td><td>'+esc(d.archived_at||'—')+'</td><td><button class="btn btn-p btn-xs" data-act="restoreDeal" data-id="'+esc(d.id)+'">恢复</button> <button class="btn btn-d btn-xs" data-act="delArch" data-id="'+esc(d.id)+'">删除</button></td></tr>';
+    }
+    $('archRows').innerHTML=rows||'<tr><td colspan="6" class="hint">暂无已归档商机。</td></tr>';
+  });
+}
 function renderKanban(){
   var html='';
   for(var s=0;s<STAGES.length;s++){
     var st=STAGES[s];
-    html+='<div class="kcol" data-stage="'+st+'"><h3>'+STAGE_L[st]+'<span>'+stageCount(st)+'</span></h3>';
+    html+='<div class="kcol" data-stage="'+st+'"><h3>'+STAGE_L[st]+'<span>'+stageCount(st)+' · '+fmtAmt(stageSum(st))+'</span></h3>';
     for(var i=0;i<STATE.deals.length;i++){
       var d=STATE.deals[i];
       if(d.stage!==st)continue;
-      html+='<div class="kcard" data-deal="'+esc(d.id)+'" draggable="true"><div class="t">'+esc(d.title)+'</div><div class="c">'+esc(d.company_name)+'</div><div class="amt">'+fmtAmt(d.amount)+'</div><select data-deal="'+esc(d.id)+'">';
+      var pos=d.position===null||d.position===undefined?(i+1):Number(d.position);
+      html+='<div class="kcard" data-deal="'+esc(d.id)+'" data-pos="'+pos+'" draggable="true"><div class="t">'+esc(d.title)+'</div><div class="c">'+esc(d.company_name)+'</div><div class="amt">'+fmtAmt(d.amount)+'</div>';
+      if(d.lost_reason)html+='<div class="od" style="font-size:11px;margin:2px 0">✗ '+esc(d.lost_reason)+'</div>';
+      html+='<select data-deal="'+esc(d.id)+'">';
       for(var j=0;j<STAGES.length;j++){html+='<option value="'+STAGES[j]+'"'+(STAGES[j]===d.stage?' selected':'')+'>'+STAGE_L[STAGES[j]]+'</option>';}
-      html+='</select> <button class="btn btn-d btn-xs" data-act="delDeal" data-id="'+esc(d.id)+'">删</button></div>';
+      html+='</select> '+(d.stage==='won'||d.stage==='lost'?'<button class="btn btn-s btn-xs" data-act="archDeal" data-id="'+esc(d.id)+'">归档</button> ':'')+'<button class="btn btn-d btn-xs" data-act="delDeal" data-id="'+esc(d.id)+'">删</button></div>';
     }
     html+='</div>';
   }
   $('kanban').innerHTML=html;
 }
 function stageCount(st){var n=0;for(var i=0;i<STATE.deals.length;i++){if(STATE.deals[i].stage===st)n++;}return n;}
+function stageSum(st){var n=0;for(var i=0;i<STATE.deals.length;i++){if(STATE.deals[i].stage===st)n+=Number(STATE.deals[i].amount||0);}return n;}
 function loadTasks(){
   return api('/admin/api/crm/activities').then(function(b){STATE.tasks=b.activities||[];renderTasks();});
 }
 function renderTasks(){
-  var today=new Date().toISOString().slice(0,10);
-  var rows='';
+  var t=new Date();
+  var tstr=t.toISOString().slice(0,10);
+  var tm=new Date(t.getTime()+86400000).toISOString().slice(0,10);
+  var wk=new Date(t.getTime()+7*86400000).toISOString().slice(0,10);
+  var g={overdue:[],today:[],tomorrow:[],week:[],later:[],none:[]};
   for(var i=0;i<STATE.tasks.length;i++){
     var a=STATE.tasks[i];
-    var od=a.due_date&&a.due_date<today;
-    var days=od?Math.round((new Date(today)-new Date(a.due_date))/86400000):0;
-    var dueCell=od?'<span class="od">'+esc(a.due_date)+'</span> <span class="od">逾期'+days+'天</span>':esc(a.due_date||'无期限');
-    rows+='<tr><td>'+dueCell+'</td><td>'+esc(a.company_name)+'</td><td>'+esc(a.summary)+'</td><td><button class="btn btn-p btn-xs" data-act="doneTask" data-id="'+esc(a.id)+'">✓ 完成</button> <button class="btn btn-s btn-xs" data-act="delTask" data-id="'+esc(a.id)+'">删</button></td></tr>';
+    if(!a.due_date)g.none.push(a);
+    else if(a.due_date<tstr)g.overdue.push(a);
+    else if(a.due_date===tstr)g.today.push(a);
+    else if(a.due_date===tm)g.tomorrow.push(a);
+    else if(a.due_date<=wk)g.week.push(a);
+    else g.later.push(a);
+  }
+  var rows='';
+  var groups=[['overdue','🔴 逾期',true],['today','📌 今天',false],['tomorrow','Tomorrow 明天',false],['week','🗓 未来 7 天',false],['later','⏳ 更晚',false],['none','📭 无期限',false]];
+  for(var k=0;k<groups.length;k++){
+    var key=groups[k][0],label=groups[k][1],od=groups[k][2];
+    var list=g[key];
+    if(!list.length)continue;
+    rows+='<tr class="'+(od?'grp-od':'grp')+'"><td colspan="4">'+label+'（'+list.length+'）</td></tr>';
+    for(var j=0;j<list.length;j++){
+      var a2=list[j];
+      var isOd=a2.due_date&&a2.due_date<tstr;
+      var days=isOd?Math.round((new Date(tstr)-new Date(a2.due_date))/86400000):0;
+      var dueCell=isOd?'<span class="od">'+esc(a2.due_date)+'</span> <span class="od">逾期'+days+'天</span>':esc(a2.due_date||'—');
+      rows+='<tr><td>'+dueCell+'</td><td>'+esc(a2.company_name)+'</td><td>'+esc(a2.summary)+'</td><td><button class="btn btn-p btn-xs" data-act="doneTask" data-id="'+esc(a2.id)+'">✓ 完成</button> <button class="btn btn-s btn-xs" data-act="snoozeTask" data-id="'+esc(a2.id)+'">→明天</button> <button class="btn btn-s btn-xs" data-act="delTask" data-id="'+esc(a2.id)+'">删</button></td></tr>';
+    }
   }
   $('taskRows').innerHTML=rows||'<tr><td colspan="4" class="hint">暂无待办任务 🎉</td></tr>';
 }
 function renderStats(){
-  var open=0,pipe=0,won=0,od=0;
-  var today=new Date().toISOString().slice(0,10);
-  for(var i=0;i<STATE.deals.length;i++){
-    var d=STATE.deals[i];
-    if(d.stage==='won'){won++;continue;}
-    if(d.stage==='lost')continue;
-    open++;pipe+=Number(d.amount||0);
+  var s=STATE.stats||{};
+  $('stCompanies').textContent=s.companies_total!==undefined?Number(s.companies_total):STATE.total;
+  $('stCustomersWon').textContent=s.customers_won!==undefined?Number(s.customers_won):'–';
+  $('stOpenDeals').textContent=s.open_deals!==undefined?Number(s.open_deals):'–';
+  $('stPipeline').textContent='$'+Number(s.pipeline_amount||0).toLocaleString();
+  $('stForecast').textContent='$'+Number(s.forecast_amount||0).toLocaleString();
+  $('stTasks').textContent=s.open_tasks!==undefined?Number(s.open_tasks):STATE.tasks.length;
+  $('stOverdue').textContent=s.overdue_tasks!==undefined?Number(s.overdue_tasks):'–';
+  $('stOverdue').style.color=Number(s.overdue_tasks)>0?'#dc2626':'';
+}
+function loadStats(){
+  return api('/admin/api/crm/stats').then(function(b){STATE.stats=b.stats||null;STATE.won=b.won_monthly||[];renderStats();renderChart();});
+}
+function renderChart(){
+  var el=$('wonChart');if(!el)return;
+  var map={};for(var i=0;i<STATE.won.length;i++){map[STATE.won[i].month]=Number(STATE.won[i].total||0);}
+  var now=new Date(),max=0,bars=[];
+  for(var m=5;m>=0;m--){
+    var d=new Date(now.getFullYear(),now.getMonth()-m,1);
+    var key=('0000'+d.getFullYear()).slice(-4)+'-'+('00'+(d.getMonth()+1)).slice(-2);
+    var v=map[key]||0;if(v>max)max=v;
+    bars.push({key:key,v:v});
   }
-  for(var k=0;k<STATE.tasks.length;k++){
-    if(STATE.tasks[k].due_date&&STATE.tasks[k].due_date<today)od++;
+  var h='';
+  for(var k=0;k<bars.length;k++){
+    var pct=max>0?Math.round(bars[k].v/max*100):0;
+    h+='<div class="bar-w"><div class="bar" style="height:'+Math.max(pct,2)+'%"><span class="v">'+(bars[k].v?'$'+bars[k].v.toLocaleString():'')+'</span></div><div class="bar-l">'+bars[k].key.slice(2)+'</div></div>';
   }
-  $('stCompanies').textContent=STATE.total;
-  $('stOpenDeals').textContent=open;
-  $('stPipeline').textContent='$'+pipe.toLocaleString();
-  $('stTasks').textContent=STATE.tasks.length;
-  $('stOverdue').textContent=od;
-  $('stOverdue').style.color=od>0?'#dc2626':'';
+  el.innerHTML=h;
 }
 function loadAll(){
-  return Promise.all([loadCompanies(),loadDeals(),loadTasks()]).then(renderStats).catch(function(e){toast(e.message,true);});
+  return Promise.all([loadCompanies(),loadDeals(),loadTasks(),loadStats()]).catch(function(e){toast(e.message,true);});
 }
 
 /* ── 公司详情 ───────────────────────────────────────────── */
 function openDetail(id){
   api('/admin/api/crm/companies/'+encodeURIComponent(id)).then(function(b){
     var c=b.company,contacts=b.contacts||[],deals=b.deals||[],acts=b.activities||[];
-    var h='<h3>'+esc(c.name)+' '+tierBadge(c.tier)+' '+statusBadge(c.lead_status)+'</h3>';
+    var h='<h3>'+esc(c.name)+' '+tierBadge(c.tier)+' '+statusBadge(c.lead_status)+(c.customer_since?' <span class="badge b-cust">正式客户 · '+esc(c.customer_since)+' 起</span>':'')+'</h3>';
     h+='<p class="hint" style="margin:0 0 10px">ID '+esc(c.id)+' · '+esc(c.domain||'无域名')+' · '+esc(c.country||'国家未知')+' · '+esc(c.industry||'行业未知')+(c.merged_from_ids?' · 已并入来源: '+esc(c.merged_from_ids):'')+'</p>';
     h+='<div class="grid2 f"><div><label>分级</label><select id="dTier">';
     ['A','B','C','VIP','unqualified'].forEach(function(t){h+='<option value="'+t+'"'+(t===c.tier?' selected':'')+'>'+TIER_L[t]+'</option>';});
@@ -5718,10 +5796,18 @@ function openDetail(id){
     h+='</tbody></table>';
     h+='<div class="grid2 f"><div><label>新联系人姓名 *</label><input id="dcName"></div><div><label>职务</label><input id="dcTitle"></div><div><label>邮箱</label><input id="dcEmail"></div><div><label>电话/WhatsApp</label><input id="dcPhone"></div></div>';
     h+='<button class="btn" data-act="addContact" data-id="'+esc(c.id)+'" style="margin-top:8px">➕ 添加联系人</button>';
-    h+='<h2 style="font-size:15px;margin:16px 0 8px">💰 商机（'+deals.length+'）</h2><table><thead><tr><th>名称</th><th>阶段</th><th>金额</th><th>预计成交</th><th>操作</th></tr></thead><tbody>';
+    if(contacts.length>1){
+      h+='<div class="toolbar" style="margin-top:10px"><span class="hint" style="margin:0">🔀 合并重复联系人:</span><select id="cmSrc">';
+      for(var n=0;n<contacts.length;n++){h+='<option value="'+esc(contacts[n].id)+'">'+esc(contacts[n].full_name)+'</option>';}
+      h+='</select><span class="hint" style="margin:0">并入 →</span><select id="cmTgt">';
+      for(var n2=1;n2<contacts.length;n2++){h+='<option value="'+esc(contacts[n2].id)+'">'+esc(contacts[n2].full_name)+'</option>';}
+      h+='</select><button class="btn btn-d" data-act="mergeContact" data-id="'+esc(c.id)+'">合并</button></div>';
+      h+='<p class="hint">来源联系人的姓名保留、缺失字段（职务/邮箱/电话/LinkedIn）补到目标联系人，来源被删除，动作记入时间线。</p>';
+    }
+    h+='<h2 style="font-size:15px;margin:16px 0 8px">💰 商机（'+deals.length+'）</h2><table><thead><tr><th>名称</th><th>阶段</th><th>金额</th><th>预计成交</th><th>状态</th><th>操作</th></tr></thead><tbody>';
     for(var k=0;k<deals.length;k++){
       var d=deals[k];
-      h+='<tr><td>'+esc(d.title)+'</td><td>'+STAGE_L[d.stage]+'</td><td>'+fmtAmt(d.amount)+'</td><td>'+esc(d.expected_close_date||'—')+'</td><td><button class="btn btn-d btn-xs" data-act="delDeal" data-id="'+esc(d.id)+'">删</button></td></tr>';
+      h+='<tr><td>'+esc(d.title)+'</td><td>'+STAGE_L[d.stage]+(d.lost_reason?'<div class="od" style="font-size:11px">✗ '+esc(d.lost_reason)+'</div>':'')+'</td><td>'+fmtAmt(d.amount)+'</td><td>'+esc(d.expected_close_date||'—')+'</td><td>'+(d.archived_at?'已归档 '+esc(d.archived_at):(d.won_at&&d.stage==='won'?'赢单 '+esc(d.won_at):'—'))+'</td><td><button class="btn btn-d btn-xs" data-act="delDeal" data-id="'+esc(d.id)+'">删</button></td></tr>';
     }
     h+='</tbody></tbody></table>';
     h+='<h2 style="font-size:15px;margin:16px 0 8px">🕘 时间线 / 动态</h2><ul class="tl">';
@@ -5761,8 +5847,15 @@ $('coRows').addEventListener('click',function(e){
     api('/admin/api/crm/companies/'+encodeURIComponent(b.getAttribute('data-id')),{method:'DELETE'}).then(function(){toast('已删除');loadAll();}).catch(function(err){toast(err.message,true);});
   }
 });
-function moveDeal(dealId,stage){
-  api('/admin/api/crm/deals/'+encodeURIComponent(dealId),{method:'PATCH',body:{stage:stage}}).then(function(){toast('已推进到: '+STAGE_L[stage]);loadDeals().then(renderStats);}).catch(function(err){toast(err.message,true);loadDeals();});
+function moveDeal(dealId,stage,pos){
+  var body={stage:stage};
+  if(typeof pos==='number')body.position=pos;
+  if(stage==='lost'){
+    var r=prompt('输单原因（可留空）:','');
+    if(r===null){loadDeals();return;}
+    if(r)body.lost_reason=r;
+  }
+  api('/admin/api/crm/deals/'+encodeURIComponent(dealId),{method:'PATCH',body:body}).then(function(){toast(stage==='won'?'已赢单 🎉 公司转正式客户':'已推进到: '+STAGE_L[stage]);loadDeals().then(renderStats);loadStats();loadCompanies();}).catch(function(err){toast(err.message,true);loadDeals();});
 }
 $('kanban').addEventListener('change',function(e){
   var s=e.target;
@@ -5804,19 +5897,54 @@ $('kanban').addEventListener('drop',function(e){
   var stage=col.getAttribute('data-stage');
   if(!id||!stage)return;
   dragDealId=null;
-  moveDeal(id,stage);
+  var card=e.target.closest('.kcard');
+  if(card&&card.getAttribute('data-deal')===id)return; /* 拖回原位 = 无操作 */
+  var pos;
+  if(card){
+    var prev=card.previousElementSibling;
+    var prevPos=prev?Number(prev.getAttribute('data-pos')):Number(card.getAttribute('data-pos'))-1;
+    pos=(prevPos+Number(card.getAttribute('data-pos')))/2;
+  }else{
+    var cards=col.querySelectorAll('.kcard');
+    pos=cards.length?Number(cards[cards.length-1].getAttribute('data-pos'))+1:1;
+  }
+  moveDeal(id,stage,Math.round(pos*1000)/1000);
 });
-$('kanban').addEventListener('click',delDealHandler);
-function delDealHandler(e){
-  var b=e.target.closest('[data-act]');if(!b||b.getAttribute('data-act')!=='delDeal')return;
-  if(!confirm('确定删除该商机？'))return;
-  api('/admin/api/crm/deals/'+encodeURIComponent(b.getAttribute('data-id')),{method:'DELETE'}).then(function(){toast('已删除商机');loadAll();}).catch(function(err){toast(err.message,true);});
+$('kanban').addEventListener('click',kanbanCardHandler);
+function kanbanCardHandler(e){
+  var b=e.target.closest('[data-act]');if(!b)return;
+  var act=b.getAttribute('data-act'),id=b.getAttribute('data-id');
+  if(act==='delDeal'){
+    if(!confirm('确定删除该商机？'))return;
+    api('/admin/api/crm/deals/'+encodeURIComponent(id),{method:'DELETE'}).then(function(){toast('已删除商机');loadAll();}).catch(function(err){toast(err.message,true);});
+  }else if(act==='archDeal'){
+    api('/admin/api/crm/deals/'+encodeURIComponent(id),{method:'PATCH',body:{archived:true}}).then(function(){toast('已归档');loadDeals().then(renderStats);loadStats();}).catch(function(err){toast(err.message,true);});
+  }
 }
+$('archToggle').onclick=function(){
+  var body=$('archBody'),open=body.style.display!=='none';
+  body.style.display=open?'none':'block';
+  this.textContent=open?'展开':'收起';
+  if(!open)loadArchived().catch(function(err){toast(err.message,true);});
+};
+$('archRows').addEventListener('click',function(e){
+  var b=e.target.closest('[data-act]');if(!b)return;
+  var id=b.getAttribute('data-id');
+  if(b.getAttribute('data-act')==='restoreDeal'){
+    api('/admin/api/crm/deals/'+encodeURIComponent(id),{method:'PATCH',body:{archived:false}}).then(function(){toast('已恢复到看板');loadArchived();loadDeals().then(renderStats);loadStats();}).catch(function(err){toast(err.message,true);});
+  }else if(b.getAttribute('data-act')==='delArch'){
+    if(!confirm('彻底删除该商机？时间线记录会保留。'))return;
+    api('/admin/api/crm/deals/'+encodeURIComponent(id),{method:'DELETE'}).then(function(){toast('已删除');loadArchived();loadStats();}).catch(function(err){toast(err.message,true);});
+  }
+});
 $('taskRows').addEventListener('click',function(e){
   var b=e.target.closest('[data-act]');if(!b)return;
   var id=b.getAttribute('data-id');
   if(b.getAttribute('data-act')==='doneTask'){
     api('/admin/api/crm/activities/'+encodeURIComponent(id),{method:'PATCH',body:{is_completed:true}}).then(function(){toast('已完成 ✓');loadAll();}).catch(function(err){toast(err.message,true);});
+  }else if(b.getAttribute('data-act')==='snoozeTask'){
+    var tm=new Date(Date.now()+86400000).toISOString().slice(0,10);
+    api('/admin/api/crm/activities/'+encodeURIComponent(id),{method:'PATCH',body:{due_date:tm}}).then(function(){toast('已顺延到 '+tm);loadTasks().then(renderStats);loadStats();}).catch(function(err){toast(err.message,true);});
   }else if(b.getAttribute('data-act')==='delTask'){
     if(!confirm('确定删除该任务？'))return;
     api('/admin/api/crm/activities/'+encodeURIComponent(id),{method:'DELETE'}).then(function(){loadAll();}).catch(function(err){toast(err.message,true);});
@@ -5830,7 +5958,27 @@ $('promoteBtn').onclick=function(){
     $('promoteMsg').textContent='';
     toast(b.already_promoted?'该线索已是销售公司（幂等跳过）':'已提升为销售公司: '+b.company.name);
     $('promoteId').value='';
+$('impFile').addEventListener('change',function(){
+  var f=this.files&&this.files[0];
+  if(!f)return;
+  var rd=new FileReader();
+  rd.onload=function(){$('impCsv').value=String(rd.result||'');};
+  rd.readAsText(f);
+});
+$('impBtn').onclick=function(){
+  var csv=$('impCsv').value;
+  if(!csv.trim()){toast('请先选择 CSV 文件或粘贴内容',true);return;}
+  $('impMsg').textContent='导入中…';
+  api('/admin/api/crm/import',{method:'POST',body:{entity:$('impEntity').value,csv:csv}}).then(function(b){
+    var msg='新建 '+Number(b.created||0)+' · 跳过 '+Number(b.skipped||0)+' · 出错 '+Number(b.error_total||0);
+    if(b.companies_created)msg+='（自动建公司 '+Number(b.companies_created)+'）';
+    $('impMsg').textContent=msg+((b.errors&&b.errors.length)?' —— '+b.errors.join('；'):'');
+    toast('导入完成');
     loadAll();
+  }).catch(function(err){$('impMsg').textContent='';toast(err.message,true);});
+};
+
+loadAll();
   }).catch(function(err){$('promoteMsg').textContent='';toast(err.message,true);});
 };
 $('coNew').onclick=function(){['ncName','ncDomain','ncCountry','ncIndustry'].forEach(function(id){$(id).value='';});openModal('mNewCo');};
@@ -5885,6 +6033,12 @@ $('dBody').addEventListener('click',function(e){
     var body2={company_id:id,type:$('daType').value,summary:$('daSummary').value};
     if($('daDue').value&&body2.type==='task')body2.due_date=$('daDue').value;
     api('/admin/api/crm/activities',{method:'POST',body:body2}).then(function(){toast('已记录');openDetail(id);loadTasks().then(renderStats);}).catch(function(err){toast(err.message,true);});
+  }else if(act==='mergeContact'){
+    var src=$('cmSrc').value,tgt=$('cmTgt').value;
+    if(!src||!tgt){toast('请选择要合并的两个联系人',true);return;}
+    if(src===tgt){toast('来源与目标不能是同一个联系人',true);return;}
+    if(!confirm('将把来源联系人并入目标联系人并删除来源（缺失字段自动补齐）。确定继续？'))return;
+    api('/admin/api/crm/contacts/merge',{method:'POST',body:{target_contact_id:tgt,source_contact_id:src}}).then(function(){toast('联系人已合并');openDetail(id);loadCompanies().then(renderStats);}).catch(function(err){toast(err.message,true);});
   }else if(act==='merge'){
     var src=$('dMergeSrc').value;
     if(!src){toast('请先选择要并入的公司',true);return;}
