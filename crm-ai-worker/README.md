@@ -231,6 +231,10 @@ Origin 守卫              所有变更请求校验同源 Origin/Referer，403 �
                        └─「🎯 定向群发」标签页：客群圈选 / 保存客群 / 分批续发 /
                           按联系人发送（人物角色筛选 + 角色优先多触点，Phase 8/9）
 /admin/audit           审计日志查看（只读，action 过滤 + 游标分页）
+/admin/crm             CRM 销售（第 7 个业务面板）：公司/联系人列表、商机六列看板
+                       拖拽（列金额小计、赢单/输单归档）、统计仪表（7 卡 + 加权预测 +
+                       近 6 月成交走势）、任务分组与一键顺延、CSV 导入、联系人合并、
+                       Gmail 来信时间线
 /admin/sessions        活跃会话清单与吊销（super_admin）
 /admin/security        WebAuthn 通行密钥自助管理（注册/删除/恢复码重生成）
 POST /admin/login      面板登录（可选两步：token → WebAuthn 断言/恢复码）。限流在读取
@@ -271,6 +275,11 @@ GET  /admin/api/outreach/campaigns/:id/members   成员表（per-person 时含�
 POST /admin/api/outreach/campaigns/:id/generate|send   两步续跑
 GET  /admin/api/persona-roles               人物角色候选（当前轮 distinct persona_role + 客户数，表单 datalist 数据源；fail-open 返回空表）
 GET  /admin/api/audit-logs                  审计日志查询（audit.read，游标分页）
+GET|POST /admin/api/crm/companies|contacts|deals|activities   CRM 销售层 CRUD（会话 + RBAC，写操作全审计）
+POST /admin/api/crm/deals/:id/move          看板移动（stage + position；置 lost 必填输单原因，400 校验）
+POST /admin/api/crm/contacts/merge          联系人合并（COALESCE 空位回填 + 主联系人提升；审计 MERGE_CRM_CONTACT）
+POST /admin/api/crm/import                  CSV 导入（公司/联系人/商机三实体，中英表头别名，≤1000 行/400KB，分块 batch，审计 CRM_CSV_IMPORT）
+GET  /admin/api/crm/stats                   聚合统计（7 卡；加权预测 inquiry 0.1 / sample_quoted 0.3 / pi_sent 0.5 / deposit_paid 0.8；won_monthly 走势）
 POST /admin/api/auth/login|logout|revoke    会话生命周期
 GET  /admin/api/auth/me|sessions            当前身份 / 活跃会话清单
 POST /admin/api/auth/sessions/revoke|revoke-all   吊销任意会话 / 全吊销（super_admin）
@@ -348,13 +357,19 @@ POST /admin/api/auth/webauthn/recovery/regenerate     重生成恢复码
 ### 源码结构
 
 ```text
-src/index.ts            Cron 入口：认领 → 抓取 → 清洗 → AI 分析 → 回写（2529 行）
-src/admin.ts            面板路由与 7 个面板模板（5552 行）
+src/index.ts            Cron 入口：认领 → 抓取 → 清洗 → AI 分析 → 写回；空闲 tick
+                        汇聚 自动推进 / 逾期任务日志 / Gmail 入站同步（2857 行）
+src/admin.ts            面板路由与 8 个面板模板（含 CRM 销售面板，6307 行）
+src/crm.ts              CRM 销售层 API：公司/联系人/商机/任务 CRUD、看板移动/归档、
+                        联系人合并、CSV 导入、聚合统计（1437 行）
+src/crm-gmail-sync.ts   Gmail 入站同步：收件箱拉取 → 联系人邮箱/公司域名匹配 →
+                        email_received 时间线；游标+去重幂等，403 退避（332 行）
+src/crm-hooks.ts        流水线 ↔ CRM 联动挂钩（提升/发信回写/淘汰过滤/逾期任务），全 fail-open
 src/campaigns.ts        定向群发：筛选 DSL、客群 CRUD、生成/发送两步状态机、per-person 粒度、角色优先多触点
 src/research-run.ts     research_runs/sources/facts/signals/personas/profiles 写入（append+supersede）
 src/outreach.ts         开发信生成（结构化档案 → 按国家语言；支持联系人粒度）
 src/outreach-send.ts    发送状态机 draft→reserved→sending→sent/uncertain/failed
-src/gmail.ts            OAuth 发信、账号池、失败冷却
+src/gmail.ts            OAuth 发信、账号池、失败冷却、scope 可覆盖（入站读 gmail.readonly）
 src/gmail-quota.ts      配额原子预留（INSERT…SELECT + TTL 回收）
 src/campaign-lock.ts    群发单飞锁（原子 upsert + token 守护释放）
 src/contact-merge.ts    同人合并规划器（渠道身份 + 姓名相容）
@@ -373,7 +388,7 @@ src/auth/               rbac（五角色权限门）、webauthn（零依赖验�
 src/security/           cf-access、outbound-url（SSRF）、csv-limits、origin-guard、
                         redaction、safe-log、request-context
 src/audit/              audit-log、audit-retention
-tests/                  69 个文件 / 899 个测试（54 顶层 + 10 security + 5 concurrency）
+tests/                  83 个文件 / 1052 个测试（顶层 + 10 security + 5 concurrency + CRM 层）
 ```
 
 ### 关键设计决策与理由（评估替代方案时的对照基线）
@@ -761,7 +776,7 @@ curl "http://127.0.0.1:8787/__scheduled?cron=*/5%20*%20*%20*%20*"
 npm test
 ```
 
-75 个测试文件 / 963 个测试，全部离线运行（不花 token、不发邮件、不需真实密钥）：
+83 个测试文件 / 1052 个测试，全部离线运行（不花 token、不发邮件、不需真实密钥）：
 
 ```text
 tests/security/         10 文件：经真实 handleAdminRequest 的安全验收
@@ -792,7 +807,7 @@ npx wrangler d1 execute crm-ai-db --local --command="INSERT INTO customers (comp
 npm run typecheck
 ```
 
-面板模板自检（5 个 `*_HTML` 面板全部覆盖：JS 可解析、id 唯一、`getElementById` 有对应元素）：
+面板模板自检（8 个 `*_HTML` 面板全部覆盖：JS 可解析、id 唯一、`getElementById` 有对应元素）：
 
 ```bash
 node scripts/check-panel.mjs
@@ -939,6 +954,13 @@ admin_login_attempts: scope（ip/global）+ ident（联合主键）, failures, w
 api_configs 增补列: key_hint（面板显示的 `AIzaSy…x7f2`）, key_fingerprint（HMAC 指纹，用于去重）；api_key 存 `enc:v1:…` 密文，无前缀即存量明文
 api_key_health: provider, key_index, exhausted_until, last_error
 gmail_send_log: outreach_email_id, recipient, status, detail, sender_client_email, request_id, sent_at
+CRM 销售层（0031–0033）: crm_companies（tier A/B/C/VIP/unqualified、lead_status、
+                        customer_since 首赢单即定不再覆盖）、crm_contacts（is_primary
+                        主联系人）、crm_deals（六段 stage 状态机 inquiry→sample_quoted→
+                        pi_sent→deposit_paid→won|lost + lost_reason / won_at /
+                        position REAL 看板分数排序 / archived_at 归档）、crm_activities
+                        （统一时间线 + 任务，deal_id 非 FK 删除商机不丢历史）、
+                        crm_mail_sync / crm_mail_seen（Gmail 入站同步游标与消息去重）
 ```
 
 并为 `status` 和 `company_id` 建立索引。`outreach_campaign_members` 另按
@@ -960,6 +982,10 @@ gmail_send_log: outreach_email_id, recipient, status, detail, sender_client_emai
 | `0027_campaign_contact_grain.sql` | Phase 8：outreach_emails / campaign_members 的 contact_id 联系人粒度 |
 | `0028_campaign_members_grain.sql` | Phase 9：campaign_members 粒度重建（contact_norm 生成列 + UNIQUE 索引，同公司多联系人触点） |
 | `0029_lead_score_config.sql` | Phase 10：六维权重配置单行表 |
+| `0030_campaign_auto_advance.sql` | 群发 ⚡自动推进（cron 空闲 tick 续跑列） |
+| `0031_crm_sales_layer.sql` | **CRM 销售层四表**（crm_companies/contacts/deals/activities） |
+| `0032_crm_sales_ext.sql` | **销售增强**：customer_since、lost_reason、won_at、position REAL、archived_at + 存量回填 |
+| `0033_crm_gmail_inbound.sql` | **Gmail 入站同步**：crm_mail_sync 游标 + crm_mail_seen 去重 |
 
 `0006` 的两条 `ALTER TABLE ADD COLUMN` 必须**逐条**执行——D1 遇到重复列会整批失败。
 `0019` 的 FK 重建是单事务表重建（已声明 FK 时跳过；发现孤儿草稿行会拒绝执行并给出

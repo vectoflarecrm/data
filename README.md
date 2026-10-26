@@ -1,22 +1,27 @@
 # CRM AI Worker
 
-Cloudflare Workers 上的客户情报自动化管道：定时抓取客户信息 → 多引擎搜索补全 → 前置清洗 → AI 分析 → 回写 D1。
+Cloudflare Workers 上的客户情报 + 销售一体化系统：定时抓取客户信息 → 多引擎搜索补全 → 前置清洗 → AI 分析 → 回写 D1 → 结构化档案驱动开发信 → CRM 销售层（公司/联系人/商机看板/任务）跟进成交。
 
 ## 架构
 
-- **Worker + Cron**（`*/5 * * * *`）：每 5 分钟认领 `pending` 客户，执行 抓取→清洗→分析→写回 全流程
-- **D1**（`crm-ai-db`）：客户数据、API Key 池、健康状态、用量统计
+- **Worker + Cron**（`*/5 * * * *`）：研究管线（认领 `pending` 客户，抓取→清洗→分析→写回）；空闲 tick 顺带跑群发自动推进与 Gmail 入站同步
+- **D1**（`crm-ai-db`）：客户数据、研究分层、API Key 池、开发信、CRM 销售层（33 个迁移演进）
+- **CRM 销售层**：公司/联系人/商机（六段看板状态机）/任务时间线；赢单转客户、输单原因、CSV 导入、加权预测统计、Gmail 入站来信自动匹配时间线
 - **AI Provider 池**（9 家，自动故障转移）：Gemini → Groq → Cerebras → Zhipu → NVIDIA → AMD → Mistral → DeepSeek → OpenRouter，全部 429/超时毫秒级熔断切换
-- **搜索 Key 池**（4 家）：Tavily（主）→ Brave → Searlo → Exa → DuckDuckGo（免 Key 兜底）
+- **搜索 Key 池**（4 家）：Tavily（主）→ Exa → Searlo → DuckDuckGo（免 Key 兜底）
 - **本地 Gemini Web Pool**：`/v1/chat/completions` 兼容网关（可选备用通道）
 
 ## 控制面板
 
 ```text
 https://<worker-domain>/admin           客户管理 + 评分分布 + CSV 导入 + 海选预过滤（筛选项下拉勾选）
+https://<worker-domain>/admin/crm       CRM 销售：公司/联系人列表、商机看板拖拽、
+                                        统计仪表、任务分组顺延、CSV 导入、Gmail 来信时间线
 https://<worker-domain>/admin/keys      动态 Key 池 / 冷却监控 / 用量 / 凭据加密
 https://<worker-domain>/admin/outreach  开发信生成、Gmail 发送、🎯 定向群发
-https://<worker-domain>/admin/secrets   经 Cloudflare API 直写 Worker Secrets
+https://<worker-domain>/admin/audit     审计日志（只读，action 过滤 + 分页）
+https://<worker-domain>/admin/sessions  活跃会话清单与吊销（super_admin）
+https://<worker-domain>/admin/security  WebAuthn 通行密钥自助管理
 ```
 
 - **Key 池**：各平台 API Key 增删改查、批量导入（Excel/CSV 两列直接粘贴：`key,备注`）、自动去重
@@ -44,9 +49,9 @@ https://<worker-domain>/admin/secrets   经 Cloudflare API 直写 Worker Secrets
 ```bash
 cd crm-ai-worker
 npm ci
-npm test          # vitest（162 个测试 / 11 个文件）
+npm test          # vitest（1052 个测试 / 83 个文件）
 npm run typecheck
-node scripts/check-panel.mjs   # 校验全部 5 个面板模板：JS 可解析、id 唯一、getElementById 有对应元素
+node scripts/check-panel.mjs   # 校验全部 8 个面板模板：JS 可解析、id 唯一、getElementById 有对应元素
 npx wrangler dev --test-scheduled
 ```
 
@@ -61,10 +66,12 @@ Secrets 集中在 GitHub 仓库 Actions Secrets 管理；运行时 Key 优先读
 
 ## 文档
 
+- [`TECH.md`](TECH.md) —— **当前技术快照**：技术栈、系统架构、模块清单、
+  数据模型（含 CRM 销售层与 Gmail 入站同步）、安全摘要、测试与部署
 - [`crm-ai-worker/README.md`](crm-ai-worker/README.md) —— 技术文档：管道各阶段、
   参数、评分公式、Schema、设计决策与替代方案评估
-- [`crm-ai-worker/docs/gmail-account-setup.md`](crm-ai-worker/docs/gmail-account-setup.md)
-  —— Gmail 发送账号配置（OAuth / 服务账号）
+- [`crm-ai-worker/docs/`](crm-ai-worker/docs/) —— 阶段推进记录（stages/）、
+  Phase 设计文档、Security V2 报告、Gmail 账号配置等
 
 ## 默认模型
 
