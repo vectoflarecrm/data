@@ -5,6 +5,7 @@ import { generateOutreachForCustomerIds, generateOutreachForContactIds, attachme
 import { getQuota, sendOutreachEmail, sendDelayMs, GmailConfigError } from "./gmail";
 import { sendWithStateMachine, type StateSendResult } from "./outreach-send";
 import { acquireCampaignLock, CampaignLockedError } from "./campaign-lock";
+import { crmDisqualifiedSql, crmNotDisqualifiedSql, hasCrmCompaniesTable, noteOutreachSent } from "./crm-hooks";
 
 /* ── 定向群发 (targeted outreach campaigns) ──────────────────────────────────
  *
@@ -504,12 +505,19 @@ export async function previewSegment(
 ): Promise<SegmentPreview> {
   const brand = filters.excludeSent ? brandName : null;
   const perPerson = filters.perPerson;
-  const { clause, binds } = segmentClause(filters, {
+  let { clause, binds } = segmentClause(filters, {
     requireCompleted: true,
     requireEmail: !perPerson,
     brandName: brand,
     table: "c",
   });
+  // 合并.txt 状态联动: 预览与 createCampaign 快照同一条排除规则，
+  // 否则预览数和实际入选数会对不上（requireCompleted 保证 clause 非空）。
+  if (await hasCrmCompaniesTable(env)) {
+    clause = clause
+      ? `${clause} AND ${crmNotDisqualifiedSql("c.id")}`
+      : `WHERE ${crmNotDisqualifiedSql("c.id")}`;
+  }
   // Per-person: a company only counts when it has an email-bearing contact.
   const contactGate = perPerson
     ? ` AND EXISTS (SELECT 1 FROM contacts ct WHERE ct.company_id = c.company_id AND ct.email IS NOT NULL AND ct.email != '')`
@@ -758,8 +766,12 @@ export async function createCampaign(
     brandName: input.filters.excludeSent ? brandName : null,
     table: "c",
   });
+  // 合并.txt 状态联动: CRM 里标记 disqualified（淘汰）的客户不进群发快照
+  // —— 销售已否决的线索不该再收到开发信。表缺失时跳过（老库 fail-open）。
+  const excludeDisqualified = await hasCrmCompaniesTable(env);
+  const disqFilter = excludeDisqualified ? ` AND ${crmNotDisqualifiedSql("c.id")}` : "";
   const ids = await env.DB.prepare(
-    `SELECT c.id FROM customers c ${clause} ORDER BY c.lead_score DESC NULLS LAST, c.id LIMIT ?`,
+    `SELECT c.id FROM customers c ${clause}${disqFilter} ORDER BY c.lead_score DESC NULLS LAST, c.id LIMIT ?`,
   ).bind(...binds, MAX_CAMPAIGN_SIZE + 1).all<{ id: number }>();
   const capped = ids.results.length > MAX_CAMPAIGN_SIZE;
   const memberIds = (capped ? ids.results.slice(0, MAX_CAMPAIGN_SIZE) : ids.results).map((r) => r.id);
@@ -987,6 +999,15 @@ export async function runCampaignGenerate(
   }
   try {
     const batch = Math.min(Math.max(limit, 1), 50);
+
+    // 合并.txt 状态联动: CRM 已淘汰的成员直接置为 skipped（终态）并写明
+    // 原因，不再为其消耗 AI 生成；其余成员照常。表缺失时跳过（fail-open）。
+    if (await hasCrmCompaniesTable(env)) {
+      await env.DB.prepare(
+        `UPDATE outreach_campaign_members SET status = 'skipped', error = 'CRM 已标记为淘汰客户，跳过生成'
+         WHERE campaign_id = ? AND status = 'pending' AND ${crmDisqualifiedSql("customer_id")}`,
+      ).bind(campaignId).run();
+    }
     const pending = await env.DB.prepare(
       `SELECT customer_id, contact_id FROM outreach_campaign_members
        WHERE campaign_id = ? AND status = 'pending' ORDER BY customer_id, contact_id LIMIT ?`,
@@ -1173,6 +1194,15 @@ export async function runCampaignSend(
   try {
     const batch = Math.min(Math.max(limit, 1), 50);
 
+    // 合并.txt 状态联动: CRM 已淘汰的成员直接置为 skipped（终态）并写明
+    // 原因，绝不向销售已否决的客户发信。表缺失时跳过（fail-open）。
+    if (await hasCrmCompaniesTable(env)) {
+      await env.DB.prepare(
+        `UPDATE outreach_campaign_members SET status = 'skipped', error = 'CRM 已标记为淘汰客户，跳过发送'
+         WHERE campaign_id = ? AND status = 'generated' AND ${crmDisqualifiedSql("customer_id")}`,
+      ).bind(campaignId).run();
+    }
+
     // INNER JOIN semantics are intentional: a member is sendable only while its
     // draft still exists and is still unsent. Phase 9 (design §5): the select
     // carries the grain key and orders siblings deterministically, so a
@@ -1232,6 +1262,13 @@ export async function runCampaignSend(
           await env.DB.prepare(
             "UPDATE outreach_campaign_members SET status = 'sent', error = NULL WHERE campaign_id = ? AND customer_id = ? AND contact_id IS ?",
           ).bind(campaignId, member.customer_id, member.contact_id).run();
+          // 合并.txt 状态联动: 发信成功回写 CRM 时间线（cold_email_sent），
+          // 已提升公司的 lead_status 推进到 contacted。fail-open。
+          await noteOutreachSent(env, member.customer_id, {
+            emailId: member.outreach_email_id,
+            emailTo: member.email_to,
+            subject: member.subject,
+          });
         } else if ((res as StateSendResult).outcome === "skipped_locked") {
           // Another execution owns this email right now (an operator's
           // single-send click racing the batch, or a fail-open window before

@@ -198,6 +198,17 @@ export function requiredPermission(url: URL, method: string): Permission | null 
     return "scores.write";
   }
 
+  // ── CRM sales layer (/admin/api/crm…) ──
+  // The CRM surface (companies/contacts/deals/activities, lead promotion and
+  // company merge) is the sales view of the same customer data, so it rides
+  // the customer trust levels: reads are customers.read, mutations are
+  // customers.write (super_admin + operator). Sender/readonly keep read
+  // access; researcher has it via its research grants.
+  if (parts[2] === "crm") {
+    if (method === "GET") return "customers.read";
+    return "customers.write";
+  }
+
   // ── Customers (/admin/api/customers…) ──
   if (parts[2] === "customers") {
     if (parts[3] === "import" && method === "POST") return "customers.write";

@@ -26,6 +26,7 @@ import {
 } from "./data-retention";
 import { cleanupExpiredChallenges } from "./auth/webauthn";
 import { runCampaignAutoAdvance } from "./campaigns";
+import { noteResearchEnriched, listOverdueTasks } from "./crm-hooks";
   import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, appendResearchSignals, appendResearchPersonas, appendResearchProfile, linkResearchFactsToContacts, hasCurrentResearchFacts, capResearchSourcesToBudget, readSavedResearchText, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, type ResearchPersonaEntry, type ResearchSolutionEntry, FACTS_PER_RUN_CAP } from "./research-run";
 
 export interface CustomerRow {
@@ -2780,6 +2781,19 @@ export default {
       } catch (e) {
         safeLog("error", "[auto-advance] tick failed, continuing", e instanceof Error ? e.message : String(e));
       }
+      // 任务提醒 (合并.txt 待办提醒): 空闲 tick 顺带把逾期的 CRM 待办汇总
+      // 到 Worker 日志（wrangler tail / 平台日志可见）。listOverdueTasks
+      // 内部 fail-open —— CRM 层缺失时静默跳过，绝不影响本 tick。
+      const overdueTasks = await listOverdueTasks(env);
+      if (overdueTasks.length) {
+        safeLog(
+          "warn",
+          `[crm-tasks] ${overdueTasks.length} 项待办任务已逾期: ` +
+            overdueTasks
+              .map((t) => `${t.due_date} ${t.company_name ?? "?"} — ${t.summary}`)
+              .join("; "),
+        );
+      }
       return;
     }
     // Stage 9 (spec §10.1): the claim IS research starting — one audit row
@@ -2805,6 +2819,13 @@ export default {
     // guards each provider pool.
     const results = await Promise.all(customers.map((c) => processCustomer(c, env, leadScoreWeights)));
     await env.DB.batch(results.map((r) => r.update));
+    // 合并.txt 状态联动: AI 调研完成后把 enrich 事件写入 CRM 时间线
+    // （仅已提升为销售公司的客户；fail-open，不影响研究 tick）。
+    for (let i = 0; i < results.length; i++) {
+      if (results[i].outcome === "completed") {
+        await noteResearchEnriched(env, customers[i].id);
+      }
+    }
     // Stage 9: outcome rows are written only after the batch applied, so the
     // trail matches the database state. Retries are not audited — the row
     // stays pending and the next claim emits a fresh START_RESEARCH.

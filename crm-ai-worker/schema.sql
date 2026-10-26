@@ -806,3 +806,85 @@ CREATE TABLE IF NOT EXISTS lead_score_config (
 -- applied by the dedicated CI step, NOT here: schema.sql runs against the
 -- live database on every deploy and must never fail on pre-existing data
 -- (same reasoning as the Stage 10 idempotency index — see deploy-worker.yml).
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- CRM sales layer (merge analysis, CRM/合并.txt): the open-crm D1 model as
+-- the base, ported into this project. The research pipeline stays in
+-- customers/contacts; these four tables hold the SALES view of the same
+-- D1 database — AI-cleaned leads are promoted into companies (one SQL,
+-- no sync step: single D1 = single source of truth) and driven to deals.
+-- Migration 0031 carries the same CREATEs for existing databases.
+-- ─────────────────────────────────────────────────────────────────────────
+
+-- Companies: the sales-side entity. TEXT primary key — promoted pipeline
+-- leads keep the traceable id "c_<customers.id>", manually created rows get
+-- a random UUID. tier = A/B/C 分级或 VIP 标识; lead_status tracks the sales
+-- qualification state. merged_from_ids + chinese_remaries carry the 合并.txt
+-- merge traceability: pre-merge source ids and human-readable history.
+CREATE TABLE IF NOT EXISTS crm_companies (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  domain TEXT UNIQUE,
+  industry TEXT,
+  country TEXT,
+  tier TEXT DEFAULT 'unqualified',
+  lead_status TEXT DEFAULT 'new',
+  merged_from_ids TEXT,
+  chinese_remarks TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_companies_domain ON crm_companies(domain);
+CREATE INDEX IF NOT EXISTS idx_companies_lead_status ON crm_companies(lead_status);
+
+-- Contacts: decision makers per company. The first promoted pipeline
+-- contact is is_primary = 1 (the import-time channel).
+CREATE TABLE IF NOT EXISTS crm_contacts (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
+  full_name TEXT NOT NULL,
+  job_title TEXT,
+  email TEXT,
+  whatsapp_or_phone TEXT,
+  linkedin_url TEXT,
+  is_primary INTEGER DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_contacts_company_id ON crm_contacts(company_id);
+
+-- Deals: one row per opportunity, kanban stage machine
+-- inquiry → sample_quoted → pi_sent → deposit_paid → won | lost.
+CREATE TABLE IF NOT EXISTS crm_deals (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  stage TEXT DEFAULT 'inquiry',
+  amount REAL,
+  incoterms TEXT,
+  expected_close_date TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_deals_company_id ON crm_deals(company_id);
+CREATE INDEX IF NOT EXISTS idx_deals_stage ON crm_deals(stage);
+
+-- Activities: unified timeline + tasks. type distinguishes log rows
+-- (note/call/meeting/lead_promoted/company_merged) from open loop items
+-- (task, with due_date + is_completed). deal_id is deliberately NOT a
+-- foreign key: the timeline must survive deal deletion.
+CREATE TABLE IF NOT EXISTS crm_activities (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
+  deal_id TEXT,
+  type TEXT DEFAULT 'manual_note',
+  summary TEXT NOT NULL,
+  due_date TEXT,
+  is_completed INTEGER DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_activities_company_id ON crm_activities(company_id);
+CREATE INDEX IF NOT EXISTS idx_activities_open_tasks ON crm_activities(is_completed, due_date);

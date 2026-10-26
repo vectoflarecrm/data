@@ -53,6 +53,7 @@ import {
   deserializeFilters,
 } from "./campaigns";
 import { CampaignLockedError } from "./campaign-lock";
+import { handleCrmApi } from "./crm";
 import { buildFilterOptions } from "./facets";
 import { LEAD_SCORE_WEIGHTS } from "./lead-score-dims";
 import {
@@ -788,7 +789,9 @@ function authFailure(request: Request): Response {
  * caller mistake (a secret under a denylisted key) is neutralized at the
  * write boundary (§10.2). Fail-open: audit problems never break the action.
  */
-async function auditAdminAction(
+// Exported for the CRM sales layer (src/crm.ts) so its CRUD endpoints write
+// the same audit trail as the rest of the admin surface.
+export async function auditAdminAction(
   env: AdminEnv,
   request: Request,
   auth: { user: AdminUserRow } | null,
@@ -2439,7 +2442,9 @@ function parseBatchSize(value: unknown, fallback = 10): number {
   return Math.min(n, 50);
 }
 
-async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
+// Exported for the CRM sales layer (src/crm.ts) — same tolerant body reader
+// for every JSON API surface.
+export async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
   const body = (await request.json().catch(() => ({}))) as unknown;
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     throw new Error("Invalid JSON body");
@@ -3725,6 +3730,16 @@ async function routeAdminRequest(
       : htmlResponse(ADMIN_LOGIN_HTML);
   }
 
+  // CRM sales layer (合并.txt): companies / deals kanban / timeline — the
+  // sales view of the same D1 database. Reads ride customers.read in the
+  // API gate below; the page shell itself only needs a session.
+  if (url.pathname === "/admin/crm") {
+    if (request.method !== "GET") return jsonResponse({ detail: "Method Not Allowed" }, 405);
+    return (await authenticate(request, env))
+      ? htmlResponse(CRM_PANEL_HTML)
+      : htmlResponse(ADMIN_LOGIN_HTML);
+  }
+
   /* ── Central authorization gate (Security V2 Stage 2) ──
    * Every /admin/api/* route except the /admin/api/auth/* lifecycle endpoints
    * (handled above) passes through here: authenticate once, then check the
@@ -3759,6 +3774,14 @@ async function routeAdminRequest(
       // promise settles, so an async throw would skip the redaction catch below
       // and escape the router entirely.
       return await handleProviderKeysApi(request, env, auth);
+    }
+
+    // CRM sales layer (companies/contacts/deals/activities — src/crm.ts).
+    // Checked before the broader outreach prefix is irrelevant here; the
+    // prefix is disjoint, this just keeps the handler list explicit.
+    if (url.pathname.startsWith("/admin/api/crm")) {
+      // `await` for the same reason as the keys branch above.
+      return await handleCrmApi(request, env, auth);
     }
 
     // Outreach + Gmail sender pool: both live in handleOutreachApi. The pool was
@@ -3870,7 +3893,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 /* stage57 (Phase 10): weights-editor number inputs — narrow on purpose, the
  * .toolbar input rule's 240px min-width would stack the six inputs. */
 .s-mw64{min-width:64px;width:64px;padding:6px 8px}
-</style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div class="s-dfx-g12-aic"><a href="/admin/security" class="top-nav-link">🛡️ 安全设置</a><a href="/admin/outreach" class="top-nav-link">📧 开发信管理</a><a href="/admin/keys" class="top-nav-link">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
+</style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div class="s-dfx-g12-aic"><a href="/admin/security" class="top-nav-link">🛡️ 安全设置</a><a href="/admin/outreach" class="top-nav-link">📧 开发信管理</a><a href="/admin/crm" class="top-nav-link">🎯 CRM 销售</a><a href="/admin/keys" class="top-nav-link">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
 <section class="panel"><h2>📥 客户数据导入（Seed CSV）</h2><p class="s-note">粘贴 CSV（需表头，支持列：company_name, country, domain/website, email, product）。原始数据永久保存在 customer_imports（不可变原始层）；域名或公司名匹配的行自动去重跳过，新公司以 pending 状态进入研究队列。</p><div class="toolbar"><input id="importFileName" placeholder="文件名备注（可选）" class="s-xw220"><button class="button" id="importBtn">导入并去重入队</button></div><textarea id="importCsv" rows="6" placeholder="company_name,country,website,email,product\nABC Sports,USA,,buyer@abcsports.com,SUP\nOcean Pro,Germany,oceanpro.de,,RIB"></textarea><div id="importMsg" class="notice hidden"></div></section>
 <section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p class="s-note">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围：「统计匹配」后可「重新入队」让管道二次研究高价值客户，「写开发信」把当前条件带入定向群发生成分批开发信，「导出全部数据」按当前条件下载全量 CSV。筛选项为下拉勾选，右侧数字是该条件当前命中的客户数（勾选「有邮箱」后只计有邮箱的）。</p><div class="toolbar"><span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span><span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span><span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span><select id="pfMinScore" class="s-mw130"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="50">最低分 ≥50</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select><label class="s-chiprow"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><label class="s-chiprow"><input type="checkbox" id="pfHasSignal"> 有购买信号</label><input id="pfPersonaRoles" placeholder="人物角色（逗号分隔，如：采购总监）" class="s-p8-bd1 ol cbd5e1-br6-fs13-mw180"><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button><button class="button" id="pfOutreach">✉️ 写开发信</button><button class="button secondary" id="pfExport">📥 导出全部数据</button></div><div id="pfResult" class="notice hidden"></div></section>
 <section class="panel"><h2>🎯 线索评分权重（Phase 10 可调）</h2><p class="s-note">六维权重决定评分结构：每维 0-100 的整数，六维合计必须恰好 100（总分 0-100 契约）。保存仅写入配置；已评分客户仍是旧权重结果——点「重算存量评分」按当前权重全量重算（不相关客户归零，未完成客户不受影响，数据完整度分不重算，不重新研究）。</p><div class="toolbar" id="lsInputs"></div><p class="s-note" id="lsMeta"></p><div class="toolbar"><span id="lsSum" class="s-fs12-fw700-mt2"></span><button class="button secondary" id="lsDefaultsBtn">恢复默认</button><button class="button" id="lsSaveBtn" disabled>保存权重</button><button class="button secondary" id="lsRescoreBtn">重算存量评分</button></div><div id="lsMsg" class="notice hidden"></div></section>
@@ -4266,7 +4289,7 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 .mo-fail{font-size:12px;color:#dc2626}.mo-ok{font-size:12px;color:#6b7280}
 .cg-off{opacity:.45}
 </style></head><body>
-<header class="top"><h1>📧 开发信管理</h1><div class="s-dfx-g10-aic"><a href="/admin" class="s-cfff-tdn-fw600">← 返回客户管理</a><form method="post" action="/admin/logout"><button class="btn btn-sm s-bgrgba2552552552-cfff"  type="submit">退出</button></form></div></header>
+<header class="top"><h1>📧 开发信管理</h1><div class="s-dfx-g10-aic"><a href="/admin" class="s-cfff-tdn-fw600">← 返回客户管理</a><a href="/admin/crm" class="s-cfff-tdn-fw600">🎯 CRM 销售</a><form method="post" action="/admin/logout"><button class="btn btn-sm s-bgrgba2552552552-cfff"  type="submit">退出</button></form></div></header>
 <main class="wrap">
 <div class="tabs"><div class="tab active" data-tab="settings">⚙️ 品牌设置</div><div class="tab" data-tab="gmail">📮 发信账号</div><div class="tab" data-tab="generate">🤖 生成开发信</div><div class="tab" data-tab="campaign">🎯 定向群发</div><div class="tab" data-tab="emails">📬 开发信列表</div></div>
 <div id="tab-settings" class="tab-content">
@@ -5443,9 +5466,442 @@ function load(){
    api('/admin/api/auth/revoke-all',{method:'POST'}).then(function(body){toast('已吊销 '+body.revoked+' 个会话');load()})
    .catch(function(e){toast(e.message,true)});
  };
- load();
- })();
- </script></body></html>`;
+load();
+})();
+</script></body></html>`;
+
+/* CRM sales layer (CRM/合并.txt): companies / deals kanban / timeline — the
+ * sales view of the same D1 database. API surface lives in src/crm.ts; this
+ * panel only calls /admin/api/crm/*. Template-literal safety (the stage-5206800
+ * lesson): no backticks, no "${", no newline escapes inside the embedded JS —
+ * messages are single-line strings and the script-block parse check in CI
+ * covers regressions. */
+const CRM_PANEL_HTML = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CRM 销售作战室</title><style>
+:root{font-family:system-ui,-apple-system,sans-serif;color:#172033;background:#f4f7fb}*{box-sizing:border-box}body{margin:0}
+.top{background:#0f766e;color:#fff;padding:16px 26px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.top h1{font-size:21px;margin:0}
+.top a{color:#fff;text-decoration:none;font-weight:600}
+.top form{display:inline}
+.top button{background:rgba(255,255,255,.2);color:#fff;border:0;border-radius:8px;padding:6px 14px;font:inherit;font-weight:600;cursor:pointer}
+.wrap{max-width:1500px;margin:20px auto;padding:0 16px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:16px}
+.stat-card{background:#f0fdfa;border:1px solid #99f6e4;border-radius:10px;padding:14px;text-align:center}
+.stat-value{font-size:26px;font-weight:700;color:#0f766e}.stat-label{font-size:13px;color:#6b7280;margin-top:2px}
+.panel{background:#fff;border:1px solid #d1d5db;border-radius:12px;padding:18px;margin-bottom:16px}
+.panel h2{font-size:17px;font-weight:700;color:#0f766e;margin:0 0 12px;padding-bottom:8px;border-bottom:2px solid #0f766e}
+.sec-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.sec-head h2{margin:0;border:0;padding:0}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.hint{font-size:12px;color:#6b7280;margin:4px 0 10px;line-height:1.6}
+input,select,textarea{padding:8px;border:1px solid #cbd5e1;border-radius:6px;font:inherit;font-size:13px;background:#fff}
+textarea{width:100%;min-height:70px;resize:vertical}
+.btn{padding:8px 16px;border:0;border-radius:8px;cursor:pointer;font:inherit;font-weight:600;font-size:13px;background:#6b7280;color:#fff}
+.btn-p{background:#0f766e}.btn-p:hover{background:#115e59}.btn:hover{filter:brightness(.95)}
+.btn-d{background:#dc2626}.btn-s{background:#e5e7eb;color:#172033}
+.btn-xs{padding:4px 10px;font-size:12px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid #f1f5f9;vertical-align:top}
+th{background:#f8fafc;font-weight:600;white-space:nowrap}
+.badge{display:inline-block;border-radius:20px;padding:2px 9px;font-size:12px;font-weight:600}
+.b-a{background:#d1fae5;color:#065f46}.b-b{background:#dbeafe;color:#1e40af}.b-c{background:#fef3c7;color:#92400e}.b-vip{background:#f3e8ff;color:#6b21a8}.b-un{background:#f1f5f9;color:#64748b}
+.b-new{background:#e0f2fe;color:#075985}.b-enriched{background:#d1fae5;color:#065f46}.b-contacted{background:#fef3c7;color:#92400e}.b-qualified{background:#ede9fe;color:#5b21b6}.b-disq{background:#fee2e2;color:#991b1b}
+.kanban{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px}
+.kcol{min-width:210px;flex:1;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:8px}
+.kcol h3{margin:2px 4px 8px;font-size:13px;color:#475569;display:flex;justify-content:space-between}
+.kcard{background:#fff;border:1px solid #d1d5db;border-radius:8px;padding:8px;margin-bottom:8px;font-size:12px}
+.kcard .t{font-weight:700;font-size:13px;margin-bottom:2px}
+.kcard .c{color:#6b7280;margin-bottom:4px}
+.kcard .amt{font-weight:700;color:#0f766e}
+.kcard select{padding:3px 4px;font-size:12px;margin:4px 4px 4px 0}
+.modal-back{position:fixed;inset:0;background:rgba(15,23,42,.5);display:none;align-items:flex-start;justify-content:center;z-index:100;padding:30px 14px;overflow:auto}
+.modal-back.open{display:flex}
+.modal{background:#fff;border-radius:14px;padding:20px;max-width:760px;width:100%}
+.modal h3{margin:0 0 12px;font-size:17px;color:#0f766e}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.f label{display:block;font-size:12px;color:#475569;margin:8px 0 3px;font-weight:600}
+.f input,.f select,.f textarea{width:100%}
+.mrow{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+.tl{list-style:none;margin:8px 0;padding:0;max-height:300px;overflow:auto}
+.tl li{border-left:3px solid #99f6e4;padding:6px 10px;margin-bottom:6px;background:#f8fafc;border-radius:0 8px 8px 0;font-size:13px}
+.tl .tl-meta{font-size:11px;color:#94a3b8;margin-bottom:2px}
+.toast{position:fixed;top:18px;right:18px;padding:12px 18px;border-radius:10px;color:#fff;font-weight:600;z-index:9999;display:none;font-size:14px}
+.toast.ok{background:#059669}.toast.err{background:#dc2626}
+.od{color:#dc2626;font-weight:700}
+.kcard[draggable="true"]{cursor:grab}
+.kcard.dragging{opacity:.45}
+.kcol.dragover{outline:2px dashed #0f766e;outline-offset:-4px;background:#f0fdfa}
+@media(max-width:700px){.top{flex-direction:column}.grid2{grid-template-columns:1fr}}
+</style></head><body>
+<header class="top"><h1>🎯 CRM 销售作战室</h1><div><a href="/admin">← 客户管理</a>&nbsp;&nbsp;<a href="/admin/outreach">📧 开发信</a>&nbsp;&nbsp;<form method="post" action="/admin/logout"><button type="submit">退出登录</button></form></div></header>
+<main class="wrap">
+<div class="stats">
+<div class="stat-card"><div class="stat-value" id="stCompanies">–</div><div class="stat-label">客户公司</div></div>
+<div class="stat-card"><div class="stat-value" id="stOpenDeals">–</div><div class="stat-label">进行中商机</div></div>
+<div class="stat-card"><div class="stat-value" id="stPipeline">–</div><div class="stat-label">管道金额（进行中）</div></div>
+<div class="stat-card"><div class="stat-value" id="stTasks">–</div><div class="stat-label">待办任务</div></div>
+<div class="stat-card"><div class="stat-value" id="stOverdue">–</div><div class="stat-label">逾期任务</div></div>
+</div>
+
+<div class="panel">
+<div class="sec-head"><h2>🏢 客户公司</h2>
+<div class="toolbar"><input id="coSearch" placeholder="搜索名称/域名/备注"><select id="coTier"><option value="">全部分级</option><option value="A">A</option><option value="B">B</option><option value="C">C</option><option value="VIP">VIP</option><option value="unqualified">未分级</option></select><select id="coStatus"><option value="">全部状态</option><option value="new">新线索</option><option value="enriched">已富化</option><option value="contacted">已联系</option><option value="qualified">已验证</option><option value="disqualified">已淘汰</option></select><button class="btn btn-p" id="coReload">刷新</button><button class="btn" id="coNew">➕ 新建公司</button></div></div>
+<p class="hint">⬆️ 线索提升：把研究管线（customers 表）里已调研完的线索一键转为销售公司 —— ID 填客户管理面板「客户ID」列的数字。提升过的线索会自动跳过（幂等），联系人、国家、行业、评分分级一并带入。</p>
+<div class="toolbar"><input id="promoteId" placeholder="customers 表 ID（数字）" style="width:190px"><button class="btn" id="promoteBtn">⬆️ 提升为销售公司</button><span id="promoteMsg" class="hint" style="margin:0"></span></div>
+<table><thead><tr><th>公司</th><th>国家</th><th>分级</th><th>状态</th><th>域名</th><th>商机</th><th>待办</th><th>操作</th></tr></thead><tbody id="coRows"></tbody></table>
+<div class="hint" id="coHint"></div>
+</div>
+
+<div class="panel">
+<div class="sec-head"><h2>📊 商机看板</h2><button class="btn btn-p" id="dealNew">➕ 新建商机</button></div>
+<p class="hint">阶段流转：询盘 → 样品报价 → PI 已发 → 定金到账 → 赢单 / 输单。用卡片上的下拉框切换阶段（会记入公司时间线），赢/输单后卡片归档到对应列。</p>
+<div class="kanban" id="kanban"></div>
+</div>
+
+<div class="panel">
+<h2>✅ 待办任务</h2>
+<p class="hint">公司时间线里 type=task 的未完成事项，按到期日排序。完成后自动从列表消失（时间线仍保留记录）。</p>
+<table><thead><tr><th>到期日</th><th>公司</th><th>任务</th><th>操作</th></tr></thead><tbody id="taskRows"></tbody></table>
+</div>
+</main>
+
+<div class="modal-back" id="mNewCo"><div class="modal">
+<h3>➕ 新建客户公司</h3>
+<div class="f grid2">
+<div><label>公司名称 *</label><input id="ncName"></div>
+<div><label>域名</label><input id="ncDomain" placeholder="example.com"></div>
+<div><label>国家</label><input id="ncCountry"></div>
+<div><label>行业</label><input id="ncIndustry"></div>
+</div>
+<div class="mrow"><button class="btn btn-s" data-close="mNewCo">取消</button><button class="btn btn-p" id="ncSave">保存</button></div>
+</div></div>
+
+<div class="modal-back" id="mNewDeal"><div class="modal">
+<h3>➕ 新建商机</h3>
+<div class="f grid2">
+<div><label>所属公司 *</label><select id="ndCompany"></select></div>
+<div><label>商机名称 *</label><input id="ndTitle" placeholder="如：2026 Q4 采购单"></div>
+<div><label>金额（USD）</label><input id="ndAmount" type="number" min="0" step="any"></div>
+<div><label>贸易条款</label><input id="ndIncoterms" placeholder="FOB / CIF / EXW…"></div>
+<div><label>预计成交日</label><input id="ndClose" type="date"></div>
+</div>
+<div class="mrow"><button class="btn btn-s" data-close="mNewDeal">取消</button><button class="btn btn-p" id="ndSave">保存</button></div>
+</div></div>
+
+<div class="modal-back" id="mDetail"><div class="modal">
+<div id="dBody"></div>
+</div></div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+'use strict';
+var STATE={companies:[],total:0,deals:[],tasks:[]};
+var STAGES=['inquiry','sample_quoted','pi_sent','deposit_paid','won','lost'];
+var STAGE_L={inquiry:'询盘',sample_quoted:'样品报价',pi_sent:'PI 已发',deposit_paid:'定金到账',won:'赢单',lost:'输单'};
+var TIER_L={A:'A级',B:'B级',C:'C级',VIP:'VIP',unqualified:'未分级'};
+var STATUS_L={new:'新线索',enriched:'已富化',contacted:'已联系',qualified:'已验证',disqualified:'已淘汰'};
+var TYPE_L={note:'备注',manual_note:'备注',task:'任务',call:'通话',meeting:'会议',lead_promoted:'线索提升',company_merged:'公司合并'};
+
+function esc(v){return String(v===null||v===undefined?'':v).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function $(id){return document.getElementById(id);}
+function toast(msg,err){var t=$('toast');t.textContent=msg;t.className='toast '+(err?'err':'ok');t.style.display='block';setTimeout(function(){t.style.display='none';},2600);}
+function api(path,opts){
+  opts=opts||{};
+  var init={method:opts.method||'GET',credentials:'same-origin'};
+  if(opts.body){init.headers={'Content-Type':'application/json'};init.body=JSON.stringify(opts.body);}
+  return fetch(path,init).then(function(res){
+    return res.json().catch(function(){return{};}).then(function(body){
+      if(!res.ok){throw new Error(body&&body.detail?body.detail:('HTTP '+res.status));}
+      return body;
+    });
+  });
+}
+function fmtAmt(a){if(a===null||a===undefined||a==='')return '—';return '$'+Number(a).toLocaleString();}
+function fmtDate(s){if(!s)return '—';return String(s).replace('T',' ').slice(0,16);}
+function tierBadge(t){return '<span class="badge b-'+(t==='unqualified'?'un':t.toLowerCase())+'">'+esc(TIER_L[t]||t)+'</span>';}
+function statusBadge(s){return '<span class="badge b-'+esc(s)+'">'+esc(STATUS_L[s]||s)+'</span>';}
+function openModal(id){$(id).classList.add('open');}
+function closeModal(id){$(id).classList.remove('open');}
+
+/* ── 加载与渲染 ─────────────────────────────────────────── */
+function loadCompanies(){
+  var p='/admin/api/crm/companies?limit=200&q='+encodeURIComponent($('coSearch').value)+'&tier='+encodeURIComponent($('coTier').value)+'&lead_status='+encodeURIComponent($('coStatus').value);
+  return api(p).then(function(b){STATE.companies=b.companies||[];STATE.total=b.total||0;renderCompanies();});
+}
+function renderCompanies(){
+  var rows='';
+  for(var i=0;i<STATE.companies.length;i++){
+    var c=STATE.companies[i];
+    rows+='<tr><td><strong>'+esc(c.name)+'</strong><div class="hint" style="margin:0">'+esc(c.id)+'</div></td><td>'+esc(c.country||'—')+'</td><td>'+tierBadge(c.tier)+'</td><td>'+statusBadge(c.lead_status)+'</td><td>'+esc(c.domain||'—')+'</td><td>'+Number(c.open_deals||0)+'</td><td>'+Number(c.open_tasks||0)+'</td><td><button class="btn btn-p btn-xs" data-act="detail" data-id="'+esc(c.id)+'">详情</button> <button class="btn btn-d btn-xs" data-act="delCo" data-id="'+esc(c.id)+'">删除</button></td></tr>';
+  }
+  $('coRows').innerHTML=rows||'<tr><td colspan="8" class="hint">暂无公司 — 先从下面的「提升线索」开始，或点右上角「新建公司」。</td></tr>';
+  $('coHint').textContent='共 '+STATE.total+' 家公司'+(STATE.total>STATE.companies.length?'（当前显示前 '+STATE.companies.length+' 家）':'');
+}
+function loadDeals(){
+  return api('/admin/api/crm/deals').then(function(b){STATE.deals=b.deals||[];renderKanban();});
+}
+function renderKanban(){
+  var html='';
+  for(var s=0;s<STAGES.length;s++){
+    var st=STAGES[s];
+    html+='<div class="kcol" data-stage="'+st+'"><h3>'+STAGE_L[st]+'<span>'+stageCount(st)+'</span></h3>';
+    for(var i=0;i<STATE.deals.length;i++){
+      var d=STATE.deals[i];
+      if(d.stage!==st)continue;
+      html+='<div class="kcard" data-deal="'+esc(d.id)+'" draggable="true"><div class="t">'+esc(d.title)+'</div><div class="c">'+esc(d.company_name)+'</div><div class="amt">'+fmtAmt(d.amount)+'</div><select data-deal="'+esc(d.id)+'">';
+      for(var j=0;j<STAGES.length;j++){html+='<option value="'+STAGES[j]+'"'+(STAGES[j]===d.stage?' selected':'')+'>'+STAGE_L[STAGES[j]]+'</option>';}
+      html+='</select> <button class="btn btn-d btn-xs" data-act="delDeal" data-id="'+esc(d.id)+'">删</button></div>';
+    }
+    html+='</div>';
+  }
+  $('kanban').innerHTML=html;
+}
+function stageCount(st){var n=0;for(var i=0;i<STATE.deals.length;i++){if(STATE.deals[i].stage===st)n++;}return n;}
+function loadTasks(){
+  return api('/admin/api/crm/activities').then(function(b){STATE.tasks=b.activities||[];renderTasks();});
+}
+function renderTasks(){
+  var today=new Date().toISOString().slice(0,10);
+  var rows='';
+  for(var i=0;i<STATE.tasks.length;i++){
+    var a=STATE.tasks[i];
+    var od=a.due_date&&a.due_date<today;
+    var days=od?Math.round((new Date(today)-new Date(a.due_date))/86400000):0;
+    var dueCell=od?'<span class="od">'+esc(a.due_date)+'</span> <span class="od">逾期'+days+'天</span>':esc(a.due_date||'无期限');
+    rows+='<tr><td>'+dueCell+'</td><td>'+esc(a.company_name)+'</td><td>'+esc(a.summary)+'</td><td><button class="btn btn-p btn-xs" data-act="doneTask" data-id="'+esc(a.id)+'">✓ 完成</button> <button class="btn btn-s btn-xs" data-act="delTask" data-id="'+esc(a.id)+'">删</button></td></tr>';
+  }
+  $('taskRows').innerHTML=rows||'<tr><td colspan="4" class="hint">暂无待办任务 🎉</td></tr>';
+}
+function renderStats(){
+  var open=0,pipe=0,won=0,od=0;
+  var today=new Date().toISOString().slice(0,10);
+  for(var i=0;i<STATE.deals.length;i++){
+    var d=STATE.deals[i];
+    if(d.stage==='won'){won++;continue;}
+    if(d.stage==='lost')continue;
+    open++;pipe+=Number(d.amount||0);
+  }
+  for(var k=0;k<STATE.tasks.length;k++){
+    if(STATE.tasks[k].due_date&&STATE.tasks[k].due_date<today)od++;
+  }
+  $('stCompanies').textContent=STATE.total;
+  $('stOpenDeals').textContent=open;
+  $('stPipeline').textContent='$'+pipe.toLocaleString();
+  $('stTasks').textContent=STATE.tasks.length;
+  $('stOverdue').textContent=od;
+  $('stOverdue').style.color=od>0?'#dc2626':'';
+}
+function loadAll(){
+  return Promise.all([loadCompanies(),loadDeals(),loadTasks()]).then(renderStats).catch(function(e){toast(e.message,true);});
+}
+
+/* ── 公司详情 ───────────────────────────────────────────── */
+function openDetail(id){
+  api('/admin/api/crm/companies/'+encodeURIComponent(id)).then(function(b){
+    var c=b.company,contacts=b.contacts||[],deals=b.deals||[],acts=b.activities||[];
+    var h='<h3>'+esc(c.name)+' '+tierBadge(c.tier)+' '+statusBadge(c.lead_status)+'</h3>';
+    h+='<p class="hint" style="margin:0 0 10px">ID '+esc(c.id)+' · '+esc(c.domain||'无域名')+' · '+esc(c.country||'国家未知')+' · '+esc(c.industry||'行业未知')+(c.merged_from_ids?' · 已并入来源: '+esc(c.merged_from_ids):'')+'</p>';
+    h+='<div class="grid2 f"><div><label>分级</label><select id="dTier">';
+    ['A','B','C','VIP','unqualified'].forEach(function(t){h+='<option value="'+t+'"'+(t===c.tier?' selected':'')+'>'+TIER_L[t]+'</option>';});
+    h+='</select></div><div><label>销售状态</label><select id="dStatus">';
+    ['new','enriched','contacted','qualified','disqualified'].forEach(function(s){h+='<option value="'+s+'"'+(s===c.lead_status?' selected':'')+'>'+STATUS_L[s]+'</option>';});
+    h+='</select></div></div>';
+    h+='<div class="f"><label>中文备注（合并历史也记录在这里）</label><textarea id="dRemarks">'+esc(c.chinese_remarks||'')+'</textarea></div>';
+    h+='<div class="mrow" style="justify-content:flex-start"><button class="btn btn-p" data-act="saveCo" data-id="'+esc(c.id)+'">保存公司信息</button></div>';
+    h+='<h2 style="font-size:15px;margin:16px 0 8px">👤 联系人（'+contacts.length+'）</h2><table><thead><tr><th>姓名</th><th>职务</th><th>邮箱</th><th>电话/WhatsApp</th><th>主联</th><th>操作</th></tr></thead><tbody>';
+    for(var i=0;i<contacts.length;i++){
+      var ct=contacts[i];
+      h+='<tr><td>'+esc(ct.full_name)+'</td><td>'+esc(ct.job_title||'—')+'</td><td>'+esc(ct.email||'—')+'</td><td>'+esc(ct.whatsapp_or_phone||'—')+'</td><td>'+(Number(ct.is_primary)?'★':'')+'</td><td>'+(Number(ct.is_primary)?'':'<button class="btn btn-s btn-xs" data-act="mkPrimary" data-id="'+esc(ct.id)+'">设主联</button> ')+'<button class="btn btn-d btn-xs" data-act="delContact" data-id="'+esc(ct.id)+'">删</button></td></tr>';
+    }
+    h+='</tbody></table>';
+    h+='<div class="grid2 f"><div><label>新联系人姓名 *</label><input id="dcName"></div><div><label>职务</label><input id="dcTitle"></div><div><label>邮箱</label><input id="dcEmail"></div><div><label>电话/WhatsApp</label><input id="dcPhone"></div></div>';
+    h+='<button class="btn" data-act="addContact" data-id="'+esc(c.id)+'" style="margin-top:8px">➕ 添加联系人</button>';
+    h+='<h2 style="font-size:15px;margin:16px 0 8px">💰 商机（'+deals.length+'）</h2><table><thead><tr><th>名称</th><th>阶段</th><th>金额</th><th>预计成交</th><th>操作</th></tr></thead><tbody>';
+    for(var k=0;k<deals.length;k++){
+      var d=deals[k];
+      h+='<tr><td>'+esc(d.title)+'</td><td>'+STAGE_L[d.stage]+'</td><td>'+fmtAmt(d.amount)+'</td><td>'+esc(d.expected_close_date||'—')+'</td><td><button class="btn btn-d btn-xs" data-act="delDeal" data-id="'+esc(d.id)+'">删</button></td></tr>';
+    }
+    h+='</tbody></tbody></table>';
+    h+='<h2 style="font-size:15px;margin:16px 0 8px">🕘 时间线 / 动态</h2><ul class="tl">';
+    for(var m=0;m<acts.length;m++){
+      var a=acts[m];
+      h+='<li><div class="tl-meta">'+fmtDate(a.created_at)+' · '+esc(TYPE_L[a.type]||a.type)+(a.is_completed&&Number(a.is_completed)?' · 已完成':'')+'</div>'+esc(a.summary)+'</li>';
+    }
+    h+='</ul>';
+    h+='<div class="grid2 f"><div><label>类型</label><select id="daType"><option value="note">备注</option><option value="task">任务（待办）</option><option value="call">通话</option><option value="meeting">会议</option></select></div><div><label>到期日（任务用）</label><input id="daDue" type="date"></div></div>';
+    h+='<div class="f"><label>内容 *</label><textarea id="daSummary" placeholder="记录一次跟进、或创建一个待办…"></textarea></div>';
+    h+='<button class="btn" data-act="addActivity" data-id="'+esc(c.id)+'" style="margin-top:8px">➕ 添加到时间线</button>';
+    h+='<h2 style="font-size:15px;margin:16px 0 8px">🔀 合并重复公司</h2>';
+    h+='<p class="hint">把另一家公司（含联系人、商机、动态）整体并入本公司并删除对方 —— 单事务、可溯源，操作前请确认两者确为同一家公司。</p>';
+    h+='<div class="toolbar"><select id="dMergeSrc" style="max-width:320px"><option value="">选择要并入的公司…</option>';
+    for(var q=0;q<STATE.companies.length;q++){
+      var o=STATE.companies[q];
+      if(o.id===c.id)continue;
+      h+='<option value="'+esc(o.id)+'">'+esc(o.name)+'（'+esc(o.id)+'）</option>';
+    }
+    h+='</select><button class="btn btn-d" data-act="merge" data-id="'+esc(c.id)+'">🔀 并入本公司</button></div>';
+    h+='<div class="mrow"><button class="btn btn-s" data-close="mDetail">关闭</button></div>';
+    $('dBody').innerHTML=h;
+    openModal('mDetail');
+  }).catch(function(e){toast(e.message,true);});
+}
+
+/* ── 事件绑定 ───────────────────────────────────────────── */
+$('coReload').onclick=loadAll;
+$('coSearch').addEventListener('change',loadCompanies);
+$('coTier').addEventListener('change',loadCompanies);
+$('coStatus').addEventListener('change',loadCompanies);
+$('coRows').addEventListener('click',function(e){
+  var b=e.target.closest('[data-act]');if(!b)return;
+  if(b.getAttribute('data-act')==='detail')openDetail(b.getAttribute('data-id'));
+  else if(b.getAttribute('data-act')==='delCo'){
+    if(!confirm('确定删除该公司及其全部联系人、商机、动态？不可撤销。'))return;
+    api('/admin/api/crm/companies/'+encodeURIComponent(b.getAttribute('data-id')),{method:'DELETE'}).then(function(){toast('已删除');loadAll();}).catch(function(err){toast(err.message,true);});
+  }
+});
+function moveDeal(dealId,stage){
+  api('/admin/api/crm/deals/'+encodeURIComponent(dealId),{method:'PATCH',body:{stage:stage}}).then(function(){toast('已推进到: '+STAGE_L[stage]);loadDeals().then(renderStats);}).catch(function(err){toast(err.message,true);loadDeals();});
+}
+$('kanban').addEventListener('change',function(e){
+  var s=e.target;
+  if(s.tagName!=='SELECT'||!s.getAttribute('data-deal'))return;
+  moveDeal(s.getAttribute('data-deal'),s.value);
+});
+var dragDealId=null;
+$('kanban').addEventListener('dragstart',function(e){
+  var card=e.target.closest('.kcard');
+  if(!card)return;
+  dragDealId=card.getAttribute('data-deal');
+  e.dataTransfer.effectAllowed='move';
+  try{e.dataTransfer.setData('text/plain',String(dragDealId));}catch(err){}
+  card.classList.add('dragging');
+});
+$('kanban').addEventListener('dragend',function(e){
+  var card=e.target.closest('.kcard');
+  if(card)card.classList.remove('dragging');
+  dragDealId=null;
+});
+$('kanban').addEventListener('dragover',function(e){
+  var col=e.target.closest('.kcol');
+  if(!col||!dragDealId)return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect='move';
+  col.classList.add('dragover');
+});
+$('kanban').addEventListener('dragleave',function(e){
+  var col=e.target.closest('.kcol');
+  if(col)col.classList.remove('dragover');
+});
+$('kanban').addEventListener('drop',function(e){
+  var col=e.target.closest('.kcol');
+  if(!col)return;
+  e.preventDefault();
+  col.classList.remove('dragover');
+  var id=dragDealId;
+  if(!id){try{id=e.dataTransfer.getData('text/plain');}catch(err){}}
+  var stage=col.getAttribute('data-stage');
+  if(!id||!stage)return;
+  dragDealId=null;
+  moveDeal(id,stage);
+});
+$('kanban').addEventListener('click',delDealHandler);
+function delDealHandler(e){
+  var b=e.target.closest('[data-act]');if(!b||b.getAttribute('data-act')!=='delDeal')return;
+  if(!confirm('确定删除该商机？'))return;
+  api('/admin/api/crm/deals/'+encodeURIComponent(b.getAttribute('data-id')),{method:'DELETE'}).then(function(){toast('已删除商机');loadAll();}).catch(function(err){toast(err.message,true);});
+}
+$('taskRows').addEventListener('click',function(e){
+  var b=e.target.closest('[data-act]');if(!b)return;
+  var id=b.getAttribute('data-id');
+  if(b.getAttribute('data-act')==='doneTask'){
+    api('/admin/api/crm/activities/'+encodeURIComponent(id),{method:'PATCH',body:{is_completed:true}}).then(function(){toast('已完成 ✓');loadAll();}).catch(function(err){toast(err.message,true);});
+  }else if(b.getAttribute('data-act')==='delTask'){
+    if(!confirm('确定删除该任务？'))return;
+    api('/admin/api/crm/activities/'+encodeURIComponent(id),{method:'DELETE'}).then(function(){loadAll();}).catch(function(err){toast(err.message,true);});
+  }
+});
+$('promoteBtn').onclick=function(){
+  var v=$('promoteId').value.trim();
+  if(!v){toast('请先填写 customers 表的数字 ID',true);return;}
+  $('promoteMsg').textContent='提升中…';
+  api('/admin/api/crm/companies/promote',{method:'POST',body:{customer_id:Number(v)}}).then(function(b){
+    $('promoteMsg').textContent='';
+    toast(b.already_promoted?'该线索已是销售公司（幂等跳过）':'已提升为销售公司: '+b.company.name);
+    $('promoteId').value='';
+    loadAll();
+  }).catch(function(err){$('promoteMsg').textContent='';toast(err.message,true);});
+};
+$('coNew').onclick=function(){['ncName','ncDomain','ncCountry','ncIndustry'].forEach(function(id){$(id).value='';});openModal('mNewCo');};
+$('ncSave').onclick=function(){
+  if(!$('ncName').value.trim()){toast('公司名称不能为空',true);return;}
+  api('/admin/api/crm/companies',{method:'POST',body:{name:$('ncName').value,domain:$('ncDomain').value,country:$('ncCountry').value,industry:$('ncIndustry').value}}).then(function(b){
+    closeModal('mNewCo');toast('已创建公司: '+b.company.name);loadAll();
+  }).catch(function(err){toast(err.message,true);});
+};
+$('dealNew').onclick=function(){
+  var opts='';
+  for(var i=0;i<STATE.companies.length;i++){
+    var c=STATE.companies[i];
+    opts+='<option value="'+esc(c.id)+'">'+esc(c.name)+'</option>';
+  }
+  $('ndCompany').innerHTML=opts||'<option value="">（先创建或提升一家公司）</option>';
+  ['ndTitle','ndAmount','ndIncoterms','ndClose'].forEach(function(id){$(id).value='';});
+  openModal('mNewDeal');
+};
+$('ndSave').onclick=function(){
+  var body={company_id:$('ndCompany').value,title:$('ndTitle').value};
+  if(!body.company_id||!body.title.trim()){toast('公司和商机名称必填',true);return;}
+  if($('ndAmount').value!=='')body.amount=Number($('ndAmount').value);
+  if($('ndIncoterms').value)body.incoterms=$('ndIncoterms').value;
+  if($('ndClose').value)body.expected_close_date=$('ndClose').value;
+  api('/admin/api/crm/deals',{method:'POST',body:body}).then(function(){
+    closeModal('mNewDeal');toast('已创建商机');loadAll();
+  }).catch(function(err){toast(err.message,true);});
+};
+
+/* 详情弹窗内的事件委托（innerHTML 重建不影响委托） */
+$('dBody').addEventListener('click',function(e){
+  var cs=e.target.closest('[data-close]');
+  if(cs){closeModal(cs.getAttribute('data-close'));return;}
+  var b=e.target.closest('[data-act]');if(!b)return;
+  var act=b.getAttribute('data-act'),id=b.getAttribute('data-id');
+  if(act==='saveCo'){
+    api('/admin/api/crm/companies/'+encodeURIComponent(id),{method:'PATCH',body:{tier:$('dTier').value,lead_status:$('dStatus').value,chinese_remarks:$('dRemarks').value}}).then(function(){toast('公司信息已保存');loadAll();}).catch(function(err){toast(err.message,true);});
+  }else if(act==='addContact'){
+    if(!$('dcName').value.trim()){toast('联系人姓名必填',true);return;}
+    api('/admin/api/crm/contacts',{method:'POST',body:{company_id:id,full_name:$('dcName').value,job_title:$('dcTitle').value,email:$('dcEmail').value,whatsapp_or_phone:$('dcPhone').value}}).then(function(){toast('已添加联系人');openDetail(id);loadCompanies().then(renderStats);}).catch(function(err){toast(err.message,true);});
+  }else if(act==='delContact'){
+    if(!confirm('确定删除该联系人？'))return;
+    api('/admin/api/crm/contacts/'+encodeURIComponent(id),{method:'DELETE'}).then(function(){toast('已删除');var mid=document.querySelector('#dBody [data-act="merge"]').getAttribute('data-id');openDetail(mid);}).catch(function(err){toast(err.message,true);});
+  }else if(act==='mkPrimary'){
+    api('/admin/api/crm/contacts/'+encodeURIComponent(id),{method:'PATCH',body:{is_primary:true}}).then(function(){var mid=document.querySelector('#dBody [data-act="merge"]').getAttribute('data-id');openDetail(mid);}).catch(function(err){toast(err.message,true);});
+  }else if(act==='delDeal'){
+    if(!confirm('确定删除该商机？'))return;
+    api('/admin/api/crm/deals/'+encodeURIComponent(id),{method:'DELETE'}).then(function(){toast('已删除商机');var mid=document.querySelector('#dBody [data-act="merge"]').getAttribute('data-id');openDetail(mid);loadDeals().then(renderStats);}).catch(function(err){toast(err.message,true);});
+  }else if(act==='addActivity'){
+    if(!$('daSummary').value.trim()){toast('内容不能为空',true);return;}
+    var body2={company_id:id,type:$('daType').value,summary:$('daSummary').value};
+    if($('daDue').value&&body2.type==='task')body2.due_date=$('daDue').value;
+    api('/admin/api/crm/activities',{method:'POST',body:body2}).then(function(){toast('已记录');openDetail(id);loadTasks().then(renderStats);}).catch(function(err){toast(err.message,true);});
+  }else if(act==='merge'){
+    var src=$('dMergeSrc').value;
+    if(!src){toast('请先选择要并入的公司',true);return;}
+    if(!confirm('将把所选公司的联系人、商机、动态全部并入本公司并删除所选公司（单事务、可溯源）。确定继续？'))return;
+    api('/admin/api/crm/companies/merge',{method:'POST',body:{target_company_id:id,source_company_id:src}}).then(function(){toast('合并完成');loadAll();openDetail(id);}).catch(function(err){toast(err.message,true);});
+  }
+});
+document.querySelectorAll('.modal-back').forEach(function(m){
+  m.addEventListener('click',function(e){if(e.target===m)m.classList.remove('open');});
+});
+document.querySelectorAll('[data-close]').forEach(function(b){
+  b.addEventListener('click',function(){closeModal(b.getAttribute('data-close'));});
+});
+
+loadAll();
+})();
+</script></body></html>`;
 
 /* ── WebAuthn 2FA pages (post-V2 Stage 29) ─────────────────────────────── */
 
@@ -5692,5 +6148,6 @@ document.getElementById('copyBtn').onclick=function(){
 load();
 })();
 </script></body></html>`;
+
 
 
