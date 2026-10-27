@@ -6305,7 +6305,7 @@ function openDetail(id){
   api('/admin/api/crm/companies/'+encodeURIComponent(id)).then(function(b){
     var c=b.company,contacts=b.contacts||[],deals=b.deals||[],acts=b.activities||[],csg=b.signals||[];
     var h='<h3>'+esc(c.name)+' '+tierBadge(c.tier)+' '+statusBadge(c.lead_status)+(c.customer_since?' <span class="badge b-cust">正式客户 · '+esc(c.customer_since)+' 起</span>':'')+(Number(c.do_not_contact)?' <span class="badge b-dnc">禁止联系</span>':'')+'</h3>';
-    h+='<p class="hint" style="margin:0 0 10px">ID '+esc(c.id)+' · '+esc(c.domain||'无域名')+' '+(c.domain?domailBadge(c.domain_email_status):'')+' · '+esc(c.country||'国家未知')+' · '+esc(c.industry||'行业未知')+(c.merged_from_ids?' · 已并入来源: '+esc(c.merged_from_ids):'')+'</p>';
+    h+='<p class="hint" style="margin:0 0 10px">ID '+esc(c.id)+' · '+esc(c.domain||'无域名')+' '+(c.domain?domailBadge(c.domain_email_status):'')+' · '+esc(c.country||'国家未知')+' · '+esc(c.industry||'行业未知')+(c.address?' · 📍 '+esc(c.address):'')+(c.external_id?' · 编号 '+esc(c.external_id):'')+(c.dealer_brands?' · 经销/代理品牌: '+esc(c.dealer_brands):'')+(c.merged_from_ids?' · 已并入来源: '+esc(c.merged_from_ids):'')+'</p>';
     h+='<div class="grid2 f"><div><label>分级</label><select id="dTier">';
     ['A','B','C','VIP','unqualified'].forEach(function(t){h+='<option value="'+t+'"'+(t===c.tier?' selected':'')+'>'+TIER_L[t]+'</option>';});
     h+='</select></div><div><label>销售状态</label><select id="dStatus">';

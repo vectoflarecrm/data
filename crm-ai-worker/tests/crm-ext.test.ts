@@ -63,6 +63,7 @@ async function makeDb() {
       do_not_contact INTEGER DEFAULT 0,
       domain_email_status TEXT NOT NULL DEFAULT 'pending',
       source TEXT NOT NULL DEFAULT 'unknown',
+      address TEXT, external_id TEXT, dealer_brands TEXT,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );

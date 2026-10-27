@@ -234,6 +234,19 @@ export const IMPORT_HEADERS: Record<ImportEntity, Record<string, string>> = {
     tier: "tier", 分级: "tier", 等级: "tier", 客户分级: "tier",
     chinese_remarks: "chinese_remarks", 备注: "chinese_remarks", 中文备注: "chinese_remarks",
     remark: "chinese_remarks", remarks: "chinese_remarks", 备注2: "chinese_remarks",
+    // 0041 公司扩展属性：Puerto Rico 表的 Street address / company ID / from
+    // 三列此前无对应字段被忽略，现归入 companies 新列（contacts/deals 导入经
+    // companyMap 同样生效）。from 列语义：该公司是这些品牌的 dealer/distributor。
+    address: "address", street: "address", streetaddress: "address",
+    地址: "address", 街道地址: "address", 详细地址: "address", 通讯地址: "address",
+    办公地址: "address",
+    external_id: "external_id", companyid: "external_id", company_code: "external_id",
+    companycode: "external_id", externalid: "external_id", 公司编号: "external_id",
+    公司id: "external_id", 外部编号: "external_id", 外部id: "external_id",
+    dealer_brands: "dealer_brands", dealerbrands: "dealer_brands", from: "dealer_brands",
+    dealerof: "dealer_brands", distributorof: "dealer_brands", distributors: "dealer_brands",
+    dealers: "dealer_brands", 经销品牌: "dealer_brands", 代理品牌: "dealer_brands",
+    经销商: "dealer_brands", 分销商: "dealer_brands",
   },
   contacts: {
     company: "company", 公司: "company", 公司名称: "company", companyname: "company",

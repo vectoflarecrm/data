@@ -180,6 +180,7 @@ function makeDb() {
       do_not_contact INTEGER DEFAULT 0,
       domain_email_status TEXT NOT NULL DEFAULT 'pending',
       source TEXT NOT NULL DEFAULT 'unknown',
+      address TEXT, external_id TEXT, dealer_brands TEXT,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -421,6 +422,21 @@ describe("matchHeader / matchColumns / detectEntity", () => {
     expect(isExcelErrorValue("#Acme")).toBe(false);
   });
 
+  it("0041 扩展属性：Street address / company ID / from 各归新列", () => {
+    expect(matchHeader("companies", "Street address")).toBe("address");
+    expect(matchHeader("companies", "street")).toBe("address");
+    expect(matchHeader("companies", "地址")).toBe("address");
+    expect(matchHeader("companies", "company ID")).toBe("external_id");
+    expect(matchHeader("companies", "公司编号")).toBe("external_id");
+    expect(matchHeader("companies", "from")).toBe("dealer_brands");
+    expect(matchHeader("companies", "经销品牌")).toBe("dealer_brands");
+    expect(matchHeader("companies", "Distributors")).toBe("dealer_brands");
+    // contacts 整表视角：from / company ID 不误吸字段（company name 先占 company，
+    // company ID 的包含匹配被 taken 拦下 → 保持未识别，由 companyMap 接管）。
+    const { keyByIndex } = matchColumns("contacts", ["company ID", "company name", "from"]);
+    expect(keyByIndex).toEqual([null, "company", null]);
+  });
+
   it("matchColumns：一列一字段，重复列第二列让位", () => {
     const { keyByIndex, keys } = matchColumns("companies", ["客户名称", "公司", "网址"]);
     expect(keyByIndex).toEqual(["name", null, "domain"]); // 公司 与 客户名称 都归 name，第二列让位
@@ -551,8 +567,9 @@ describe("POST /admin/api/crm/import — Excel 智能导入", () => {
       "First Name": "first_name", "Last Name": "last_name", TEL: "tel",
       Country: "country", Website: "domain", "中文备注": "chinese_remarks",
       "Products & Services in English": "industry",
+      "company ID": "external_id", "from": "dealer_brands",
     });
-    expect(r.body.unmapped).toEqual(["company ID", "from"]);
+    expect(r.body.unmapped).toEqual([]);
 
     const list = await call(env, "GET", "/admin/api/crm/companies?limit=200");
     const byName = new Map(list.body.companies.map((c: any) => [c.name, c]));
@@ -560,9 +577,13 @@ describe("POST /admin/api/crm/import — Excel 智能导入", () => {
     expect(byName.get("1 OCEAN WATERSPORTS").domain).toBeNull();
     expect(byName.get("Advanced Surf & Sail").domain).toBeNull();
     expect(byName.get("787 Yachts").domain).toBe("787yachts.com");
-    // 公司级列补全到自动创建的公司
+    // 公司级列补全到自动创建的公司（0041：地址/编号/经销品牌）
     expect(byName.get("787 Yachts")).toMatchObject({
       country: "Puerto Rico", industry: "Yacht brokerage", chinese_remarks: "备注三",
+      external_id: "PR0003",
+    });
+    expect(byName.get("1 OCEAN WATERSPORTS")).toMatchObject({
+      address: null, external_id: "PR0001", dealer_brands: "x",
     });
     expect(byName.get("Company Only Row")).toMatchObject({
       domain: "companyonly.com", country: "Puerto Rico", chinese_remarks: "只有公司没有联系人",
@@ -600,6 +621,37 @@ describe("POST /admin/api/crm/import — Excel 智能导入", () => {
     expect(again.body.created).toBe(0);
     expect(again.body.skipped).toBe(2);
     expect(again.body.companies_created).toBe(0); // 公司按名称/域名匹配，不重建
+  });
+
+  it("重复导入回填已有公司的 0041 空列（地址/编号/经销品牌），不覆盖已有值", async () => {
+    const { env, db } = makeEnv();
+    // 模拟生产现状：公司已按旧逻辑入库，缺 address/external_id/dealer_brands。
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, domain, country, tier, lead_status, source)
+       VALUES ('c_1', '1 OCEAN WATERSPORTS', NULL, 'Puerto Rico', 'unqualified', 'new', 'csv_import')`,
+    ).run();
+    const xlsx = await buildZip([
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([
+        ["company ID", "company name", "First Name", "Last Name", "Street address", "from"],
+        ["PR0001", "1 OCEAN WATERSPORTS", "Carlos", "Turrino", "Carr. 187 Km 4.2, Loíza", '"cressi, Garmin"'],
+      ])) },
+    ]);
+    const r = await call(env, "POST", "/admin/api/crm/import", { xlsx_base64: b64(xlsx) });
+    expect(r.status).toBe(200);
+    expect(r.body.created).toBe(1); // 联系人新建
+    expect(r.body.companies_created).toBe(0); // 公司按名称匹配，不重建
+    const row = db.prepare("SELECT * FROM crm_companies WHERE id = 'c_1'").get() as any;
+    expect(row.address).toBe("Carr. 187 Km 4.2, Loíza");
+    expect(row.external_id).toBe("PR0001");
+    expect(row.dealer_brands).toBe("cressi, Garmin"); // CSV 残留引号被清洗
+
+    // 再导一次：已有值不被覆盖（NULLIF 条件更新），数据不变。
+    const again = await call(env, "POST", "/admin/api/crm/import", { xlsx_base64: b64(xlsx) });
+    expect(again.body.created).toBe(0);
+    const row2 = db.prepare("SELECT * FROM crm_companies WHERE id = 'c_1'").get() as any;
+    expect(row2).toMatchObject({
+      address: "Carr. 187 Km 4.2, Loíza", external_id: "PR0001", dealer_brands: "cressi, Garmin",
+    });
   });
 
   it("deals 导入：表内公司级列（国家/官网）同样补全到自动创建的公司", async () => {

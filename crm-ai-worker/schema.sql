@@ -840,6 +840,11 @@ CREATE TABLE IF NOT EXISTS crm_companies (
   -- 0038 ⑤ 来源归因：获客来源（promoted/manual/csv_import/merge/referral/
   -- other/unknown），创建路径自动打标，PATCH 可修正。见 migrations/0038。
   source TEXT NOT NULL DEFAULT 'unknown',
+  -- 0041 公司扩展属性：地址 / 外部系统编号 / 经销代理品牌（Excel 导入的
+  -- Street address、company ID、from 列）。见 migrations/0041。
+  address TEXT,
+  external_id TEXT,
+  dealer_brands TEXT,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -847,6 +852,7 @@ CREATE TABLE IF NOT EXISTS crm_companies (
 CREATE INDEX IF NOT EXISTS idx_companies_domain ON crm_companies(domain);
 CREATE INDEX IF NOT EXISTS idx_companies_lead_status ON crm_companies(lead_status);
 CREATE INDEX IF NOT EXISTS idx_companies_domain_email ON crm_companies(domain_email_status);
+CREATE INDEX IF NOT EXISTS idx_companies_external_id ON crm_companies(external_id);
 CREATE INDEX IF NOT EXISTS idx_companies_source ON crm_companies(source);
 
 -- Contacts: decision makers per company. The first promoted pipeline

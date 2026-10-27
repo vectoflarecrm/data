@@ -80,6 +80,10 @@ export interface CrmCompanyRow {
   do_not_contact: number;
   /** 0038 ⑤ 来源归因：promoted/manual/csv_import/merge/referral/other/unknown。 */
   source: string;
+  /** 0041 公司扩展属性：地址 / 外部编号 / 经销代理品牌（Excel 导入补全）。 */
+  address: string | null;
+  external_id: string | null;
+  dealer_brands: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1482,6 +1486,19 @@ interface ImportResult {
 
 const IMPORT_ROW_LIMIT = 1000;
 
+/** 经销/代理品牌值清洗：去掉 CSV 导入残留的包裹引号与内部双写引号。
+ *  Excel 单元格里的原始文本常是 `"brandA, brandB"`（原 CSV 字段含逗号被
+ *  引号包裹、引号被当作字面量保留），展示与检索前统一剥掉。 */
+function cleanDealerBrandsValue(v: string): string {
+  return v
+    .trim()
+    .replace(/^"+/, "")
+    .replace(/"+$/, "")
+    .replace(/""/g, '"')
+    .replace(/^[,;\s]+|[,;\s]+$/g, "")
+    .trim();
+}
+
 /** entity 解析：'auto'（默认）按表头自动识别，否则显式三选一。 */
 function resolveImportEntity(raw: unknown, header: string[]): ImportEntity {
   if (raw === undefined || raw === null || raw === "" || raw === "auto") {
@@ -1564,6 +1581,32 @@ async function runImportRows(
   let companiesCreated = 0;
   const companies = await loadCompanyCache(env);
 
+  // 已有公司回填 0041 扩展列（地址/外部编号/经销代理品牌）：只补空值
+  // （NULLIF+COALESCE），不覆盖人工修改。按「公司 × 字段」去重——多行同公司
+  // 时，第一行可能只带编号没带品牌，不能因此拦掉后续行对该字段的回填。
+  const enrichedFields = new Set<string>();
+  const backfillCompany = (id: string, companyRec: Record<string, string>): void => {
+    const fields: Array<[string, string]> = [
+      ["address", (companyRec.address ?? "").trim()],
+      ["external_id", (companyRec.external_id ?? "").trim()],
+      ["dealer_brands", cleanDealerBrandsValue(companyRec.dealer_brands ?? "")],
+    ];
+    const sets: string[] = [];
+    const binds: unknown[] = [];
+    for (const [field, value] of fields) {
+      if (!value || enrichedFields.has(`${id}|${field}`)) continue;
+      enrichedFields.add(`${id}|${field}`);
+      sets.push(`${field} = COALESCE(NULLIF(${field}, ''), ?${binds.length + 1}, ${field})`);
+      binds.push(value);
+    }
+    if (!sets.length) return;
+    statements.push(
+      env.DB.prepare(
+        `UPDATE crm_companies SET ${sets.join(", ")} WHERE id = ?${binds.length + 1}`,
+      ).bind(...binds, id),
+    );
+  };
+
   const resolveCompany = (
     rec: Record<string, string>,
     companyRec: Record<string, string>,
@@ -1574,12 +1617,16 @@ async function runImportRows(
     if (!name && !domain) return { error: `第 ${rowIndex} 行: 缺少公司名称/域名` };
     // 名称优先匹配：真实表格中同一公司名写法一致，是更强的身份键。
     if (name && companies.byName.has(name.toLowerCase())) {
-      return { id: companies.byName.get(name.toLowerCase())! };
+      const id = companies.byName.get(name.toLowerCase())!;
+      backfillCompany(id, companyRec);
+      return { id };
     }
     // 无名行才按域名兜底匹配：不同公司共享域名（经销商共用品牌官网）时
     // 不可凭域名把后到的公司并到先到的公司上。
     if (!name && domain && companies.byDomain.has(domain)) {
-      return { id: companies.byDomain.get(domain)! };
+      const id = companies.byDomain.get(domain)!;
+      backfillCompany(id, companyRec);
+      return { id };
     }
     // Auto-create the company (OpenCRM import behavior): contacts/deals rows
     // name a company that does not exist yet — create it so the row imports.
@@ -1591,8 +1638,9 @@ async function runImportRows(
     if (bindDomain) companies.byDomain.set(bindDomain, id);
     statements.push(
       env.DB.prepare(
-        `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status, chinese_remarks, source)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'unqualified', 'new', ?6, 'csv_import')`,
+        `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status,
+           chinese_remarks, address, external_id, dealer_brands, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'unqualified', 'new', ?6, ?7, ?8, ?9, 'csv_import')`,
       ).bind(
         id,
         companyName,
@@ -1600,6 +1648,9 @@ async function runImportRows(
         (companyRec.industry ?? "").trim() || null,
         (companyRec.country ?? "").trim() || null,
         (companyRec.chinese_remarks ?? "").trim() || null,
+        (companyRec.address ?? "").trim() || null,
+        (companyRec.external_id ?? "").trim() || null,
+        cleanDealerBrandsValue(companyRec.dealer_brands ?? "") || null,
       ),
     );
     companiesCreated++;
@@ -1617,6 +1668,11 @@ async function runImportRows(
         continue;
       }
       if (companies.byName.has(name.toLowerCase()) || (domain && companies.byDomain.has(domain))) {
+        // 已存在：回填 0041 扩展列的空值（地址/编号/经销品牌）。
+        const existingId =
+          companies.byName.get(name.toLowerCase()) ??
+          (domain ? companies.byDomain.get(domain) : undefined);
+        if (existingId) backfillCompany(existingId, rec);
         result.skipped++;
         continue;
       }
@@ -1627,8 +1683,9 @@ async function runImportRows(
       if (domain) companies.byDomain.set(domain, id);
       statements.push(
         env.DB.prepare(
-          `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status, chinese_remarks, source)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'new', ?7, 'csv_import')`,
+          `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status,
+             chinese_remarks, address, external_id, dealer_brands, source)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'new', ?7, ?8, ?9, ?10, 'csv_import')`,
         ).bind(
           id,
           name,
@@ -1637,6 +1694,9 @@ async function runImportRows(
           (rec.country ?? "").trim() || null,
           tier,
           (rec.chinese_remarks ?? "").trim() || null,
+          (rec.address ?? "").trim() || null,
+          (rec.external_id ?? "").trim() || null,
+          cleanDealerBrandsValue(rec.dealer_brands ?? "") || null,
         ),
       );
       result.created++;
