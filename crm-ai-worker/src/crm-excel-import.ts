@@ -148,7 +148,10 @@ export async function parseXlsx(bytes: Uint8Array): Promise<string[][]> {
   const sheetRe = /^xl\/worksheets\/sheet(\d+)\.xml$/;
   const sheets = entries
     .map((e) => ({ e, n: sheetRe.exec(e.name)?.[1] }))
-    .filter((x): x is { e: ZipEntry; n: string } => x.n !== null)
+    // 注意 ?.[1] 匹配失败产生 undefined（不是 null），必须排除 undefined，
+    // 否则 filter 恒真、全部条目涌入，sheets[0] 会错拿 [Content_Types].xml
+    // 等非工作表条目（真实 xlsx 的第一个条目），parse 出 0 行。
+    .filter((x): x is { e: ZipEntry; n: string } => x.n !== undefined)
     .sort((a, b) => Number(a.n) - Number(b.n));
   if (!sheets.length) throw new Error("xlsx 中没有工作表（xl/worksheets/sheetN.xml）");
 

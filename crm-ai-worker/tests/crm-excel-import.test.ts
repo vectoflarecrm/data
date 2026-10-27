@@ -315,6 +315,22 @@ describe("parseXlsx（零依赖 ZIP + sheet XML 解析）", () => {
     expect(rows).toEqual([["是这张"], ["数据"]]);
   });
 
+  it("真实 xlsx 布局：[Content_Types].xml 等非工作表条目排在前面也能选中 sheet1（回归）", async () => {
+    // 真实导出的 xlsx 第一个条目恒为 [Content_Types].xml；曾经 filter 用
+    // `x.n !== null` 判空（?.[1] 失败产生 undefined 而非 null）导致恒真，
+    // sheets[0] 错拿 [Content_Types].xml → parse 出 0 行、导入必败。
+    const xlsx = await buildZip([
+      { name: "[Content_Types].xml", content: '<?xml version="1.0"?><Types/>' },
+      { name: "_rels/.rels", content: '<?xml version="1.0"?><Relationships/>' },
+      { name: "xl/workbook.xml", content: '<?xml version="1.0"?><workbook/>' },
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([["公司"], ["Acme"]])) },
+      { name: "xl/sharedStrings.xml", content: sharedStringsXml([]) },
+      { name: "docProps/core.xml", content: '<?xml version="1.0"?><coreProperties/>' },
+    ]);
+    const rows = await parseXlsx(xlsx);
+    expect(rows).toEqual([["公司"], ["Acme"]]);
+  });
+
   it("XML 实体解码（&amp; / &lt; / 数字实体）", async () => {
     const content =
       `<?xml version="1.0"?><worksheet><sheetData>` +
