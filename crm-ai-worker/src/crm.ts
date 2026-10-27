@@ -84,6 +84,38 @@ export interface CrmCompanyRow {
   address: string | null;
   external_id: string | null;
   dealer_brands: string | null;
+  /** 0042 公司信息对齐 /admin 客户字段：法定/交易名称、地址组、公司级电话/WhatsApp。 */
+  legal_name: string | null;
+  trading_name: string | null;
+  zip_city: string | null;
+  city: string | null;
+  region: string | null;
+  postal_code: string | null;
+  country_code: string | null;
+  tel: string | null;
+  whatsapp: string | null;
+  /** 0042 业务属性：产品与服务 / 业务标签 / 公司类型 / 商业模式 / 规模与市场。 */
+  products_services: string | null;
+  business_tag: string | null;
+  company_type: string | null;
+  business_model: string | null;
+  founded_year: string | null;
+  employee_range: string | null;
+  description: string | null;
+  target_markets: string | null;
+  customer_segment: string | null;
+  product_categories: string | null;
+  company_size: string | null;
+  geographic_coverage: string | null;
+  /** 0042 业务角色布尔标签（制造商/进口商/分销商/批发商/零售商/电商/租赁/OEM）。 */
+  is_manufacturer: number;
+  is_importer: number;
+  is_distributor: number;
+  is_wholesaler: number;
+  is_retailer: number;
+  is_ecommerce: number;
+  is_rental: number;
+  is_oem: number;
   created_at: string;
   updated_at: string;
 }
@@ -99,7 +131,12 @@ export interface CrmContactRow {
   full_name: string;
   job_title: string | null;
   email: string | null;
+  /** 遗留单列（0042 前的合并列；已回填进 whatsapp，停写保留供老代码读取）。 */
   whatsapp_or_phone: string | null;
+  /** 0042 电话三列拆分（同 /admin 联系人格式）：固话 / 手机 / WhatsApp。 */
+  tel: string | null;
+  cellphone: string | null;
+  whatsapp: string | null;
   linkedin_url: string | null;
   is_primary: number;
   /** 触达质量闭环：unknown/valid/invalid（退信自动标 invalid）。 */
@@ -187,6 +224,44 @@ const LEAD_STATUSES = [
 const ACTIVITY_TYPES = ["note", "task", "call", "meeting"] as const;
 /** 触达质量闭环：邮箱状态机（退信自动标 invalid，发送前拦截）。 */
 const EMAIL_STATUSES = ["unknown", "valid", "invalid"] as const;
+
+/** 0042 公司信息对齐 /admin 客户字段：可编辑文本字段与长度上限
+ * （[字段名, 最大长度]，updateCompany PATCH / 导入共用语义）。 */
+const COMPANY_TEXT_FIELDS: ReadonlyArray<readonly [string, number]> = [
+  ["legal_name", 200],
+  ["trading_name", 200],
+  ["zip_city", 100],
+  ["city", 100],
+  ["region", 100],
+  ["postal_code", 100],
+  ["country_code", 100],
+  ["tel", 100],
+  ["whatsapp", 100],
+  ["products_services", 2000],
+  ["business_tag", 200],
+  ["company_type", 200],
+  ["business_model", 200],
+  ["founded_year", 20],
+  ["employee_range", 100],
+  ["description", 2000],
+  ["target_markets", 500],
+  ["customer_segment", 200],
+  ["product_categories", 500],
+  ["company_size", 100],
+  ["geographic_coverage", 500],
+];
+
+/** 0042 业务角色布尔标签（业务类型勾选框，0/1）。 */
+const COMPANY_ROLE_FLAGS = [
+  "is_manufacturer",
+  "is_importer",
+  "is_distributor",
+  "is_wholesaler",
+  "is_retailer",
+  "is_ecommerce",
+  "is_rental",
+  "is_oem",
+] as const;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -322,6 +397,37 @@ async function createCompany(
       optString(body.chinese_remarks, "chinese_remarks", 4000),
     )
     .run();
+  // 0042 公司信息对齐 /admin 客户字段：创建时允许携带 0041/0042 扩展字段。
+  const extraSets: string[] = [];
+  const extraBinds: unknown[] = [];
+  for (const [field, maxLength] of [
+    ...[
+      ["address", 500],
+      ["external_id", 100],
+      ["dealer_brands", 500],
+    ] as ReadonlyArray<readonly [string, number]>,
+    ...COMPANY_TEXT_FIELDS,
+  ]) {
+    if (field in body) {
+      extraSets.push(`${field} = ?${extraSets.length + 1}`);
+      extraBinds.push(optString(body[field], field, maxLength));
+    }
+  }
+  for (const flag of COMPANY_ROLE_FLAGS) {
+    if (flag in body) {
+      const value = optBool(body[flag], flag);
+      if (value === null) throw new HttpError(400, `${flag} 需要布尔值`);
+      extraSets.push(`${flag} = ?${extraSets.length + 1}`);
+      extraBinds.push(value ? 1 : 0);
+    }
+  }
+  if (extraSets.length) {
+    await env.DB.prepare(
+      `UPDATE crm_companies SET ${extraSets.join(", ")} WHERE id = ?${extraSets.length + 1}`,
+    )
+      .bind(...extraBinds, id)
+      .run();
+  }
   await auditAdminAction(env, request, auth, "CREATE_CRM_COMPANY", "crm_company", id, {
     name,
   });
@@ -428,6 +534,21 @@ async function updateCompany(
   if ("dealer_brands" in body) {
     sets.push(`dealer_brands = ?${sets.length + 2}`);
     binds.push(optString(body.dealer_brands, "dealer_brands", 500));
+  }
+  // 0042 公司信息对齐 /admin 客户字段：详情页分区表单全部可编辑。
+  for (const [field, maxLength] of COMPANY_TEXT_FIELDS) {
+    if (field in body) {
+      sets.push(`${field} = ?${sets.length + 2}`);
+      binds.push(optString(body[field], field, maxLength));
+    }
+  }
+  for (const flag of COMPANY_ROLE_FLAGS) {
+    if (flag in body) {
+      const value = optBool(body[flag], flag);
+      if (value === null) throw new HttpError(400, `${flag} 需要布尔值`);
+      sets.push(`${flag} = ?${sets.length + 2}`);
+      binds.push(value ? 1 : 0);
+    }
   }
   if ("tier" in body) {
     sets.push(`tier = ?${sets.length + 2}`);
@@ -548,12 +669,15 @@ async function promoteLead(
 
   // Contacts: copy every named/reachable pipeline contact (seq=1 is primary).
   // full_name is NOT NULL — fall back through first/last name to a seq label.
+  // 0042 电话三列直拷（tel/cellphone/whatsapp 各自独立），遗留单列
+  // whatsapp_or_phone 继续按旧 COALESCE 填充（兼容老代码读取）。
   await env.DB.prepare(
-    `INSERT INTO crm_contacts (id, company_id, full_name, job_title, email, whatsapp_or_phone, linkedin_url, is_primary)
+    `INSERT INTO crm_contacts (id, company_id, full_name, job_title, email, whatsapp_or_phone, tel, cellphone, whatsapp, linkedin_url, is_primary)
      SELECT 'ct_' || ct.id, ?1,
        COALESCE(NULLIF(TRIM(COALESCE(NULLIF(ct.full_name, ''), TRIM(COALESCE(ct.first_name, '') || ' ' || COALESCE(ct.last_name, '')))), ''), '联系人-' || ct.seq),
        ct.title, ct.email,
        COALESCE(NULLIF(ct.whatsapp, ''), NULLIF(ct.cellphone, ''), NULLIF(ct.tel, '')),
+       NULLIF(ct.tel, ''), NULLIF(ct.cellphone, ''), NULLIF(ct.whatsapp, ''),
        ct.linkedin_url,
        CASE WHEN ct.seq = 1 THEN 1 ELSE 0 END
      FROM contacts ct
@@ -623,8 +747,9 @@ async function mergeCompanies(
       .bind(source.domain, source.id)
       .first<{ id: string }>());
 
-  // 数据保全：来源公司的非空字段在目标为空时回填（行业/国家/0041 扩展列），
-  // 中文备注以 [并入备注] 追加保留 —— 来源行随后删除，不保全即丢失。
+  // 数据保全：来源公司的非空字段在目标为空时回填（行业/国家/0041 扩展列/
+  // 0042 admin 对齐列），中文备注以 [并入备注] 追加保留 —— 来源行随后删除，
+  // 不保全即丢失。
   const carrySets: string[] = [];
   const carryBinds: unknown[] = [];
   const carryFields: Array<[string, unknown, unknown]> = [
@@ -633,6 +758,28 @@ async function mergeCompanies(
     ["address", source.address, target.address],
     ["external_id", source.external_id, target.external_id],
     ["dealer_brands", source.dealer_brands, target.dealer_brands],
+    // 0042 公司信息对齐 /admin 客户字段：字符串列「目标为空才回填」。
+    ["legal_name", source.legal_name, target.legal_name],
+    ["trading_name", source.trading_name, target.trading_name],
+    ["zip_city", source.zip_city, target.zip_city],
+    ["city", source.city, target.city],
+    ["region", source.region, target.region],
+    ["postal_code", source.postal_code, target.postal_code],
+    ["country_code", source.country_code, target.country_code],
+    ["tel", source.tel, target.tel],
+    ["whatsapp", source.whatsapp, target.whatsapp],
+    ["products_services", source.products_services, target.products_services],
+    ["business_tag", source.business_tag, target.business_tag],
+    ["company_type", source.company_type, target.company_type],
+    ["business_model", source.business_model, target.business_model],
+    ["founded_year", source.founded_year, target.founded_year],
+    ["employee_range", source.employee_range, target.employee_range],
+    ["description", source.description, target.description],
+    ["target_markets", source.target_markets, target.target_markets],
+    ["customer_segment", source.customer_segment, target.customer_segment],
+    ["product_categories", source.product_categories, target.product_categories],
+    ["company_size", source.company_size, target.company_size],
+    ["geographic_coverage", source.geographic_coverage, target.geographic_coverage],
   ];
   for (const [field, rawSource, rawTarget] of carryFields) {
     const sv = String(rawSource ?? "").trim();
@@ -640,6 +787,23 @@ async function mergeCompanies(
     if (sv && !tv) {
       carrySets.push(`${String(field)} = ?${carryBinds.length + 3}`);
       carryBinds.push(sv);
+    }
+  }
+  // 0042 业务角色布尔标签：数值特判（字符串机制对 "0" 无效）——
+  // 来源勾选且目标未勾选 → 置 1（只升不降，与「目标已有不被覆盖」一致）。
+  const carryFlags: Array<[string, number, number]> = [
+    ["is_manufacturer", source.is_manufacturer, target.is_manufacturer],
+    ["is_importer", source.is_importer, target.is_importer],
+    ["is_distributor", source.is_distributor, target.is_distributor],
+    ["is_wholesaler", source.is_wholesaler, target.is_wholesaler],
+    ["is_retailer", source.is_retailer, target.is_retailer],
+    ["is_ecommerce", source.is_ecommerce, target.is_ecommerce],
+    ["is_rental", source.is_rental, target.is_rental],
+    ["is_oem", source.is_oem, target.is_oem],
+  ];
+  for (const [field, sv, tv] of carryFlags) {
+    if (sv === 1 && tv !== 1) {
+      carrySets.push(`${String(field)} = 1`);
     }
   }
 
@@ -704,8 +868,9 @@ async function mergeCompanies(
  *   ① 公司名称   ② 地址   ③ 电话   ④ 网址(域名)   ⑤ 公司邮箱后缀
  *   ⑥ WhatsApp   ⑦ Cellphone   ⑧ 联系人重合（同邮箱/同电话/同姓名，
  *     作为额外信号补入计项池）
- * ③⑥⑦ 在库里同存于 crm_contacts.whatsapp_or_phone 一个字段 → 合为 1 项
- * 「电话/WhatsApp」信号。名称强匹配（归一化后相同 / 整词包含）可单独
+ * ③⑥⑦ 分别存于 crm_contacts 的 tel/cellphone/whatsapp（0042 拆列）及
+ * 遗留列 whatsapp_or_phone → 联系人各列归一化后合为 1 项「电话/WhatsApp」
+ * 信号。名称强匹配（归一化后相同 / 整词包含）可单独
  * 入选（BOATS R US ⊂ Boats R Us Corp 这类一行建两档的常见形态）。
  * domain 是 UNIQUE 列，两家不可能同域 →「网址」按核心标签包含近似判
  * 定。邮箱后缀排除 gmail/yahoo 等免费域。结果只做人工比对候选，是否
@@ -858,12 +1023,15 @@ async function listDuplicateCompanies(env: AdminEnv): Promise<Response> {
     "SELECT id, name, domain, address FROM crm_companies",
   ).all<{ id: string; name: string; domain: string | null; address: string | null }>();
   const { results: contacts } = await env.DB.prepare(
-    "SELECT company_id, full_name, email, whatsapp_or_phone FROM crm_contacts",
+    "SELECT company_id, full_name, email, whatsapp_or_phone, tel, cellphone, whatsapp FROM crm_contacts",
   ).all<{
     company_id: string;
     full_name: string;
     email: string | null;
     whatsapp_or_phone: string | null;
+    tel: string | null;
+    cellphone: string | null;
+    whatsapp: string | null;
   }>();
 
   interface DupAgg {
@@ -900,8 +1068,11 @@ async function listDuplicateCompanies(env: AdminEnv): Promise<Response> {
       const suffix = emailSuffixOf(ct.email);
       if (suffix) a.suffixes.add(suffix);
     }
-    const phone = normalizePhone(ct.whatsapp_or_phone);
-    if (phone) a.phones.add(phone);
+    // 0042 电话三列 + 遗留列：每列归一化后并入同一「电话/WhatsApp」集合。
+    for (const rawPhone of [ct.whatsapp_or_phone, ct.tel, ct.cellphone, ct.whatsapp]) {
+      const phone = normalizePhone(rawPhone);
+      if (phone) a.phones.add(phone);
+    }
     const cname = foldAscii((ct.full_name ?? "").trim().toLowerCase());
     if (cname.replace(/\s/g, "").length >= 4 && !GENERIC_CONTACT_NAMES.has(cname)) {
       a.contactNames.add(cname);
@@ -978,6 +1149,8 @@ async function mergeContacts(
   // ONE D1 batch (合并.txt): the target only takes what it is missing —
   // its own non-null fields always win (COALESCE), is_primary escalates but
   // never demotes (MAX) — then the timeline row and the source delete.
+  // 0042 电话三列：tel/cellphone/whatsapp 各自独立 COALESCE 保全，互不覆盖
+  //（合并前「只保一个号」的痛点）；遗留列 whatsapp_or_phone 同样保全。
   // 邮箱检测（0036）：目标邮箱原为空、被来源邮箱补齐 → 重置为待检测。
   await env.DB.batch([
     env.DB.prepare(
@@ -985,6 +1158,9 @@ async function mergeContacts(
          job_title = COALESCE(job_title, ?2),
          email = COALESCE(email, ?3),
          whatsapp_or_phone = COALESCE(whatsapp_or_phone, ?4),
+         tel = COALESCE(tel, ?7),
+         cellphone = COALESCE(cellphone, ?8),
+         whatsapp = COALESCE(whatsapp, ?9),
          linkedin_url = COALESCE(linkedin_url, ?5),
          is_primary = MAX(is_primary, ?6),
          email_check_status = CASE
@@ -998,6 +1174,9 @@ async function mergeContacts(
       source.whatsapp_or_phone,
       source.linkedin_url,
       source.is_primary,
+      source.tel,
+      source.cellphone,
+      source.whatsapp,
     ),
     env.DB.prepare(
       `INSERT INTO crm_activities (id, company_id, type, summary)
@@ -1037,9 +1216,18 @@ async function createContact(
   // ⑦ 多角色联系人图谱：按职位关键词自动推断采购角色（更新.txt 第 7 项）。
   const jobTitle = optString(body.job_title, "job_title", 100);
   const roleInference = inferProcurementRole(jobTitle);
+  // 0042 电话三列（tel/cellphone/whatsapp 各自独立保存，同 /admin 联系人
+  // 格式）。遗留 whatsapp_or_phone 键兼容：未提供 whatsapp 时写入 whatsapp
+  // （老缓存面板不炸）；镜像列同步写入，老面板仍能显示电话。
+  const tel = optString(body.tel, "tel", 100);
+  const cellphone = optString(body.cellphone, "cellphone", 100);
+  const legacyPhone = optString(body.whatsapp_or_phone, "whatsapp_or_phone", 100);
+  let whatsapp = optString(body.whatsapp, "whatsapp", 100);
+  if (whatsapp === null) whatsapp = legacyPhone;
+  const phoneMirror = whatsapp ?? cellphone ?? tel;
   await env.DB.prepare(
-    `INSERT INTO crm_contacts (id, company_id, full_name, job_title, email, whatsapp_or_phone, linkedin_url, is_primary, procurement_role, role_evidence, role_updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
+    `INSERT INTO crm_contacts (id, company_id, full_name, job_title, email, whatsapp_or_phone, tel, cellphone, whatsapp, linkedin_url, is_primary, procurement_role, role_evidence, role_updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
   )
     .bind(
       id,
@@ -1047,7 +1235,10 @@ async function createContact(
       reqString(body.full_name, "full_name", 200),
       jobTitle,
       optString(body.email, "email", 200),
-      optString(body.whatsapp_or_phone, "whatsapp_or_phone", 100),
+      phoneMirror,
+      tel,
+      cellphone,
+      whatsapp,
       optString(body.linkedin_url, "linkedin_url", 300),
       isPrimary ? 1 : 0,
       roleInference.role,
@@ -1108,9 +1299,33 @@ async function updateContact(request: Request, env: AdminEnv, id: string): Promi
     // 邮箱检测（0036）：邮箱新增/修改 → 重新进入检测队列。
     sets.push("email_check_status = 'pending'");
   }
+  // 0042 电话三列：tel/cellphone/whatsapp 各自独立 PATCH；遗留键
+  // whatsapp_or_phone 兼容（未同时提供 whatsapp 时写入 whatsapp）。
+  let phoneTouched = false;
+  if ("tel" in body) {
+    sets.push(`tel = ?${sets.length + 2}`);
+    binds.push(optString(body.tel, "tel", 100));
+    phoneTouched = true;
+  }
+  if ("cellphone" in body) {
+    sets.push(`cellphone = ?${sets.length + 2}`);
+    binds.push(optString(body.cellphone, "cellphone", 100));
+    phoneTouched = true;
+  }
+  if ("whatsapp" in body) {
+    sets.push(`whatsapp = ?${sets.length + 2}`);
+    binds.push(optString(body.whatsapp, "whatsapp", 100));
+    phoneTouched = true;
+  }
   if ("whatsapp_or_phone" in body) {
+    const legacy = optString(body.whatsapp_or_phone, "whatsapp_or_phone", 100);
     sets.push(`whatsapp_or_phone = ?${sets.length + 2}`);
-    binds.push(optString(body.whatsapp_or_phone, "whatsapp_or_phone", 100));
+    binds.push(legacy);
+    if (legacy !== null && !("whatsapp" in body)) {
+      sets.push(`whatsapp = ?${sets.length + 2}`);
+      binds.push(legacy);
+    }
+    phoneTouched = true;
   }
   if ("linkedin_url" in body) {
     sets.push(`linkedin_url = ?${sets.length + 2}`);
@@ -1146,6 +1361,14 @@ async function updateContact(request: Request, env: AdminEnv, id: string): Promi
   await env.DB.prepare(`UPDATE crm_contacts SET ${sets.join(", ")} WHERE id = ?1`)
     .bind(id, ...binds)
     .run();
+  // 0042 电话字段有变更 → 镜像列同步为三列首选值（老面板仍能显示电话）。
+  if (phoneTouched) {
+    await env.DB.prepare(
+      `UPDATE crm_contacts SET whatsapp_or_phone = COALESCE(NULLIF(whatsapp, ''), NULLIF(cellphone, ''), NULLIF(tel, '')) WHERE id = ?1`,
+    )
+      .bind(id)
+      .run();
+  }
   const contact = await env.DB.prepare("SELECT * FROM crm_contacts WHERE id = ?1")
     .bind(id)
     .first<CrmContactRow>();
@@ -1792,6 +2015,11 @@ function cleanDealerBrandsValue(v: string): string {
     .trim();
 }
 
+/** 0042 is_* 业务角色布尔值导入：TRUE/是/1/y → 1，其余 0（同 is_primary）。 */
+function flagBit(v: string): number {
+  return ["1", "true", "yes", "y", "是"].includes(v.trim().toLowerCase()) ? 1 : 0;
+}
+
 /** entity 解析：'auto'（默认）按表头自动识别，否则显式三选一。 */
 function resolveImportEntity(raw: unknown, header: string[]): ImportEntity {
   if (raw === undefined || raw === null || raw === "" || raw === "auto") {
@@ -1838,6 +2066,14 @@ async function runImportRows(
   // 补全自动创建的公司 —— 用 companies 视角对同一表头再映射一遍。
   const companyMap =
     entity === "companies" ? keyByIndex : matchColumns("companies", rows[0]).keyByIndex;
+  // 0042 contacts/deals 表里的电话列（tel/whatsapp）描述的是联系人本人而非
+  // 公司级电话：从 companyMap 剔除，避免把联系人电话回填成公司电话
+  //（companies 实体不受影响 —— 此时 companyMap 就是 keyByIndex 本身）。
+  if (entity !== "companies") {
+    for (let i = 0; i < companyMap.length; i++) {
+      if (companyMap[i] === "tel" || companyMap[i] === "whatsapp") companyMap[i] = null;
+    }
+  }
   const columns: Record<string, string> = {};
   const unmapped: string[] = [];
   rows[0].forEach((h, i) => {
@@ -1877,6 +2113,7 @@ async function runImportRows(
   // 已有公司回填 0041 扩展列（地址/外部编号/经销代理品牌）与空缺域名：只补
   // 空值（NULLIF+COALESCE），不覆盖人工修改。按「公司 × 字段」去重——多行同
   // 公司时，第一行可能只带编号没带品牌，不能因此拦掉后续行对该字段的回填。
+  // 0042 admin 对齐列同样只补空值；is_* 勾选真值只升不降（置 1）。
   const enrichedFields = new Set<string>();
   const backfillCompany = (id: string, companyRec: Record<string, string>): void => {
     const fields: Array<[string, string]> = [
@@ -1884,6 +2121,9 @@ async function runImportRows(
       ["external_id", (companyRec.external_id ?? "").trim()],
       ["dealer_brands", cleanDealerBrandsValue(companyRec.dealer_brands ?? "")],
     ];
+    for (const [field] of COMPANY_TEXT_FIELDS) {
+      fields.push([field, (companyRec[field] ?? "").trim()]);
+    }
     const sets: string[] = [];
     const binds: unknown[] = [];
     for (const [field, value] of fields) {
@@ -1891,6 +2131,13 @@ async function runImportRows(
       enrichedFields.add(`${id}|${field}`);
       sets.push(`${field} = COALESCE(NULLIF(${field}, ''), ?${binds.length + 1}, ${field})`);
       binds.push(value);
+    }
+    // 0042 is_* 业务角色：真值导入只升不降（已有 1 不动，0 → 1）。
+    for (const flag of COMPANY_ROLE_FLAGS) {
+      const raw = (companyRec[flag] ?? "").trim();
+      if (!raw || flagBit(raw) !== 1 || enrichedFields.has(`${id}|${flag}`)) continue;
+      enrichedFields.add(`${id}|${flag}`);
+      sets.push(`${flag} = 1`);
     }
     // 域名回填：官网在后续行才出现（首行是 Facebook 主页/空）时补绑；仅当
     // 公司自身无域名、且域名未被其他公司占用（含本次导入内的认领）——
@@ -1946,11 +2193,29 @@ async function runImportRows(
     if (name) companies.byName.set(name.toLowerCase(), id);
     if (bindDomain) companies.byDomain.set(bindDomain, id);
     companies.domainById.set(id, bindDomain);
+    // 0042 admin 对齐列：文本字段 + is_* 业务角色（TRUE/是/1/y → 1）。
+    const textBinds: unknown[] = [];
+    for (const [field] of COMPANY_TEXT_FIELDS) {
+      textBinds.push((companyRec[field] ?? "").trim() || null);
+    }
+    const flagBinds: unknown[] = [];
+    for (const flag of COMPANY_ROLE_FLAGS) {
+      flagBinds.push(flagBit(companyRec[flag] ?? ""));
+    }
+    const newCols = [
+      ...COMPANY_TEXT_FIELDS.map(([f]) => f),
+      ...COMPANY_ROLE_FLAGS,
+    ].join(", ");
+    const firstNew = 10;
+    const newPlaceholders = [
+      ...COMPANY_TEXT_FIELDS.map((_, i) => `?${firstNew + i}`),
+      ...COMPANY_ROLE_FLAGS.map((_, i) => `?${firstNew + COMPANY_TEXT_FIELDS.length + i}`),
+    ].join(", ");
     statements.push(
       env.DB.prepare(
         `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status,
-           chinese_remarks, address, external_id, dealer_brands, source)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'unqualified', 'new', ?6, ?7, ?8, ?9, 'csv_import')`,
+           chinese_remarks, address, external_id, dealer_brands, ${newCols}, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'unqualified', 'new', ?6, ?7, ?8, ?9, ${newPlaceholders}, 'csv_import')`,
       ).bind(
         id,
         companyName,
@@ -1961,6 +2226,8 @@ async function runImportRows(
         (companyRec.address ?? "").trim() || null,
         (companyRec.external_id ?? "").trim() || null,
         cleanDealerBrandsValue(companyRec.dealer_brands ?? "") || null,
+        ...textBinds,
+        ...flagBinds,
       ),
     );
     companiesCreated++;
@@ -1992,11 +2259,29 @@ async function runImportRows(
       companies.byName.set(name.toLowerCase(), id);
       if (domain) companies.byDomain.set(domain, id);
       companies.domainById.set(id, domain || null);
+      // 0042 admin 对齐列：文本字段 + is_* 业务角色（TRUE/是/1/y → 1）。
+      const textBinds: unknown[] = [];
+      for (const [field] of COMPANY_TEXT_FIELDS) {
+        textBinds.push((rec[field] ?? "").trim() || null);
+      }
+      const flagBinds: unknown[] = [];
+      for (const flag of COMPANY_ROLE_FLAGS) {
+        flagBinds.push(flagBit(rec[flag] ?? ""));
+      }
+      const newCols = [
+        ...COMPANY_TEXT_FIELDS.map(([f]) => f),
+        ...COMPANY_ROLE_FLAGS,
+      ].join(", ");
+      const firstNew = 11;
+      const newPlaceholders = [
+        ...COMPANY_TEXT_FIELDS.map((_, i) => `?${firstNew + i}`),
+        ...COMPANY_ROLE_FLAGS.map((_, i) => `?${firstNew + COMPANY_TEXT_FIELDS.length + i}`),
+      ].join(", ");
       statements.push(
         env.DB.prepare(
           `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status,
-             chinese_remarks, address, external_id, dealer_brands, source)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'new', ?7, ?8, ?9, ?10, 'csv_import')`,
+             chinese_remarks, address, external_id, dealer_brands, ${newCols}, source)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'new', ?7, ?8, ?9, ?10, ${newPlaceholders}, 'csv_import')`,
         ).bind(
           id,
           name,
@@ -2008,6 +2293,8 @@ async function runImportRows(
           (rec.address ?? "").trim() || null,
           (rec.external_id ?? "").trim() || null,
           cleanDealerBrandsValue(rec.dealer_brands ?? "") || null,
+          ...textBinds,
+          ...flagBinds,
         ),
       );
       result.created++;
@@ -2058,23 +2345,26 @@ async function runImportRows(
       const isPrimary = ["1", "true", "是", "y", "yes"].includes((rec.is_primary ?? "").trim().toLowerCase())
         ? 1
         : 0;
-      // 电话类列合并：WhatsApp > 手机（Cellphone/Mobile）> 座机（TEL/Phone）。
-      const phone =
-        (rec.whatsapp_or_phone ?? "").trim() ||
-        (rec.cellphone ?? "").trim() ||
-        (rec.tel ?? "").trim() ||
-        null;
+      // 0042 电话三列独立入库（tel/cellphone/whatsapp 各自保存），遗留列
+      // whatsapp_or_phone 镜像首选值（老面板兼容），不再三档合并互抢。
+      const tel = (rec.tel ?? "").trim() || null;
+      const cellphone = (rec.cellphone ?? "").trim() || null;
+      const whatsapp = (rec.whatsapp ?? "").trim() || null;
+      const phoneMirror = whatsapp ?? cellphone ?? tel;
       statements.push(
         env.DB.prepare(
-          `INSERT INTO crm_contacts (id, company_id, full_name, job_title, email, whatsapp_or_phone, linkedin_url, is_primary)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+          `INSERT INTO crm_contacts (id, company_id, full_name, job_title, email, whatsapp_or_phone, tel, cellphone, whatsapp, linkedin_url, is_primary)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
         ).bind(
           crypto.randomUUID(),
           resolved.id,
           fullName,
           (rec.job_title ?? "").trim() || null,
           (rec.email ?? "").trim() || null,
-          phone,
+          phoneMirror,
+          tel,
+          cellphone,
+          whatsapp,
           (rec.linkedin_url ?? "").trim() || null,
           isPrimary,
         ),

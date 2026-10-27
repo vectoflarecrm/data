@@ -62,6 +62,7 @@ function makeDb() {
     CREATE TABLE crm_contacts (
       id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
       full_name TEXT NOT NULL, job_title TEXT, email TEXT, whatsapp_or_phone TEXT,
+      tel TEXT, cellphone TEXT, whatsapp TEXT,
       linkedin_url TEXT, is_primary INTEGER DEFAULT 0,
       email_status TEXT DEFAULT 'unknown', email_verified_at TEXT,
       email_check_status TEXT NOT NULL DEFAULT 'pending',

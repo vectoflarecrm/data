@@ -64,12 +64,23 @@ async function makeDb() {
       domain_email_status TEXT NOT NULL DEFAULT 'pending',
       source TEXT NOT NULL DEFAULT 'unknown',
       address TEXT, external_id TEXT, dealer_brands TEXT,
+      legal_name TEXT, trading_name TEXT, zip_city TEXT, city TEXT, region TEXT,
+      postal_code TEXT, country_code TEXT, tel TEXT, whatsapp TEXT,
+      products_services TEXT, business_tag TEXT, company_type TEXT, business_model TEXT,
+      founded_year TEXT, employee_range TEXT, description TEXT, target_markets TEXT,
+      customer_segment TEXT, product_categories TEXT, company_size TEXT,
+      geographic_coverage TEXT,
+      is_manufacturer INTEGER DEFAULT 0, is_importer INTEGER DEFAULT 0,
+      is_distributor INTEGER DEFAULT 0, is_wholesaler INTEGER DEFAULT 0,
+      is_retailer INTEGER DEFAULT 0, is_ecommerce INTEGER DEFAULT 0,
+      is_rental INTEGER DEFAULT 0, is_oem INTEGER DEFAULT 0,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE crm_contacts (
       id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
       full_name TEXT NOT NULL, job_title TEXT, email TEXT, whatsapp_or_phone TEXT,
+      tel TEXT, cellphone TEXT, whatsapp TEXT,
       linkedin_url TEXT, is_primary INTEGER DEFAULT 0,
       email_status TEXT DEFAULT 'unknown', email_verified_at TEXT,
       email_check_status TEXT NOT NULL DEFAULT 'pending',

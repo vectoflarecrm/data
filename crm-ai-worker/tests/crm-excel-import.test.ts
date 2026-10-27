@@ -181,12 +181,23 @@ function makeDb() {
       domain_email_status TEXT NOT NULL DEFAULT 'pending',
       source TEXT NOT NULL DEFAULT 'unknown',
       address TEXT, external_id TEXT, dealer_brands TEXT,
+      legal_name TEXT, trading_name TEXT, zip_city TEXT, city TEXT, region TEXT,
+      postal_code TEXT, country_code TEXT, tel TEXT, whatsapp TEXT,
+      products_services TEXT, business_tag TEXT, company_type TEXT, business_model TEXT,
+      founded_year TEXT, employee_range TEXT, description TEXT, target_markets TEXT,
+      customer_segment TEXT, product_categories TEXT, company_size TEXT,
+      geographic_coverage TEXT,
+      is_manufacturer INTEGER DEFAULT 0, is_importer INTEGER DEFAULT 0,
+      is_distributor INTEGER DEFAULT 0, is_wholesaler INTEGER DEFAULT 0,
+      is_retailer INTEGER DEFAULT 0, is_ecommerce INTEGER DEFAULT 0,
+      is_rental INTEGER DEFAULT 0, is_oem INTEGER DEFAULT 0,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE crm_contacts (
       id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
       full_name TEXT NOT NULL, job_title TEXT, email TEXT, whatsapp_or_phone TEXT,
+      tel TEXT, cellphone TEXT, whatsapp TEXT,
       linkedin_url TEXT, is_primary INTEGER DEFAULT 0,
       email_status TEXT DEFAULT 'unknown', email_verified_at TEXT,
       email_check_status TEXT NOT NULL DEFAULT 'pending',
@@ -390,7 +401,7 @@ describe("matchHeader / matchColumns / detectEntity", () => {
     expect(matchHeader("contacts", "Cellphone")).toBe("cellphone");
     expect(matchHeader("contacts", "Mobile")).toBe("cellphone");
     expect(matchHeader("contacts", "手机号码")).toBe("cellphone");
-    expect(matchHeader("contacts", "WhatsApp")).toBe("whatsapp_or_phone");
+    expect(matchHeader("contacts", "WhatsApp")).toBe("whatsapp");
   });
 
   it("拆分姓名列：First Name / Last Name 各归各键（Puerto Rico 表布局）", () => {
@@ -400,10 +411,26 @@ describe("matchHeader / matchColumns / detectEntity", () => {
     expect(matchHeader("contacts", "姓名")).toBe("full_name"); // 单列姓名不变
   });
 
-  it("产品与服务类列 → companies.industry", () => {
-    expect(matchHeader("companies", "Products & Services in English")).toBe("industry");
-    expect(matchHeader("companies", "产品与服务")).toBe("industry");
-    expect(matchHeader("companies", "主营产品")).toBe("industry");
+  it("产品与服务类列 → companies.products_services（0042 与行业分开保存）", () => {
+    expect(matchHeader("companies", "Products & Services in English")).toBe("products_services");
+    expect(matchHeader("companies", "产品与服务")).toBe("products_services");
+    expect(matchHeader("companies", "主营产品")).toBe("products_services");
+    expect(matchHeader("companies", "行业")).toBe("industry");
+  });
+
+  it("法定/交易名称列不被 deals 抢成 title（公司表不误判成商机表）", () => {
+    // 0042 companies 新增 法定名称/交易名称 别名后，deals 的「名称」包含匹配
+    // 会把它们抢成商机名 → 公司名称 + 法定名称 的公司表被识别成 deals。
+    expect(matchHeader("deals", "法定名称")).toBeNull();
+    expect(matchHeader("deals", "交易名称")).toBeNull();
+    expect(matchHeader("deals", "Legal Name")).toBeNull();
+    expect(matchHeader("companies", "法定名称")).toBe("legal_name");
+    expect(matchHeader("companies", "Legal Name")).toBe("legal_name");
+    // 公司表识别：公司名称 + 法定名称 → companies（不再落 deals）
+    expect(detectEntity(["公司名称", "法定名称", "成立年份"])).toBe("companies");
+    // 真商机表不受影响：商机名称 等别名照常识别
+    expect(detectEntity(["公司名称", "商机名称", "金额"])).toBe("deals");
+    expect(matchHeader("deals", "商机名称")).toBe("title");
   });
 
   it("detectEntity：拆分姓名（First/Last Name）+ 公司 → contacts", () => {
@@ -536,7 +563,8 @@ describe("POST /admin/api/crm/import — Excel 智能导入", () => {
     const co = await call(env, "GET", `/admin/api/crm/companies/${list.body.companies[0].id}`);
     expect(co.body.contacts).toHaveLength(1);
     expect(co.body.contacts[0]).toMatchObject({
-      full_name: "张三", email: "zhang@acme.com", whatsapp_or_phone: "+49 151 1234567",
+      full_name: "张三", email: "zhang@acme.com", cellphone: "+49 151 1234567",
+      whatsapp_or_phone: "+49 151 1234567",
     });
   });
 
@@ -566,7 +594,7 @@ describe("POST /admin/api/crm/import — Excel 智能导入", () => {
     expect(r.body.columns).toMatchObject({
       "First Name": "first_name", "Last Name": "last_name", TEL: "tel",
       Country: "country", Website: "domain", "中文备注": "chinese_remarks",
-      "Products & Services in English": "industry",
+      "Products & Services in English": "products_services",
       "company ID": "external_id", "from": "dealer_brands",
     });
     expect(r.body.unmapped).toEqual([]);
@@ -577,9 +605,9 @@ describe("POST /admin/api/crm/import — Excel 智能导入", () => {
     expect(byName.get("1 OCEAN WATERSPORTS").domain).toBeNull();
     expect(byName.get("Advanced Surf & Sail").domain).toBeNull();
     expect(byName.get("787 Yachts").domain).toBe("787yachts.com");
-    // 公司级列补全到自动创建的公司（0041：地址/编号/经销品牌）
+    // 公司级列补全到自动创建的公司（0041：地址/编号/经销品牌；0042：产品与服务独立列）
     expect(byName.get("787 Yachts")).toMatchObject({
-      country: "Puerto Rico", industry: "Yacht brokerage", chinese_remarks: "备注三",
+      country: "Puerto Rico", products_services: "Yacht brokerage", chinese_remarks: "备注三",
       external_id: "PR0003",
     });
     expect(byName.get("1 OCEAN WATERSPORTS")).toMatchObject({
@@ -592,15 +620,17 @@ describe("POST /admin/api/crm/import — Excel 智能导入", () => {
     const co = await call(env, "GET", `/admin/api/crm/companies/${byName.get("1 OCEAN WATERSPORTS").id}`);
     expect(co.body.contacts).toHaveLength(1);
     expect(co.body.contacts[0]).toMatchObject({
-      // First + Last 拼接，电话取 WhatsApp 列（> Cellphone > TEL），
-      // EMAIL 列的 #N/A 公式错误按空值处理。
-      full_name: "Carlos Turrino", email: null, whatsapp_or_phone: "7871112222",
+      // First + Last 拼接，0042 电话三列各自独立入库（TEL/Cellphone/WhatsApp），
+      // 遗留列镜像 WhatsApp 首选值；EMAIL 列的 #N/A 公式错误按空值处理。
+      full_name: "Carlos Turrino", email: null,
+      tel: "+1 787-111-2222", cellphone: "787-111-2222", whatsapp: "7871112222",
+      whatsapp_or_phone: "7871112222",
       job_title: "Owner",
     });
     const co2 = await call(env, "GET", `/admin/api/crm/companies/${byName.get("Advanced Surf & Sail").id}`);
     expect(co2.body.contacts[0]).toMatchObject({
-      // 无 WhatsApp、无 Cellphone → 座机 TEL 列兜底
-      full_name: "Orlando Puig", whatsapp_or_phone: "+1 787-333-4444", email: "osp@msn.com",
+      // 无 WhatsApp、无 Cellphone → 座机 TEL 列兜底（三列 + 镜像均为 TEL 值）
+      full_name: "Orlando Puig", tel: "+1 787-333-4444", whatsapp_or_phone: "+1 787-333-4444", email: "osp@msn.com",
     });
   });
 
@@ -652,6 +682,72 @@ describe("POST /admin/api/crm/import — Excel 智能导入", () => {
     expect(row2).toMatchObject({
       address: "Carr. 187 Km 4.2, Loíza", external_id: "PR0001", dealer_brands: "cressi, Garmin",
     });
+  });
+
+  it("companies 表 0042 新字段表头（法定名称/邮编城市/成立年份/is manufacturer）落新列", async () => {
+    const { env, db } = makeEnv();
+    const xlsx = await buildZip([
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([
+        ["公司名称", "法定名称", "邮编城市", "产品与服务", "成立年份", "员工人数", "is manufacturer", "零售商", "目标市场"],
+        ["Parity Boats", "Parity Boats LLC", "00646 Utuado", "Boat sales", "1998", "10-50", "TRUE", "是", "Caribbean"],
+      ])) },
+    ]);
+    const r = await call(env, "POST", "/admin/api/crm/import", { xlsx_base64: b64(xlsx) });
+    expect(r.status).toBe(200);
+    expect(r.body.entity_used).toBe("companies");
+    expect(r.body.created).toBe(1);
+    expect(r.body.columns).toMatchObject({
+      法定名称: "legal_name", 邮编城市: "zip_city", "产品与服务": "products_services",
+      成立年份: "founded_year", 员工人数: "employee_range", "is manufacturer": "is_manufacturer",
+      零售商: "is_retailer", 目标市场: "target_markets",
+    });
+    const row = db.prepare("SELECT * FROM crm_companies").get() as any;
+    expect(row.legal_name).toBe("Parity Boats LLC");
+    expect(row.zip_city).toBe("00646 Utuado");
+    expect(row.products_services).toBe("Boat sales");
+    expect(row.founded_year).toBe("1998");
+    expect(row.employee_range).toBe("10-50");
+    expect(row.target_markets).toBe("Caribbean");
+    expect(row.is_manufacturer).toBe(1);
+    expect(row.is_retailer).toBe(1);
+    expect(row.is_oem).toBe(0);
+  });
+
+  it("重复导入回填已有公司的 0042 空列与 is_* 勾选（TRUE/是 → 只升不降）", async () => {
+    const { env, db } = makeEnv();
+    // 生产现状：公司已入库，0042 新列全空，is_retailer 已是 1（不被降级）。
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, is_retailer, source)
+       VALUES ('c_2', 'Parity Boats', 1, 'csv_import')`,
+    ).run();
+    const xlsx = await buildZip([
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([
+        ["公司名称", "法定名称", "城市", "is manufacturer"],
+        ["Parity Boats", "Parity Boats LLC", "Utuado", "TRUE"],
+      ])) },
+    ]);
+    const r = await call(env, "POST", "/admin/api/crm/import", { xlsx_base64: b64(xlsx) });
+    expect(r.status).toBe(200);
+    expect(r.body.companies_created).toBe(0); // 按名称匹配，不重建
+    const row = db.prepare("SELECT * FROM crm_companies WHERE id = 'c_2'").get() as any;
+    expect(row.legal_name).toBe("Parity Boats LLC");
+    expect(row.city).toBe("Utuado");
+    expect(row.is_manufacturer).toBe(1); // TRUE → 升为 1
+    expect(row.is_retailer).toBe(1); // 已有 1 保持
+
+    // 再导一次带 is_oem=TRUE 的表 → 只升；is_manufacturer 不变
+    const xlsx2 = await buildZip([
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([
+        ["公司名称", "OEM"],
+        ["Parity Boats", "y"],
+      ])) },
+    ]);
+    const again = await call(env, "POST", "/admin/api/crm/import", { xlsx_base64: b64(xlsx2) });
+    expect(again.status).toBe(200);
+    const row2 = db.prepare("SELECT * FROM crm_companies WHERE id = 'c_2'").get() as any;
+    expect(row2.is_oem).toBe(1); // y → 1
+    expect(row2.is_manufacturer).toBe(1);
+    expect(row2.is_retailer).toBe(1);
   });
 
   it("首行是 Facebook 主页、后续行才有真官网 → 域名回填不丢（Kanoa Kayaks 场景）", async () => {

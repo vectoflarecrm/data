@@ -79,6 +79,16 @@ async function makeDb() {
       country TEXT, tier TEXT DEFAULT 'unqualified', lead_status TEXT DEFAULT 'new',
       merged_from_ids TEXT, chinese_remarks TEXT, customer_since TEXT,
       address TEXT, external_id TEXT, dealer_brands TEXT,
+      legal_name TEXT, trading_name TEXT, zip_city TEXT, city TEXT, region TEXT,
+      postal_code TEXT, country_code TEXT, tel TEXT, whatsapp TEXT,
+      products_services TEXT, business_tag TEXT, company_type TEXT, business_model TEXT,
+      founded_year TEXT, employee_range TEXT, description TEXT, target_markets TEXT,
+      customer_segment TEXT, product_categories TEXT, company_size TEXT,
+      geographic_coverage TEXT,
+      is_manufacturer INTEGER DEFAULT 0, is_importer INTEGER DEFAULT 0,
+      is_distributor INTEGER DEFAULT 0, is_wholesaler INTEGER DEFAULT 0,
+      is_retailer INTEGER DEFAULT 0, is_ecommerce INTEGER DEFAULT 0,
+      is_rental INTEGER DEFAULT 0, is_oem INTEGER DEFAULT 0,
       do_not_contact INTEGER DEFAULT 0,
       domain_email_status TEXT NOT NULL DEFAULT 'pending',
       source TEXT NOT NULL DEFAULT 'unknown',
@@ -88,6 +98,7 @@ async function makeDb() {
     CREATE TABLE crm_contacts (
       id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
       full_name TEXT NOT NULL, job_title TEXT, email TEXT, whatsapp_or_phone TEXT,
+      tel TEXT, cellphone TEXT, whatsapp TEXT,
       linkedin_url TEXT, is_primary INTEGER DEFAULT 0,
       email_status TEXT DEFAULT 'unknown', email_verified_at TEXT,
       email_check_status TEXT NOT NULL DEFAULT 'pending',
@@ -182,6 +193,27 @@ describe("线索提升 (promote)", () => {
     expect(acts).toHaveLength(1);
     expect(acts[0].type).toBe("lead_promoted");
     expect(acts[0].summary).toContain("customers#7");
+  });
+
+  it("copies pipeline contact tel/cellphone/whatsapp into separate columns (0042 三列直拷)", async () => {
+    const { db, env } = await makeDb();
+    db.prepare(
+      `INSERT INTO customers (id, company_id, company_name, domain, lead_score, email)
+       VALUES (21, 'co21', 'Three Phone Co', '3phone.com', 60, 'x@3phone.com')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO contacts (id, contact_id, company_id, seq, full_name, tel, cellphone, whatsapp)
+       VALUES (5, 'ct5', 'co21', 1, 'Pablo Phone', '+1 787-100-2000', '+1 787-100-2001', '+1 7871002002')`,
+    ).run();
+    const r = await call(env, "POST", "/admin/api/crm/companies/promote", { customer_id: 21 });
+    expect(r.status).toBe(201);
+    const row = db.prepare("SELECT * FROM crm_contacts WHERE id = 'ct_5'").get() as any;
+    // 三列各自直拷，不再 COALESCE 合并成一个号
+    expect(row.tel).toBe("+1 787-100-2000");
+    expect(row.cellphone).toBe("+1 787-100-2001");
+    expect(row.whatsapp).toBe("+1 7871002002");
+    // 遗留镜像列 = WhatsApp 首选值（老面板兼容）
+    expect(row.whatsapp_or_phone).toBe("+1 7871002002");
   });
 
   it("is idempotent — the second call returns the same company", async () => {
@@ -386,6 +418,33 @@ describe("公司合并 (merge)", () => {
     expect(row.chinese_remarks).toContain("[并入备注] Dupe Co: 来源方重要备注");
   });
 
+  it("backfills 0042 admin-parity fields and is_* flags when merging (只升不降)", async () => {
+    const { db, env } = await makeDb();
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, city, founded_year, is_retailer, source)
+       VALUES ('tgt_p', 'Keep City Co', 'Rincón', '1995', 1, 'csv_import')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, legal_name, city, founded_year, is_manufacturer, is_retailer, source)
+       VALUES ('src_p', 'Dupe City Co', 'Keep City LLC', 'Aguadilla', '1990s', 1, 0, 'csv_import')`,
+    ).run();
+    const merged = await call(env, "POST", "/admin/api/crm/companies/merge", {
+      target_company_id: "tgt_p",
+      source_company_id: "src_p",
+    });
+    expect(merged.status).toBe(200);
+    const row = db.prepare("SELECT * FROM crm_companies WHERE id = 'tgt_p'").get() as any;
+    // 目标已有字段不被覆盖
+    expect(row.city).toBe("Rincón");
+    expect(row.founded_year).toBe("1995");
+    // 来源非空、目标为空 → 回填
+    expect(row.legal_name).toBe("Keep City LLC");
+    // is_* 数值特判：source=1 && target=0 → 升为 1
+    expect(row.is_manufacturer).toBe(1);
+    // 目标已有 1 不被来源 0 覆盖（只升不降）
+    expect(row.is_retailer).toBe(1);
+  });
+
   it("404s when the source company does not exist", async () => {
     const { env } = await makeDb();
     await call(env, "POST", "/admin/api/crm/companies", { name: "Real" });
@@ -471,6 +530,31 @@ describe("公司合并 (merge)", () => {
     const after = await call(env, "GET", "/admin/api/crm/companies/duplicates");
     expect(after.body.duplicates).toHaveLength(2);
     expect(JSON.stringify(after.body.duplicates)).not.toContain("dup_b");
+  });
+
+  it("detects shared phones from the 0042 tel/cellphone/whatsapp columns (重复检测读新列)", async () => {
+    const { db, env } = await makeDb();
+    // 名字完全不同，唯一信号是联系人 whatsapp 新列（0042 回填后的老数据形态：
+    // 新列有值、遗留 whatsapp_or_phone 为空）
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, domain, source)
+       VALUES ('ph_a', 'Aurora Marine', 'auroramarine.com', 'csv_import'),
+              ('ph_b', 'Zephyr Trading', NULL, 'csv_import')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO crm_contacts (id, company_id, full_name, whatsapp)
+       VALUES ('pc1', 'ph_a', 'Wa A', '+1 7877007001')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO crm_contacts (id, company_id, full_name, whatsapp)
+       VALUES ('pc2', 'ph_b', 'Wa B', '+1 7877007001')`,
+    ).run();
+    const r = await call(env, "GET", "/admin/api/crm/companies/duplicates");
+    expect(r.status).toBe(200);
+    const pair = r.body.duplicates.find((d: any) => d.a_id === "ph_a" && d.b_id === "ph_b");
+    expect(pair).toBeDefined();
+    expect(pair.reasons).toContain("电话/WhatsApp");
+    expect(pair.reasons).toContain("联系人重合");
   });
 });
 
@@ -632,6 +716,47 @@ describe("公司 CRUD", () => {
     expect(row.name).toBe("Imported Co PR");
   });
 
+  it("edits 0042 admin-parity fields (city/legal_name/founded_year/is_* booleans) via PATCH", async () => {
+    const { env } = await makeDb();
+    const created = await call(env, "POST", "/admin/api/crm/companies", { name: "Parity Co" });
+    expect(created.status).toBe(201);
+    const id = created.body.company.id;
+    const r = await call(env, "PATCH", `/admin/api/crm/companies/${id}`, {
+      legal_name: "Parity LLC",
+      trading_name: "Parity Trading",
+      city: "San Juan",
+      zip_city: "00901 San Juan",
+      postal_code: "00901",
+      country_code: "PR",
+      products_services: "Surfboards, SUP",
+      company_type: "Retailer",
+      business_model: "B2C",
+      founded_year: "1990s",
+      employee_range: "10-50",
+      target_markets: "Caribbean",
+      is_manufacturer: true,
+      is_retailer: true,
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.company.legal_name).toBe("Parity LLC");
+    expect(r.body.company.zip_city).toBe("00901 San Juan");
+    expect(r.body.company.founded_year).toBe("1990s");
+    expect(r.body.company.products_services).toBe("Surfboards, SUP");
+    expect(r.body.company.is_manufacturer).toBe(1);
+    expect(r.body.company.is_retailer).toBe(1);
+    expect(r.body.company.is_oem).toBe(0);
+
+    // 关闭勾选 / 空串清空
+    const off = await call(env, "PATCH", `/admin/api/crm/companies/${id}`, {
+      is_retailer: false,
+      city: "",
+    });
+    expect(off.status).toBe(200);
+    expect(off.body.company.is_retailer).toBe(0);
+    expect(off.body.company.is_manufacturer).toBe(1);
+    expect(off.body.company.city).toBeNull();
+  });
+
   it("deletes a company and cascades to contacts/deals/activities", async () => {
     const { db, env } = await makeDb();
     await call(env, "POST", "/admin/api/crm/companies", { name: "Del Co" });
@@ -645,6 +770,89 @@ describe("公司 CRUD", () => {
     expect(r.status).toBe(200);
     expect(db.prepare("SELECT COUNT(*) AS n FROM crm_contacts").get()).toEqual({ n: 0 });
     expect(db.prepare("SELECT COUNT(*) AS n FROM crm_deals").get()).toEqual({ n: 0 });
+  });
+});
+
+/* ── 联系人电话三列 (0042) ──────────────────────────────────────────────── */
+
+describe("联系人电话三列 (0042)", () => {
+  it("creates a contact with tel/cellphone/whatsapp kept separate (mirror in legacy column)", async () => {
+    const { env } = await makeDb();
+    await call(env, "POST", "/admin/api/crm/companies", { name: "Phone Co" });
+    const company = (await call(env, "GET", "/admin/api/crm/companies")).body.companies[0];
+    const r = await call(env, "POST", "/admin/api/crm/contacts", {
+      company_id: company.id,
+      full_name: "Tres Telefonos",
+      tel: "+1 787-200-3000",
+      cellphone: "+1 787-200-3001",
+      whatsapp: "+1 7872003002",
+    });
+    expect(r.status).toBe(201);
+    expect(r.body.contact.tel).toBe("+1 787-200-3000");
+    expect(r.body.contact.cellphone).toBe("+1 787-200-3001");
+    expect(r.body.contact.whatsapp).toBe("+1 7872003002");
+    // 遗留列镜像 WhatsApp（老面板兼容）
+    expect(r.body.contact.whatsapp_or_phone).toBe("+1 7872003002");
+
+    // PATCH 手机号 → 手机列更新，WhatsApp/固定电话不动，镜像跟随 WhatsApp
+    const patched = await call(env, "PATCH", `/admin/api/crm/contacts/${r.body.contact.id}`, {
+      cellphone: "+1 787-999-8888",
+    });
+    expect(patched.status).toBe(200);
+    expect(patched.body.contact.cellphone).toBe("+1 787-999-8888");
+    expect(patched.body.contact.whatsapp).toBe("+1 7872003002");
+    expect(patched.body.contact.tel).toBe("+1 787-200-3000");
+    expect(patched.body.contact.whatsapp_or_phone).toBe("+1 7872003002");
+  });
+
+  it("still accepts the legacy whatsapp_or_phone key (老缓存面板兼容 → 写入 whatsapp)", async () => {
+    const { env } = await makeDb();
+    await call(env, "POST", "/admin/api/crm/companies", { name: "Legacy Co" });
+    const company = (await call(env, "GET", "/admin/api/crm/companies")).body.companies[0];
+    const r = await call(env, "POST", "/admin/api/crm/contacts", {
+      company_id: company.id,
+      full_name: "Legacy Panel",
+      whatsapp_or_phone: "+1 787-300-4000",
+    });
+    expect(r.status).toBe(201);
+    expect(r.body.contact.whatsapp).toBe("+1 787-300-4000");
+    expect(r.body.contact.whatsapp_or_phone).toBe("+1 787-300-4000");
+
+    // PATCH 遗留键 → whatsapp 跟随 + 镜像同步
+    const patched = await call(env, "PATCH", `/admin/api/crm/contacts/${r.body.contact.id}`, {
+      whatsapp_or_phone: "+1 787-500-6000",
+    });
+    expect(patched.status).toBe(200);
+    expect(patched.body.contact.whatsapp).toBe("+1 787-500-6000");
+    expect(patched.body.contact.whatsapp_or_phone).toBe("+1 787-500-6000");
+  });
+
+  it("merges contacts keeping tel/cellphone/whatsapp each intact (三列各自保全)", async () => {
+    const { env } = await makeDb();
+    await call(env, "POST", "/admin/api/crm/companies", { name: "Merge Phones Co" });
+    const company = (await call(env, "GET", "/admin/api/crm/companies")).body.companies[0];
+    const target = await call(env, "POST", "/admin/api/crm/contacts", {
+      company_id: company.id,
+      full_name: "Target Person",
+      cellphone: "+1 787-111-0001",
+    });
+    const source = await call(env, "POST", "/admin/api/crm/contacts", {
+      company_id: company.id,
+      full_name: "Source Person",
+      tel: "+1 787-111-0002",
+      whatsapp: "+1 7871110003",
+    });
+    const merged = await call(env, "POST", "/admin/api/crm/contacts/merge", {
+      target_contact_id: target.body.contact.id,
+      source_contact_id: source.body.contact.id,
+    });
+    expect(merged.status).toBe(200);
+    // 三列各自独立保全、互不覆盖（0042 前「只保一个号」的痛点）
+    expect(merged.body.contact.cellphone).toBe("+1 787-111-0001");
+    expect(merged.body.contact.tel).toBe("+1 787-111-0002");
+    expect(merged.body.contact.whatsapp).toBe("+1 7871110003");
+    // 遗留镜像列 COALESCE 目标值优先（目标建联系人时镜像了自己的手机号）
+    expect(merged.body.contact.whatsapp_or_phone).toBe("+1 787-111-0001");
   });
 });
 

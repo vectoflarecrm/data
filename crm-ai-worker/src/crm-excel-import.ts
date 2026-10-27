@@ -227,10 +227,12 @@ export const IMPORT_HEADERS: Record<ImportEntity, Record<string, string>> = {
     website: "domain", 网址: "domain", 网站: "domain", 官网: "domain", 主页: "domain",
     country: "country", 国家: "country", 国家地区: "country", 地区: "country",
     industry: "industry", 行业: "industry", 行业类别: "industry",
-    // 「产品与服务」类列也归 industry（CRM 无独立产品字段，公司详情页以
-    // 行业展示，语义上是该公司的主营业务描述）。
-    products: "industry", productsservices: "industry", productsandservices: "industry",
-    产品: "industry", 产品与服务: "industry", 主营产品: "industry", 主营业务: "industry",
+    // 0042 「产品与服务」独立成列（原归 industry）：对齐 /admin 客户字段，
+    // 行业与主营业务分开保存。
+    products_services: "products_services", products: "products_services",
+    productsservices: "products_services", productsandservices: "products_services",
+    产品: "products_services", 产品与服务: "products_services", 主营产品: "products_services",
+    主营业务: "products_services",
     tier: "tier", 分级: "tier", 等级: "tier", 客户分级: "tier",
     chinese_remarks: "chinese_remarks", 备注: "chinese_remarks", 中文备注: "chinese_remarks",
     remark: "chinese_remarks", remarks: "chinese_remarks", 备注2: "chinese_remarks",
@@ -247,6 +249,53 @@ export const IMPORT_HEADERS: Record<ImportEntity, Record<string, string>> = {
     dealerof: "dealer_brands", distributorof: "dealer_brands", distributors: "dealer_brands",
     dealers: "dealer_brands", 经销品牌: "dealer_brands", 代理品牌: "dealer_brands",
     经销商: "dealer_brands", 分销商: "dealer_brands",
+    // 0042 公司信息对齐 /admin 客户字段：法定/交易名称、地址组、公司级
+    // 电话/WhatsApp、业务属性、业务角色布尔标签。别名只加无冲突项 ——
+    // 经销商/分销商/distributors 等仍归 dealer_brands，语义不漂移。
+    legal_name: "legal_name", legalname: "legal_name", 法定名称: "legal_name",
+    法定公司名: "legal_name",
+    trading_name: "trading_name", tradingname: "trading_name", 交易名称: "trading_name",
+    贸易名称: "trading_name",
+    zip_city: "zip_city", zipcity: "zip_city", "zip+city": "zip_city", 邮编城市: "zip_city",
+    city: "city", 城市: "city",
+    region: "region", state: "region", 州: "region", 省: "region",
+    postal_code: "postal_code", postalcode: "postal_code", zipcode: "postal_code",
+    postal: "postal_code", zip: "postal_code", 邮编: "postal_code", 邮政编码: "postal_code",
+    country_code: "country_code", countrycode: "country_code", 国家代码: "country_code",
+    tel: "tel", telephone: "tel", phone: "tel", phonenumber: "tel",
+    telnumber: "tel", 电话: "tel", 联系电话: "tel", 电话号码: "tel", 公司电话: "tel",
+    whatsapp: "whatsapp", whatsappnumber: "whatsapp",
+    business_tag: "business_tag", businesstag: "business_tag", 业务标签: "business_tag",
+    company_type: "company_type", companytype: "company_type", 公司类型: "company_type",
+    business_model: "business_model", businessmodel: "business_model", 商业模式: "business_model",
+    founded_year: "founded_year", foundedyear: "founded_year", founded: "founded_year",
+    成立年份: "founded_year", 成立时间: "founded_year",
+    employee_range: "employee_range", employeerange: "employee_range",
+    员工规模: "employee_range", 员工人数: "employee_range", 雇员人数: "employee_range",
+    employees: "employee_range", numberofemployees: "employee_range",
+    description: "description", 描述: "description", 公司描述: "description",
+    公司简介: "description", 简介: "description",
+    target_markets: "target_markets", targetmarkets: "target_markets", 目标市场: "target_markets",
+    customer_segment: "customer_segment", customersegment: "customer_segment",
+    客户细分: "customer_segment",
+    product_categories: "product_categories", productcategories: "product_categories",
+    产品类别: "product_categories", 产品分类: "product_categories",
+    company_size: "company_size", companysize: "company_size", 公司规模: "company_size",
+    geographic_coverage: "geographic_coverage", geographiccoverage: "geographic_coverage",
+    地理覆盖: "geographic_coverage", 覆盖区域: "geographic_coverage",
+    is_manufacturer: "is_manufacturer", ismanufacturer: "is_manufacturer",
+    manufacturer: "is_manufacturer", 制造商: "is_manufacturer",
+    is_importer: "is_importer", isimporter: "is_importer", importer: "is_importer",
+    进口商: "is_importer",
+    is_distributor: "is_distributor", isdistributor: "is_distributor",
+    is_wholesaler: "is_wholesaler", iswholesaler: "is_wholesaler",
+    wholesaler: "is_wholesaler", 批发商: "is_wholesaler",
+    is_retailer: "is_retailer", isretailer: "is_retailer", retailer: "is_retailer",
+    零售商: "is_retailer",
+    is_ecommerce: "is_ecommerce", isecommerce: "is_ecommerce", ecommerce: "is_ecommerce",
+    电商: "is_ecommerce",
+    is_rental: "is_rental", isrental: "is_rental", rental: "is_rental", 租赁: "is_rental",
+    is_oem: "is_oem", isoem: "is_oem", oem: "is_oem",
   },
   contacts: {
     company: "company", 公司: "company", 公司名称: "company", companyname: "company",
@@ -264,10 +313,9 @@ export const IMPORT_HEADERS: Record<ImportEntity, Record<string, string>> = {
     jobtitle: "job_title", 职称: "job_title",
     email: "email", 邮箱: "email", 电子邮箱: "email", 邮件: "email", mail: "email",
     电子邮件: "email",
-    // 电话类列拆三档（导入时按 WhatsApp > 手机 > 座机 合并进 whatsapp_or_phone），
-    // 避免多个电话列互相抢占同一个字段导致整列丢失。
-    whatsapp_or_phone: "whatsapp_or_phone", whatsapp: "whatsapp_or_phone",
-    whatsappnumber: "whatsapp_or_phone",
+    // 0042 电话三列拆分（同 /admin 联系人格式）：WhatsApp 类列归 whatsapp、
+    // 手机类归 cellphone、座机类归 tel，各自独立入库，不再合并互抢。
+    whatsapp_or_phone: "whatsapp", whatsapp: "whatsapp", whatsappnumber: "whatsapp",
     cellphone: "cellphone", cell: "cellphone", mobile: "cellphone",
     mobilephone: "cellphone", 手机: "cellphone", 手机号: "cellphone",
     手机号码: "cellphone", 移动电话: "cellphone",
@@ -331,6 +379,19 @@ function aliasEntries(entity: ImportEntity): Array<{ alias: string; key: string 
   return list;
 }
 
+/** 公司法定/交易名称表头（0042 companies.legal_name/trading_name 别名）。
+ *  deals 的 title 有「名称」包含匹配，会把这些列抢成商机名——
+ *  公司名称 + 法定名称 的公司表因此被 detectEntity 误判成 deals。
+ *  这些表头对 deals 显式不识别，让识别流程落到 companies。 */
+const COMPANY_NAME_HEADERS_NOT_DEAL_TITLE = new Set([
+  normalizeHeader("法定名称"),
+  normalizeHeader("法定公司名"),
+  normalizeHeader("交易名称"),
+  normalizeHeader("贸易名称"),
+  normalizeHeader("legal_name"),
+  normalizeHeader("trading_name"),
+]);
+
 /**
  * 单个表头 → canonical 字段（null = 未识别）。
  * 优先级：归一化精确命中 → 后缀匹配（「联系人邮箱」以 邮箱 结尾 → email，
@@ -339,6 +400,8 @@ function aliasEntries(entity: ImportEntity): Array<{ alias: string; key: string 
 export function matchHeader(entity: ImportEntity, header: string): string | null {
   const norm = normalizeHeader(header);
   if (!norm) return null;
+  // 公司法定/交易名称列对 deals 不识别（防止公司表被误判成商机表，见上方说明）。
+  if (entity === "deals" && COMPANY_NAME_HEADERS_NOT_DEAL_TITLE.has(norm)) return null;
   let suffix: { key: string; len: number } | null = null;
   let contain: { key: string; len: number } | null = null;
   for (const { alias, key } of aliasEntries(entity)) {

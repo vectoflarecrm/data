@@ -6326,17 +6326,27 @@ function openDetail(id){
     STATE.detail=c;
     var h='<h3>'+esc(c.name)+' '+tierBadge(c.tier)+' '+statusBadge(c.lead_status)+(c.customer_since?' <span class="badge b-cust">正式客户 · '+esc(c.customer_since)+' 起</span>':'')+(Number(c.do_not_contact)?' <span class="badge b-dnc">禁止联系</span>':'')+'</h3>';
     h+='<p class="hint" style="margin:0 0 10px">ID '+esc(c.id)+(c.merged_from_ids?' · 已并入来源: '+esc(c.merged_from_ids):'')+'</p>';
-    h+='<h2 style="font-size:15px;margin:0 0 8px">🏢 公司资料（Excel 导入的内容可直接修改）</h2>';
-    h+='<div class="grid2 f"><div><label>公司名称 *</label><input id="dName" value="'+esc(c.name)+'" maxlength="200"></div><div><label>域名'+(c.domain?' '+domailBadge(c.domain_email_status):'')+'</label><input id="dDomain" value="'+esc(c.domain||'')+'" maxlength="200" placeholder="example.com"></div><div><label>行业</label><input id="dIndustry" value="'+esc(c.industry||'')+'" maxlength="100"></div><div><label>国家/地区</label><input id="dCountry" value="'+esc(c.country||'')+'" maxlength="100"></div></div>';
-    h+='<div class="grid2 f"><div><label>📍 地址</label><input id="dAddress" value="'+esc(c.address||'')+'" maxlength="500"></div><div><label>编号（外部系统 ID）</label><input id="dExternalId" value="'+esc(c.external_id||'')+'" maxlength="100"></div></div>';
-    h+='<div class="f"><label>经销/代理品牌（多个用逗号分隔）</label><input id="dDealerBrands" value="'+esc(c.dealer_brands||'')+'" maxlength="500"></div>';
+    h+='<h2 style="font-size:15px;margin:0 0 8px">🏢 公司资料（对齐客户信息格式，可直接修改）</h2>';
+    h+='<div class="grid2 f"><div><label>公司名称 *</label><input id="dName" value="'+esc(c.name)+'" maxlength="200"></div><div><label>法定名称</label><input id="dLegalName" value="'+esc(c.legal_name||'')+'" maxlength="200"></div><div><label>交易名称</label><input id="dTradingName" value="'+esc(c.trading_name||'')+'" maxlength="200"></div><div><label>域名'+(c.domain?' '+domailBadge(c.domain_email_status):'')+'</label><input id="dDomain" value="'+esc(c.domain||'')+'" maxlength="200" placeholder="example.com"></div><div><label>行业</label><input id="dIndustry" value="'+esc(c.industry||'')+'" maxlength="100"></div><div><label>产品与服务</label><input id="dProductsServices" value="'+esc(c.products_services||'')+'" maxlength="2000"></div><div><label>国家/地区</label><input id="dCountry" value="'+esc(c.country||'')+'" maxlength="100"></div><div><label>国家代码</label><input id="dCountryCode" value="'+esc(c.country_code||'')+'" maxlength="100"></div><div><label>地区/州</label><input id="dRegion" value="'+esc(c.region||'')+'" maxlength="100"></div><div><label>城市</label><input id="dCity" value="'+esc(c.city||'')+'" maxlength="100"></div><div><label>邮编城市</label><input id="dZipCity" value="'+esc(c.zip_city||'')+'" maxlength="100"></div><div><label>邮编</label><input id="dPostalCode" value="'+esc(c.postal_code||'')+'" maxlength="100"></div><div><label>📍 街道地址</label><input id="dAddress" value="'+esc(c.address||'')+'" maxlength="500"></div></div>';
+    h+='<h2 style="font-size:15px;margin:14px 0 8px">📞 公司联系</h2>';
+    h+='<div class="grid2 f"><div><label>公司电话</label><input id="dTelCo" value="'+esc(c.tel||'')+'" maxlength="100"></div><div><label>公司 WhatsApp</label><input id="dWhatsCo" value="'+esc(c.whatsapp||'')+'" maxlength="100"></div></div>';
+    h+='<h2 style="font-size:15px;margin:14px 0 8px">🏷 业务属性</h2>';
+    h+='<div class="grid2 f"><div><label>公司类型</label><input id="dCompanyType" value="'+esc(c.company_type||'')+'" maxlength="200"></div><div><label>商业模式</label><input id="dBusinessModel" value="'+esc(c.business_model||'')+'" maxlength="200"></div><div><label>业务标签</label><input id="dBusinessTag" value="'+esc(c.business_tag||'')+'" maxlength="200"></div><div><label>产品类别</label><input id="dProductCategories" value="'+esc(c.product_categories||'')+'" maxlength="500"></div><div><label>客户细分</label><input id="dCustomerSegment" value="'+esc(c.customer_segment||'')+'" maxlength="200"></div><div><label>公司规模</label><input id="dCompanySize" value="'+esc(c.company_size||'')+'" maxlength="100"></div><div><label>员工规模</label><input id="dEmployeeRange" value="'+esc(c.employee_range||'')+'" maxlength="100"></div><div><label>成立年份</label><input id="dFoundedYear" value="'+esc(c.founded_year||'')+'" maxlength="20"></div><div><label>地理覆盖</label><input id="dGeographicCoverage" value="'+esc(c.geographic_coverage||'')+'" maxlength="500"></div><div><label>目标市场</label><input id="dTargetMarkets" value="'+esc(c.target_markets||'')+'" maxlength="500"></div></div>';
+    h+='<div class="f"><label>公司描述</label><textarea id="dDescription">'+esc(c.description||'')+'</textarea></div>';
+    h+='<div class="f" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">';
+    var CO_FLAG_DEFS=[['is_manufacturer','dIsManufacturer','制造商'],['is_importer','dIsImporter','进口商'],['is_distributor','dIsDistributor','分销商'],['is_wholesaler','dIsWholesaler','批发商'],['is_retailer','dIsRetailer','零售商'],['is_ecommerce','dIsEcommerce','电商'],['is_rental','dIsRental','租赁'],['is_oem','dIsOem','OEM']];
+    for(var cfi=0;cfi<CO_FLAG_DEFS.length;cfi++){
+      h+='<label style="display:flex;align-items:center;gap:4px;font-weight:400;margin:0"><input type="checkbox" id="'+CO_FLAG_DEFS[cfi][1]+'"'+(Number(c[CO_FLAG_DEFS[cfi][0]])?' checked':'')+'> '+CO_FLAG_DEFS[cfi][2]+'</label>';
+    }
+    h+='</div>';
+    h+='<h2 style="font-size:15px;margin:14px 0 8px">📦 数据与来源</h2>';
     h+='<div class="grid2 f"><div><label>分级</label><select id="dTier">';
     ['A','B','C','VIP','unqualified'].forEach(function(t){h+='<option value="'+t+'"'+(t===c.tier?' selected':'')+'>'+TIER_L[t]+'</option>';});
     h+='</select></div><div><label>销售状态</label><select id="dStatus">';
     ['new','enriched','contacted','qualified','disqualified'].forEach(function(s){h+='<option value="'+s+'"'+(s===c.lead_status?' selected':'')+'>'+STATUS_L[s]+'</option>';});
     h+='</select></div><div><label>客户来源（ROI 归因，可修正为转介绍等）</label><select id="dSource">';
     ['promoted','manual','csv_import','merge','referral','other','unknown'].forEach(function(src){h+='<option value="'+src+'"'+(src===(c.source||'unknown')?' selected':'')+'>'+SOURCE_L[src]+'</option>';});
-    h+='</select></div></div>';
+    h+='</select></div><div><label>编号（外部系统 ID）</label><input id="dExternalId" value="'+esc(c.external_id||'')+'" maxlength="100"></div><div><label>经销/代理品牌（多个用逗号分隔）</label><input id="dDealerBrands" value="'+esc(c.dealer_brands||'')+'" maxlength="500"></div></div>';
     h+='<div class="f"><label>中文备注（合并历史也记录在这里）</label><textarea id="dRemarks">'+esc(c.chinese_remarks||'')+'</textarea></div>';
     h+='<div class="mrow" style="justify-content:flex-start"><button class="btn btn-p" data-act="saveCo" data-id="'+esc(c.id)+'">保存公司信息</button>';
     if(c.domain)h+='<button class="btn btn-s" data-act="recheckDomain" data-id="'+esc(c.id)+'">🔍 重检域名</button>';
@@ -6346,7 +6356,7 @@ function openDetail(id){
       h+='<button class="btn btn-d" data-act="blockCo" data-id="'+esc(c.id)+'">🚫 标记公司禁止联系</button>';
     }
     h+='</div>';
-    h+='<h2 style="font-size:15px;margin:16px 0 8px">👤 联系人（'+contacts.length+'）</h2><table><thead><tr><th>姓名</th><th>职务</th><th>角色</th><th>邮箱</th><th>电话/WhatsApp</th><th>状态</th><th>主联</th><th>操作</th></tr></thead><tbody>';
+    h+='<h2 style="font-size:15px;margin:16px 0 8px">👤 联系人（'+contacts.length+'）</h2><table><thead><tr><th>姓名</th><th>职务</th><th>角色</th><th>邮箱</th><th>电话</th><th>手机</th><th>WhatsApp</th><th>状态</th><th>主联</th><th>操作</th></tr></thead><tbody>';
     for(var i=0;i<contacts.length;i++){
       var ct=contacts[i];
       var cst='';
@@ -6370,10 +6380,10 @@ function openDetail(id){
       }else if(ct.email){
         ctop+='<button class="btn btn-s btn-xs" data-act="markEmailValid" data-id="'+esc(ct.id)+'">标有效</button> ';
       }
-      h+='<tr><td>'+esc(ct.full_name)+'</td><td>'+esc(ct.job_title||'—')+'</td><td>'+roleSel+'</td><td>'+esc(ct.email||'—')+'</td><td>'+esc(ct.whatsapp_or_phone||'—')+'</td><td>'+cst+'</td><td>'+(Number(ct.is_primary)?'★':'')+'</td><td>'+ctop+(Number(ct.is_primary)?'':'<button class="btn btn-s btn-xs" data-act="mkPrimary" data-id="'+esc(ct.id)+'">设主联</button> ')+'<button class="btn btn-d btn-xs" data-act="delContact" data-id="'+esc(ct.id)+'">删</button></td></tr>';
+      h+='<tr><td>'+esc(ct.full_name)+'</td><td>'+esc(ct.job_title||'—')+'</td><td>'+roleSel+'</td><td>'+esc(ct.email||'—')+'</td><td>'+esc(ct.tel||'—')+'</td><td>'+esc(ct.cellphone||'—')+'</td><td>'+esc(ct.whatsapp||ct.whatsapp_or_phone||'—')+'</td><td>'+cst+'</td><td>'+(Number(ct.is_primary)?'★':'')+'</td><td>'+ctop+(Number(ct.is_primary)?'':'<button class="btn btn-s btn-xs" data-act="mkPrimary" data-id="'+esc(ct.id)+'">设主联</button> ')+'<button class="btn btn-d btn-xs" data-act="delContact" data-id="'+esc(ct.id)+'">删</button></td></tr>';
     }
     h+='</tbody></table>';
-    h+='<div class="grid2 f"><div><label>新联系人姓名 *</label><input id="dcName"></div><div><label>职务</label><input id="dcTitle"></div><div><label>邮箱</label><input id="dcEmail"></div><div><label>电话/WhatsApp</label><input id="dcPhone"></div></div>';
+    h+='<div class="grid2 f"><div><label>新联系人姓名 *</label><input id="dcName"></div><div><label>职务</label><input id="dcTitle"></div><div><label>邮箱</label><input id="dcEmail"></div><div><label>电话</label><input id="dcTel"></div><div><label>手机</label><input id="dcCell"></div><div><label>WhatsApp</label><input id="dcWhats"></div></div>';
     h+='<button class="btn" data-act="addContact" data-id="'+esc(c.id)+'" style="margin-top:8px">➕ 添加联系人</button>';
     if(contacts.length>1){
       h+='<div class="toolbar" style="margin-top:10px"><span class="hint" style="margin:0">🔀 合并重复联系人:</span><select id="cmSrc">';
@@ -6381,7 +6391,7 @@ function openDetail(id){
       h+='</select><span class="hint" style="margin:0">并入 →</span><select id="cmTgt">';
       for(var n2=1;n2<contacts.length;n2++){h+='<option value="'+esc(contacts[n2].id)+'">'+esc(contacts[n2].full_name)+'</option>';}
       h+='</select><button class="btn btn-d" data-act="mergeContact" data-id="'+esc(c.id)+'">合并</button></div>';
-      h+='<p class="hint">来源联系人的姓名保留、缺失字段（职务/邮箱/电话/LinkedIn）补到目标联系人，来源被删除，动作记入时间线。</p>';
+      h+='<p class="hint">来源联系人的姓名保留、缺失字段（职务/邮箱/电话/手机/WhatsApp/LinkedIn）补到目标联系人 —— 电话、手机、WhatsApp 三列各自独立保全、互不覆盖，来源被删除，动作记入时间线。</p>';
     }
     h+='<h2 style="font-size:15px;margin:16px 0 8px">💰 商机（'+deals.length+'）</h2><table><thead><tr><th>名称</th><th>阶段</th><th>金额</th><th>预计成交</th><th>联系人</th><th>状态</th><th>操作</th></tr></thead><tbody>';
     for(var k=0;k<deals.length;k++){
@@ -6469,7 +6479,7 @@ function cmpContactsHtml(list){
   var h='';
   for(var i=0;i<list.length;i++){
     var c=list[i];
-    h+='<div style="padding:3px 0;border-bottom:1px dashed #e5e7eb">'+esc(c.full_name)+(c.job_title?' · '+esc(c.job_title):'')+(c.email?' · ✉ '+esc(c.email):'')+(c.whatsapp_or_phone?' · ☎ '+esc(c.whatsapp_or_phone):'')+(Number(c.is_primary)?' · ★主联':'')+'</div>';
+    h+='<div style="padding:3px 0;border-bottom:1px dashed #e5e7eb">'+esc(c.full_name)+(c.job_title?' · '+esc(c.job_title):'')+(c.email?' · ✉ '+esc(c.email):'')+(c.tel?' · ☎ '+esc(c.tel):'')+(c.cellphone?' · 📱 '+esc(c.cellphone):'')+((c.whatsapp||c.whatsapp_or_phone)?' · 💬 '+esc(c.whatsapp||c.whatsapp_or_phone):'')+(Number(c.is_primary)?' · ★主联':'')+'</div>';
   }
   return h;
 }
@@ -6487,6 +6497,19 @@ function cmpRow(label,va,vb){
   return '<tr'+(diff?' style="background:#fef3c7"':'')+'><td class="hint" style="white-space:nowrap">'+label+'</td><td style="white-space:normal">'+va+'</td><td style="white-space:normal">'+vb+'</td></tr>';
 }
 function cmpV(c,f){return c[f]===null||c[f]===undefined||c[f]===''?'<span class="hint">—</span>':esc(c[f]);}
+/* 0042 业务角色勾选 → 中文串（比对页 A/B 两列各自计算）。 */
+function cmpRoleFlags(x){
+  var t=[];
+  if(Number(x.is_manufacturer))t.push('制造商');
+  if(Number(x.is_importer))t.push('进口商');
+  if(Number(x.is_distributor))t.push('分销商');
+  if(Number(x.is_wholesaler))t.push('批发商');
+  if(Number(x.is_retailer))t.push('零售商');
+  if(Number(x.is_ecommerce))t.push('电商');
+  if(Number(x.is_rental))t.push('租赁');
+  if(Number(x.is_oem))t.push('OEM');
+  return t.length?t.join('、'):'<span class="hint">—</span>';
+}
 function openCompare(aId,bId){
   var pair=null;
   for(var i=0;i<STATE.dupPairs.length;i++){
@@ -6510,6 +6533,12 @@ function openCompare(aId,bId){
     h+=cmpRow('📍 地址',cmpV(a,'address'),cmpV(b,'address'));
     h+=cmpRow('编号',cmpV(a,'external_id'),cmpV(b,'external_id'));
     h+=cmpRow('经销/代理品牌',cmpV(a,'dealer_brands'),cmpV(b,'dealer_brands'));
+    h+=cmpRow('公司电话',cmpV(a,'tel'),cmpV(b,'tel'));
+    h+=cmpRow('公司 WhatsApp',cmpV(a,'whatsapp'),cmpV(b,'whatsapp'));
+    h+=cmpRow('法定名称',cmpV(a,'legal_name'),cmpV(b,'legal_name'));
+    h+=cmpRow('城市',cmpV(a,'city'),cmpV(b,'city'));
+    h+=cmpRow('成立年份',cmpV(a,'founded_year'),cmpV(b,'founded_year'));
+    h+=cmpRow('业务角色',cmpRoleFlags(a),cmpRoleFlags(b));
     h+=cmpRow('分级',tierBadge(a.tier),tierBadge(b.tier));
     h+=cmpRow('销售状态',statusBadge(a.lead_status),statusBadge(b.lead_status));
     h+=cmpRow('客户来源',SOURCE_L[a.source||'unknown']||esc(a.source||'unknown'),SOURCE_L[b.source||'unknown']||esc(b.source||'unknown'));
@@ -6731,13 +6760,21 @@ $('dBody').addEventListener('click',function(e){
   if(act==='saveCo'){
     if(!$('dName').value.trim()){toast('公司名称不能为空',true);return;}
     var o=STATE.detail||{},bd={tier:$('dTier').value,lead_status:$('dStatus').value,source:$('dSource').value,chinese_remarks:$('dRemarks').value};
-    var f1=$('dName').value.trim();if(f1!==o.name)bd.name=f1;
-    var f2=$('dDomain').value.trim();if(f2!==(o.domain||''))bd.domain=f2;
-    var f3=$('dIndustry').value.trim();if(f3!==(o.industry||''))bd.industry=f3;
-    var f4=$('dCountry').value.trim();if(f4!==(o.country||''))bd.country=f4;
-    var f5=$('dAddress').value.trim();if(f5!==(o.address||''))bd.address=f5;
-    var f6=$('dExternalId').value.trim();if(f6!==(o.external_id||''))bd.external_id=f6;
-    var f7=$('dDealerBrands').value.trim();if(f7!==(o.dealer_brands||''))bd.dealer_brands=f7;
+    /* 0042 全字段 only-changed 提交：与打开详情时的原始值比对，只 PATCH 变更项
+       （避免误触发域名重检等副作用）。 */
+    var CO_EDIT_FIELDS=[['dName','name'],['dDomain','domain'],['dLegalName','legal_name'],['dTradingName','trading_name'],['dIndustry','industry'],['dProductsServices','products_services'],['dCountry','country'],['dCountryCode','country_code'],['dRegion','region'],['dCity','city'],['dZipCity','zip_city'],['dPostalCode','postal_code'],['dAddress','address'],['dTelCo','tel'],['dWhatsCo','whatsapp'],['dCompanyType','company_type'],['dBusinessModel','business_model'],['dBusinessTag','business_tag'],['dProductCategories','product_categories'],['dCustomerSegment','customer_segment'],['dCompanySize','company_size'],['dEmployeeRange','employee_range'],['dFoundedYear','founded_year'],['dGeographicCoverage','geographic_coverage'],['dTargetMarkets','target_markets'],['dDescription','description'],['dExternalId','external_id'],['dDealerBrands','dealer_brands']];
+    for(var cef=0;cef<CO_EDIT_FIELDS.length;cef++){
+      var cel=$(CO_EDIT_FIELDS[cef][0]);
+      if(!cel)continue;
+      var cv=cel.value.trim();
+      if(cv!==String(o[CO_EDIT_FIELDS[cef][1]]||''))bd[CO_EDIT_FIELDS[cef][1]]=cv;
+    }
+    var CO_EDIT_FLAGS=[['dIsManufacturer','is_manufacturer'],['dIsImporter','is_importer'],['dIsDistributor','is_distributor'],['dIsWholesaler','is_wholesaler'],['dIsRetailer','is_retailer'],['dIsEcommerce','is_ecommerce'],['dIsRental','is_rental'],['dIsOem','is_oem']];
+    for(var cfl=0;cfl<CO_EDIT_FLAGS.length;cfl++){
+      var ccb=$(CO_EDIT_FLAGS[cfl][0]);
+      if(!ccb)continue;
+      if(ccb.checked!==!!Number(o[CO_EDIT_FLAGS[cfl][1]]))bd[CO_EDIT_FLAGS[cfl][1]]=ccb.checked;
+    }
     api('/admin/api/crm/companies/'+encodeURIComponent(id),{method:'PATCH',body:bd}).then(function(){toast('公司信息已保存');loadAll();openDetail(id);}).catch(function(err){toast(err.message,true);});
   }else if(act==='blockCo'||act==='unblockCo'){
     if(act==='blockCo'&&!confirm('标记后该公司的所有对外发送（含域名匹配）都会在发送前被拦截。确定？'))return;
@@ -6748,7 +6785,7 @@ $('dBody').addEventListener('click',function(e){
     api('/admin/api/crm/contacts/'+encodeURIComponent(id),{method:'PATCH',body:{email_status:act==='markEmailValid'?'valid':'invalid'}}).then(function(){toast('邮箱状态已更新');var mid=document.querySelector('#dBody [data-act="merge"]').getAttribute('data-id');openDetail(mid);}).catch(function(err){toast(err.message,true);});
   }else if(act==='addContact'){
     if(!$('dcName').value.trim()){toast('联系人姓名必填',true);return;}
-    api('/admin/api/crm/contacts',{method:'POST',body:{company_id:id,full_name:$('dcName').value,job_title:$('dcTitle').value,email:$('dcEmail').value,whatsapp_or_phone:$('dcPhone').value}}).then(function(){toast('已添加联系人');openDetail(id);loadCompanies().then(renderStats);}).catch(function(err){toast(err.message,true);});
+    api('/admin/api/crm/contacts',{method:'POST',body:{company_id:id,full_name:$('dcName').value,job_title:$('dcTitle').value,email:$('dcEmail').value,tel:$('dcTel').value,cellphone:$('dcCell').value,whatsapp:$('dcWhats').value}}).then(function(){toast('已添加联系人');openDetail(id);loadCompanies().then(renderStats);}).catch(function(err){toast(err.message,true);});
   }else if(act==='delContact'){
     if(!confirm('确定删除该联系人？'))return;
     api('/admin/api/crm/contacts/'+encodeURIComponent(id),{method:'DELETE'}).then(function(){toast('已删除');var mid=document.querySelector('#dBody [data-act="merge"]').getAttribute('data-id');openDetail(mid);}).catch(function(err){toast(err.message,true);});
