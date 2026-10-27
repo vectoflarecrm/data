@@ -47,6 +47,8 @@ import {
   updateSignalWatch,
   type SignalCheckReport,
 } from "./signal-monitor";
+import { COMPANY_SOURCES, getAttribution } from "./crm-attribution";
+import { buildIcsFeed, getTaskCalendar } from "./crm-calendar";
 
 export interface CrmCompanyRow {
   id: string;
@@ -62,6 +64,8 @@ export interface CrmCompanyRow {
   customer_since: string | null;
   /** 触达质量闭环：公司级禁止联系（含域名级发送前拦截）。 */
   do_not_contact: number;
+  /** 0038 ⑤ 来源归因：promoted/manual/csv_import/merge/referral/other/unknown。 */
+  source: string;
   created_at: string;
   updated_at: string;
 }
@@ -136,6 +140,8 @@ export interface CrmActivityRow {
   summary: string;
   due_date: string | null;
   is_completed: number;
+  /** 0038 ⑧ 任务日历：任务负责人（用户名，NULL = 未分配）。 */
+  owner: string | null;
   created_at: string;
 }
 
@@ -284,8 +290,8 @@ async function createCompany(
   const leadStatus =
     body.lead_status === undefined ? "new" : oneOf(body.lead_status, LEAD_STATUSES, "lead_status");
   await env.DB.prepare(
-    `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status, chinese_remarks)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+    `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status, chinese_remarks, source)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'manual')`,
   )
     .bind(
       id,
@@ -410,6 +416,11 @@ async function updateCompany(
     sets.push(`do_not_contact = ?${sets.length + 2}`);
     binds.push(dnc ? 1 : 0);
   }
+  // ⑤ 来源归因（0038）：允许人工修正获客来源（如把 unknown 改成 referral）。
+  if ("source" in body) {
+    sets.push(`source = ?${sets.length + 2}`);
+    binds.push(oneOf(body.source, COMPANY_SOURCES, "source"));
+  }
   if (!sets.length) throw new HttpError(400, "没有可更新字段");
   sets.push("updated_at = CURRENT_TIMESTAMP");
   await env.DB.prepare(`UPDATE crm_companies SET ${sets.join(", ")} WHERE id = ?1`)
@@ -491,8 +502,8 @@ async function promoteLead(
 
   const tier = tierFromScore(cust.lead_score);
   await env.DB.prepare(
-    `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'enriched')`,
+    `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status, source)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'enriched', 'promoted')`,
   )
     .bind(
       crmId,
@@ -931,6 +942,28 @@ async function markCompanyCustomer(env: AdminEnv, companyId: string): Promise<vo
     .run();
 }
 
+/** ⑧ 任务日历（0038）：阶段推进自动生成的下一步行动
+ * （null = 该阶段无自动任务：inquiry/lost 只是进入或离开漏斗）。 */
+export interface NextStepTask {
+  summary: string;
+  dueOffsetDays: number;
+}
+
+export function nextStepTaskFor(stage: string, dealTitle: string): NextStepTask | null {
+  switch (stage) {
+    case "sample_quoted":
+      return { summary: `跟进样品报价反馈：商机「${dealTitle}」`, dueOffsetDays: 3 };
+    case "pi_sent":
+      return { summary: `跟进 PI 确认与定金：商机「${dealTitle}」`, dueOffsetDays: 3 };
+    case "deposit_paid":
+      return { summary: `安排生产与发货节点：商机「${dealTitle}」`, dueOffsetDays: 5 };
+    case "won":
+      return { summary: `赢单后售后回访：商机「${dealTitle}」`, dueOffsetDays: 7 };
+    default:
+      return null;
+  }
+}
+
 async function updateDeal(request: Request, env: AdminEnv, id: string): Promise<Response> {
   const existing = await env.DB.prepare("SELECT * FROM crm_deals WHERE id = ?1")
     .bind(id)
@@ -1008,22 +1041,40 @@ async function updateDeal(request: Request, env: AdminEnv, id: string): Promise<
   // Stage moves are timeline events — the panel timeline and the audit trail
   // should tell the same story.
   if (stageChangedTo) {
-    let summary: string;
-    if (stageChangedTo === "won") {
-      summary = `商机「${existing.title}」赢单 🎉（${existing.stage} → won），公司转正式客户`;
-    } else if (stageChangedTo === "lost") {
-      const reason = lostReason ?? null;
-      summary = `商机「${existing.title}」输单（${existing.stage} → lost）${reason ? `，原因: ${reason}` : ""}`;
-    } else {
-      summary = `商机「${existing.title}」阶段推进: ${existing.stage} → ${stageChangedTo}`;
-    }
-    await env.DB.prepare(
-      `INSERT INTO crm_activities (id, company_id, deal_id, type, summary)
-       VALUES (?1, ?2, ?3, 'note', ?4)`,
+  let summary: string;
+  if (stageChangedTo === "won") summary = `商机「${existing.title}」赢单 🎉（${existing.stage} → won），公司转正式客户`;
+  else if (stageChangedTo === "lost") {
+    const reason = lostReason ?? null;
+    summary = `商机「${existing.title}」输单（${existing.stage} → lost）${reason ? `，原因: ${reason}` : ""}`;
+  } else summary = `商机「${existing.title}」阶段推进: ${existing.stage} → ${stageChangedTo}`;
+  await env.DB.prepare(
+    `INSERT INTO crm_activities (id, company_id, deal_id, type, summary)
+     VALUES (?1, ?2, ?3, 'note', ?4)`,
+  )
+    .bind(crypto.randomUUID(), existing.company_id, id, summary)
+    .run();
+  // ⑧ 任务日历（0038）：阶段推进自动生成下一步行动任务（同文案未完成任务
+  // 已存在则跳过 —— 回退再推进不会堆任务）。
+  const nextStep = nextStepTaskFor(stageChangedTo, existing.title);
+  if (nextStep) {
+    const dup = await env.DB.prepare(
+      "SELECT id FROM crm_activities WHERE company_id = ?1 AND type = 'task' AND is_completed = 0 AND summary = ?2",
     )
-      .bind(crypto.randomUUID(), existing.company_id, id, summary)
-      .run();
-    if (stageChangedTo === "won") await markCompanyCustomer(env, existing.company_id);
+      .bind(existing.company_id, nextStep.summary)
+      .first<{ id: string }>();
+    if (!dup) {
+      const due = new Date(Date.now() + nextStep.dueOffsetDays * 86400000)
+        .toISOString()
+        .slice(0, 10);
+      await env.DB.prepare(
+        `INSERT INTO crm_activities (id, company_id, deal_id, type, summary, due_date)
+         VALUES (?1, ?2, ?3, 'task', ?4, ?5)`,
+      )
+        .bind(crypto.randomUUID(), existing.company_id, id, nextStep.summary, due)
+        .run();
+    }
+  }
+  if (stageChangedTo === "won") await markCompanyCustomer(env, existing.company_id);
   }
   const deal = await env.DB.prepare("SELECT * FROM crm_deals WHERE id = ?1")
     .bind(id)
@@ -1195,10 +1246,15 @@ async function createActivity(
   if (type !== "task" && dueDate) {
     throw new HttpError(400, "due_date 只能用于 type='task'");
   }
+  // ⑧ 任务日历（0038）：任务负责人（用户名），可空 = 未分配。
+  const owner = type === "task" ? optString(body.owner, "owner", 50) : null;
+  if (type !== "task" && "owner" in body && body.owner) {
+    throw new HttpError(400, "owner 只能用于 type='task'");
+  }
   const id = crypto.randomUUID();
   await env.DB.prepare(
-    `INSERT INTO crm_activities (id, company_id, deal_id, type, summary, due_date)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+    `INSERT INTO crm_activities (id, company_id, deal_id, type, summary, due_date, owner)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
   )
     .bind(
       id,
@@ -1208,6 +1264,7 @@ async function createActivity(
       type === "note" ? "manual_note" : type,
       summary,
       dueDate,
+      owner,
     )
     .run();
   await auditAdminAction(env, request, auth, "CREATE_CRM_ACTIVITY", "crm_activity", id, {
@@ -1239,6 +1296,12 @@ async function updateActivity(request: Request, env: AdminEnv, id: string): Prom
     if (existing.type !== "task") throw new HttpError(400, "due_date 只能用于任务");
     sets.push(`due_date = ?${sets.length + 2}`);
     binds.push(optDate(body.due_date, "due_date"));
+  }
+  // ⑧ 任务日历（0038）：任务负责人分配/改派。
+  if ("owner" in body) {
+    if (existing.type !== "task") throw new HttpError(400, "owner 只能用于任务");
+    sets.push(`owner = ?${sets.length + 2}`);
+    binds.push(optString(body.owner, "owner", 50));
   }
   if (!sets.length) throw new HttpError(400, "没有可更新字段");
   await env.DB.prepare(`UPDATE crm_activities SET ${sets.join(", ")} WHERE id = ?1`)
@@ -1495,8 +1558,8 @@ async function importCrmCsv(
     if (domain) companies.byDomain.set(domain, id);
     statements.push(
       env.DB.prepare(
-        `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'new')`,
+        `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'new', 'csv_import')`,
       ).bind(
         id,
         companyName,
@@ -1534,8 +1597,8 @@ async function importCrmCsv(
       if (domain) companies.byDomain.set(domain, id);
       statements.push(
         env.DB.prepare(
-          `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status, chinese_remarks)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'new', ?7)`,
+          `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status, chinese_remarks, source)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'new', ?7, 'csv_import')`,
         ).bind(
           id,
           name,
@@ -1876,6 +1939,15 @@ export async function handleCrmApi(
     } else if (resource === "signals") {
       // ⑥ 持续意向监测：总览（监测列表 + 最近信号）。
       if (!id && method === "GET") return await listSignalOverview(env);
+    } else if (resource === "attribution") {
+      // ⑤ 来源归因（0038）：来源/国家/行业/角色/序列五维 ROI 总览。
+      if (!id && method === "GET") return await getAttribution(env);
+    } else if (resource === "calendar") {
+      // ⑧ 任务日历（0038）：月视图 + 逾期 + 今日待办。
+      if (!id && method === "GET") return await getTaskCalendar(env, url);
+    } else if (resource === "calendar.ics") {
+      // ⑧ 任务日历（0038）：RFC 5545 日历订阅源（日历同步）。
+      if (method === "GET") return await buildIcsFeed(env);
     } else if (resource === "activities") {
       if (!id && method === "GET") return await listOpenTasks(env, url);
       if (!id && method === "POST") return await createActivity(request, env, auth);

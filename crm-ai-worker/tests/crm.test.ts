@@ -80,6 +80,7 @@ async function makeDb() {
       merged_from_ids TEXT, chinese_remarks TEXT, customer_since TEXT,
       do_not_contact INTEGER DEFAULT 0,
       domain_email_status TEXT NOT NULL DEFAULT 'pending',
+      source TEXT NOT NULL DEFAULT 'unknown',
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -104,7 +105,7 @@ async function makeDb() {
     CREATE TABLE crm_activities (
       id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
       deal_id TEXT, type TEXT DEFAULT 'manual_note', summary TEXT NOT NULL,
-      due_date TEXT, is_completed INTEGER DEFAULT 0,
+      due_date TEXT, is_completed INTEGER DEFAULT 0, owner TEXT,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE crm_deal_contacts (
@@ -361,10 +362,17 @@ describe("商机阶段推进", () => {
     expect(moved.body.deal.stage).toBe("sample_quoted");
 
     const acts = db.prepare("SELECT * FROM crm_activities").all() as any[];
-    expect(acts).toHaveLength(1);
-    expect(acts[0].summary).toContain("inquiry");
-    expect(acts[0].summary).toContain("sample_quoted");
-    expect(acts[0].deal_id).toBe(dealId);
+    // 0038 ⑧：阶段推进 → 时间线 note + 自动下一步任务
+    expect(acts).toHaveLength(2);
+    const note = acts.find((a) => a.type === "note");
+    expect(note.summary).toContain("inquiry");
+    expect(note.summary).toContain("sample_quoted");
+    expect(note.deal_id).toBe(dealId);
+    const task = acts.find((a) => a.type === "task");
+    expect(task.summary).toContain("跟进样品报价反馈");
+    expect(task.due_date).toBe(
+      new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10),
+    );
   });
 
   it("rejects an invalid stage (400)", async () => {

@@ -62,6 +62,7 @@ async function makeDb() {
       merged_from_ids TEXT, chinese_remarks TEXT, customer_since TEXT,
       do_not_contact INTEGER DEFAULT 0,
       domain_email_status TEXT NOT NULL DEFAULT 'pending',
+      source TEXT NOT NULL DEFAULT 'unknown',
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -86,7 +87,7 @@ async function makeDb() {
     CREATE TABLE crm_activities (
       id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
       deal_id TEXT, type TEXT DEFAULT 'manual_note', summary TEXT NOT NULL,
-      due_date TEXT, is_completed INTEGER DEFAULT 0,
+      due_date TEXT, is_completed INTEGER DEFAULT 0, owner TEXT,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE crm_deal_contacts (

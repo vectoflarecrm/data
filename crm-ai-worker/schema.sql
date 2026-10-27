@@ -834,6 +834,9 @@ CREATE TABLE IF NOT EXISTS crm_companies (
   customer_since TEXT,
   do_not_contact INTEGER DEFAULT 0,
   domain_email_status TEXT NOT NULL DEFAULT 'pending',
+  -- 0038 ⑤ 来源归因：获客来源（promoted/manual/csv_import/merge/referral/
+  -- other/unknown），创建路径自动打标，PATCH 可修正。见 migrations/0038。
+  source TEXT NOT NULL DEFAULT 'unknown',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -841,6 +844,7 @@ CREATE TABLE IF NOT EXISTS crm_companies (
 CREATE INDEX IF NOT EXISTS idx_companies_domain ON crm_companies(domain);
 CREATE INDEX IF NOT EXISTS idx_companies_lead_status ON crm_companies(lead_status);
 CREATE INDEX IF NOT EXISTS idx_companies_domain_email ON crm_companies(domain_email_status);
+CREATE INDEX IF NOT EXISTS idx_companies_source ON crm_companies(source);
 
 -- Contacts: decision makers per company. The first promoted pipeline
 -- contact is is_primary = 1 (the import-time channel).
@@ -906,6 +910,8 @@ CREATE TABLE IF NOT EXISTS crm_activities (
   summary TEXT NOT NULL,
   due_date TEXT,
   is_completed INTEGER DEFAULT 0,
+  -- 0038 ⑧ 任务日历：任务负责人（用户名，NULL = 未分配）。见 migrations/0038。
+  owner TEXT,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

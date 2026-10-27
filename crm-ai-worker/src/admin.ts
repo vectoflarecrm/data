@@ -5595,6 +5595,29 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 </div>
 
 <div class="panel">
+<div class="sec-head"><h2>📈 ROI 归因（客户开发效果）</h2><button class="btn btn-p" id="attrReload">刷新</button></div>
+<p class="hint">哪个客户来源最赚钱、哪种客户最容易成交：按 来源 / 国家 / 行业 / 联系人角色 / 销售序列 五个维度统计 公司 → 联系人 → 回复 → 商机 → 报价 → 成交 → 营收。报价 = 推进到样品报价及之后的商机；赢单率 = 成交 / 商机；平均周期 = 商机创建到赢单的平均天数。来源可在公司详情里人工修正（如转介绍）。</p>
+<div class="toolbar" id="attrDims">
+<button class="btn btn-p btn-xs" data-dim="sources">来源</button>
+<button class="btn btn-xs" data-dim="countries">国家</button>
+<button class="btn btn-xs" data-dim="industries">行业</button>
+<button class="btn btn-xs" data-dim="roles">联系人角色</button>
+<button class="btn btn-xs" data-dim="sequences">销售序列</button>
+</div>
+<table><thead><tr><th id="attrDimHead">来源</th><th>公司</th><th>联系人</th><th>回复</th><th>商机</th><th>报价</th><th>成交</th><th>营收(USD)</th><th>赢单率</th><th>平均周期(天)</th></tr></thead><tbody id="attrRows"></tbody></table>
+<div class="hint" id="attrHint"></div>
+</div>
+
+<div class="panel">
+<div class="sec-head"><h2>📅 任务日历</h2><div class="toolbar"><button class="btn btn-xs" id="calPrev">‹ 上月</button><span id="calLabel" class="hint" style="margin:0"></span><button class="btn btn-xs" id="calNext">下月 ›</button><button class="btn btn-xs" id="calThisMonth">回到本月</button><button class="btn btn-s" id="calIcs">📥 订阅 .ics</button><button class="btn btn-p" id="calReload">刷新</button></div></div>
+<p class="hint">每天打开先看这里：逾期任务按公司价值置顶（超时升级）；商机阶段推进会自动生成下一步行动任务（样品报价 → 跟进反馈 / PI 已发 → 跟进定金 / 定金到账 → 安排生产 / 赢单 → 售后回访）；「订阅 .ics」把未结任务导出为标准日历源，可导入 Google 日历或系统日历。</p>
+<div class="hint" id="calCounts"></div>
+<table><thead><tr><th>🔴 逾期任务（按公司价值排序）</th><th>公司</th><th>负责人</th><th>操作</th></tr></thead><tbody id="calOverdue"></tbody></table>
+<table><thead><tr><th>📌 今日待办</th><th>公司</th><th>负责人</th><th>操作</th></tr></thead><tbody id="calToday"></tbody></table>
+<div id="calGrid"></div>
+</div>
+
+<div class="panel">
 <div class="sec-head"><h2>🏢 客户公司</h2>
 <div class="toolbar"><input id="coSearch" placeholder="搜索名称/域名/备注"><select id="coTier"><option value="">全部分级</option><option value="A">A</option><option value="B">B</option><option value="C">C</option><option value="VIP">VIP</option><option value="unqualified">未分级</option></select><select id="coStatus"><option value="">全部状态</option><option value="new">新线索</option><option value="enriched">已富化</option><option value="contacted">已联系</option><option value="qualified">已验证</option><option value="disqualified">已淘汰</option></select><button class="btn btn-p" id="coReload">刷新</button><button class="btn" id="coNew">➕ 新建公司</button></div></div>
 <p class="hint">⬆️ 线索提升：把研究管线（customers 表）里已调研完的线索一键转为销售公司 —— ID 填客户管理面板「客户ID」列的数字。提升过的线索会自动跳过（幂等），联系人、国家、行业、评分分级一并带入。</p>
@@ -5675,7 +5698,7 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 <script>
 (function(){
 'use strict';
-  var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[],funnel:null,sequences:[],domainChecks:[],signalWatch:[],signalList:[]};
+  var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[],funnel:null,sequences:[],domainChecks:[],signalWatch:[],signalList:[],attribution:null,attrDim:'sources',calendar:null,calMonth:new Date().toISOString().slice(0,7)};
 var STAGES=['inquiry','sample_quoted','pi_sent','deposit_paid','won','lost'];
 var STAGE_L={inquiry:'询盘',sample_quoted:'样品报价',pi_sent:'PI 已发',deposit_paid:'定金到账',won:'赢单',lost:'输单'};
 var TIER_L={A:'A级',B:'B级',C:'C级',VIP:'VIP',unqualified:'未分级'};
@@ -5997,8 +6020,105 @@ $('sigWatchRows').addEventListener('click',function(e){
     }).catch(function(err){toast(err.message,true);});
   }
 });
+/* ── ROI 归因 + 任务日历（0038） ─────────────────────────── */
+var ATTR_DIM_L={sources:'来源',countries:'国家',industries:'行业',roles:'联系人角色',sequences:'销售序列'};
+var SOURCE_L={promoted:'管线提升',manual:'手工录入',csv_import:'CSV 导入',merge:'合并而来',referral:'转介绍',other:'其他',unknown:'未知'};
+function loadAttribution(){
+  return api('/admin/api/crm/attribution').then(function(b){STATE.attribution=b;renderAttribution();});
+}
+function renderAttribution(){
+  var b=STATE.attribution||{};
+  var btns=$('attrDims').querySelectorAll('[data-dim]');
+  for(var k=0;k<btns.length;k++){btns[k].className=btns[k].getAttribute('data-dim')===STATE.attrDim?'btn btn-p btn-xs':'btn btn-xs';}
+  $('attrDimHead').textContent=ATTR_DIM_L[STATE.attrDim]||STATE.attrDim;
+  if(b.available===false){
+    $('attrRows').innerHTML='<tr><td colspan="10" class="hint">ROI 归因暂不可用：数据库尚未应用 0038 迁移（crm_companies.source 列缺失）。部署后自动生效。</td></tr>';
+    $('attrHint').textContent='';
+    return;
+  }
+  var list=b[STATE.attrDim]||[];
+  var rows='';
+  for(var i=0;i<list.length;i++){
+    var r=list[i];
+    var dimCell='<strong>'+esc(r.label||r.dim)+'</strong>';
+    if(STATE.attrDim==='sequences'&&r.enrolled!==undefined)dimCell+='<div class="hint" style="margin:0;font-size:11px">报名 '+Number(r.enrolled)+' · 进行 '+Number(r.active)+' · 停止 '+Number(r.stopped)+' · 完成 '+Number(r.completed)+'</div>';
+    rows+='<tr><td>'+dimCell+'</td><td>'+Number(r.companies||0)+'</td><td>'+Number(r.contacts||0)+'</td><td>'+Number(r.replies||0)+'</td><td>'+Number(r.deals||0)+'</td><td>'+Number(r.quoted||0)+'</td><td>'+Number(r.won||0)+'</td><td>'+fmtAmt(r.revenue||0)+'</td><td>'+(Number(r.deals||0)>0?String(r.win_rate)+'%':'—')+'</td><td>'+(r.avg_cycle_days===null||r.avg_cycle_days===undefined?'—':String(r.avg_cycle_days))+'</td></tr>';
+  }
+  $('attrRows').innerHTML=rows||'<tr><td colspan="10" class="hint">该维度暂无数据。</td></tr>';
+  $('attrHint').textContent='点击上方标签切换维度；营收按未归档赢单商机金额合计，报价 = 推进到样品报价及之后。';
+}
+$('attrReload').onclick=function(){loadAttribution().catch(function(e){toast(e.message,true);});};
+$('attrDims').addEventListener('click',function(e){
+  var b=e.target.closest('[data-dim]');if(!b)return;
+  STATE.attrDim=b.getAttribute('data-dim');
+  renderAttribution();
+});
+function shiftMonth(m,off){
+  var p=m.split('-');var y=parseInt(p[0],10);var mo=parseInt(p[1],10)-1+off;
+  var d=new Date(Date.UTC(y,mo,1));
+  return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0');
+}
+function loadCalendar(){
+  return api('/admin/api/crm/calendar?month='+STATE.calMonth).then(function(b){STATE.calendar=b;STATE.calMonth=b.month||STATE.calMonth;renderCalendar();});
+}
+function calTaskRow(t,od){
+  var dueCell=od?'<span class="od">逾期 '+Number(t.overdue_days||0)+' 天</span>（'+esc(t.due_date)+'）':'（'+esc(t.due_date)+'）';
+  return '<tr><td>'+dueCell+' '+esc(t.summary)+'</td><td>'+esc(t.company_name)+' '+tierBadge(t.tier)+'</td><td>'+esc(t.owner||'—')+'</td><td><button class="btn btn-p btn-xs" data-calact="done" data-id="'+esc(t.id)+'">✓ 完成</button> <button class="btn btn-s btn-xs" data-calact="snooze" data-id="'+esc(t.id)+'">→明天</button></td></tr>';
+}
+function renderCalendar(){
+  var b=STATE.calendar||{};
+  var cnt=b.counts||{};
+  $('calLabel').textContent=STATE.calMonth;
+  $('calCounts').textContent='本月未结任务 '+Number(cnt.month_open||0)+' · 逾期 '+Number(cnt.overdue||0)+' · 今日 '+Number(cnt.today||0);
+  var od=b.overdue||[];var rows='';
+  for(var i=0;i<od.length;i++){rows+=calTaskRow(od[i],true);}
+  $('calOverdue').innerHTML=rows||'<tr><td colspan="4" class="hint">🎉 无逾期任务</td></tr>';
+  var td=b.today_tasks||[];var rows2='';
+  for(var j=0;j<td.length;j++){rows2+=calTaskRow(td[j],false);}
+  $('calToday').innerHTML=rows2||'<tr><td colspan="4" class="hint">今日无待办</td></tr>';
+  var days=b.days||{};
+  var ym=STATE.calMonth.split('-');var y=parseInt(ym[0],10);var mo=parseInt(ym[1],10);
+  var startDow=(new Date(Date.UTC(y,mo-1,1)).getUTCDay()+6)%7;
+  var dim=new Date(Date.UTC(y,mo,0)).getUTCDate();
+  var today=String(b.today||new Date().toISOString().slice(0,10));
+  var html='<table style="table-layout:fixed;margin-top:8px"><thead><tr><th>一</th><th>二</th><th>三</th><th>四</th><th>五</th><th>六</th><th>日</th></tr></thead><tbody>';
+  var cell=1-startDow;
+  while(cell<=dim){
+    html+='<tr>';
+    for(var d=0;d<7;d++,cell++){
+      if(cell<1||cell>dim){html+='<td style="height:64px"></td>';continue;}
+      var ds=y+'-'+String(mo).padStart(2,'0')+'-'+String(cell).padStart(2,'0');
+      var list=days[ds]||[];
+      var style=ds===today?' style="height:64px;background:#eef2ff;font-weight:600"':' style="height:64px"';
+      var inner='';
+      for(var k2=0;k2<list.length&&k2<3;k2++){inner+='<div class="hint" style="margin:0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(list[k2].summary)+'">• '+esc(list[k2].summary)+'</div>';}
+      if(list.length>3)inner+='<div class="hint" style="margin:0;font-size:11px">+'+(list.length-3)+' 更多</div>';
+      html+='<td'+style+'><div style="font-weight:600">'+cell+'</div>'+inner+'</td>';
+    }
+    html+='</tr>';
+  }
+  html+='</tbody></table>';
+  $('calGrid').innerHTML=html;
+}
+function calAct(e){
+  var b=e.target.closest('[data-calact]');if(!b)return;
+  var id=b.getAttribute('data-id');
+  if(b.getAttribute('data-calact')==='done'){
+    api('/admin/api/crm/activities/'+encodeURIComponent(id),{method:'PATCH',body:{is_completed:true}}).then(function(){toast('已完成 ✓');loadCalendar();loadStats();loadTasks().then(renderStats);}).catch(function(err){toast(err.message,true);});
+  }else{
+    var tm=new Date(Date.now()+86400000).toISOString().slice(0,10);
+    api('/admin/api/crm/activities/'+encodeURIComponent(id),{method:'PATCH',body:{due_date:tm}}).then(function(){toast('已顺延到明天');loadCalendar();loadTasks().then(renderStats);}).catch(function(err){toast(err.message,true);});
+  }
+}
+$('calReload').onclick=function(){loadCalendar().catch(function(e){toast(e.message,true);});};
+$('calPrev').onclick=function(){STATE.calMonth=shiftMonth(STATE.calMonth,-1);loadCalendar().catch(function(e){toast(e.message,true);});};
+$('calNext').onclick=function(){STATE.calMonth=shiftMonth(STATE.calMonth,1);loadCalendar().catch(function(e){toast(e.message,true);});};
+$('calThisMonth').onclick=function(){STATE.calMonth=new Date().toISOString().slice(0,7);loadCalendar().catch(function(e){toast(e.message,true);});};
+$('calIcs').onclick=function(){window.open('/admin/api/crm/calendar.ics');};
+$('calOverdue').addEventListener('click',calAct);
+$('calToday').addEventListener('click',calAct);
 function loadAll(){
-  return Promise.all([loadCompanies(),loadDeals(),loadTasks(),loadStats(),loadSequences(),loadDomains(),loadSignals()]).catch(function(e){toast(e.message,true);});
+  return Promise.all([loadCompanies(),loadDeals(),loadTasks(),loadStats(),loadSequences(),loadDomains(),loadSignals(),loadAttribution(),loadCalendar()]).catch(function(e){toast(e.message,true);});
 }
 
 /* ── 公司详情 ───────────────────────────────────────────── */
@@ -6011,6 +6131,8 @@ function openDetail(id){
     ['A','B','C','VIP','unqualified'].forEach(function(t){h+='<option value="'+t+'"'+(t===c.tier?' selected':'')+'>'+TIER_L[t]+'</option>';});
     h+='</select></div><div><label>销售状态</label><select id="dStatus">';
     ['new','enriched','contacted','qualified','disqualified'].forEach(function(s){h+='<option value="'+s+'"'+(s===c.lead_status?' selected':'')+'>'+STATUS_L[s]+'</option>';});
+    h+='</select></div><div><label>客户来源（ROI 归因，可修正为转介绍等）</label><select id="dSource">';
+    ['promoted','manual','csv_import','merge','referral','other','unknown'].forEach(function(src){h+='<option value="'+src+'"'+(src===(c.source||'unknown')?' selected':'')+'>'+SOURCE_L[src]+'</option>';});
     h+='</select></div></div>';
     h+='<div class="f"><label>中文备注（合并历史也记录在这里）</label><textarea id="dRemarks">'+esc(c.chinese_remarks||'')+'</textarea></div>';
     h+='<div class="mrow" style="justify-content:flex-start"><button class="btn btn-p" data-act="saveCo" data-id="'+esc(c.id)+'">保存公司信息</button>';
@@ -6102,10 +6224,10 @@ function openDetail(id){
     h+='<h2 style="font-size:15px;margin:16px 0 8px">🕘 时间线 / 动态</h2><ul class="tl">';
     for(var m=0;m<acts.length;m++){
       var a=acts[m];
-      h+='<li><div class="tl-meta">'+fmtDate(a.created_at)+' · '+esc(TYPE_L[a.type]||a.type)+(a.is_completed&&Number(a.is_completed)?' · 已完成':'')+'</div>'+esc(a.summary)+'</li>';
+      h+='<li><div class="tl-meta">'+fmtDate(a.created_at)+' · '+esc(TYPE_L[a.type]||a.type)+(a.owner?' · 负责人 '+esc(a.owner):'')+(a.is_completed&&Number(a.is_completed)?' · 已完成':'')+'</div>'+esc(a.summary)+'</li>';
     }
     h+='</ul>';
-    h+='<div class="grid2 f"><div><label>类型</label><select id="daType"><option value="note">备注</option><option value="task">任务（待办）</option><option value="call">通话</option><option value="meeting">会议</option></select></div><div><label>到期日（任务用）</label><input id="daDue" type="date"></div></div>';
+    h+='<div class="grid2 f"><div><label>类型</label><select id="daType"><option value="note">备注</option><option value="task">任务（待办）</option><option value="call">通话</option><option value="meeting">会议</option></select></div><div><label>到期日（任务用）</label><input id="daDue" type="date"></div><div><label>负责人（任务用，可选）</label><input id="daOwner" maxlength="50" placeholder="如：小王"></div></div>';
     h+='<div class="f"><label>内容 *</label><textarea id="daSummary" placeholder="记录一次跟进、或创建一个待办…"></textarea></div>';
     h+='<button class="btn" data-act="addActivity" data-id="'+esc(c.id)+'" style="margin-top:8px">➕ 添加到时间线</button>';
     h+='<h2 style="font-size:15px;margin:16px 0 8px">🔀 合并重复公司</h2>';
@@ -6305,7 +6427,7 @@ $('dBody').addEventListener('click',function(e){
   var b=e.target.closest('[data-act]');if(!b)return;
   var act=b.getAttribute('data-act'),id=b.getAttribute('data-id');
   if(act==='saveCo'){
-    api('/admin/api/crm/companies/'+encodeURIComponent(id),{method:'PATCH',body:{tier:$('dTier').value,lead_status:$('dStatus').value,chinese_remarks:$('dRemarks').value}}).then(function(){toast('公司信息已保存');loadAll();}).catch(function(err){toast(err.message,true);});
+    api('/admin/api/crm/companies/'+encodeURIComponent(id),{method:'PATCH',body:{tier:$('dTier').value,lead_status:$('dStatus').value,source:$('dSource').value,chinese_remarks:$('dRemarks').value}}).then(function(){toast('公司信息已保存');loadAll();}).catch(function(err){toast(err.message,true);});
   }else if(act==='blockCo'||act==='unblockCo'){
     if(act==='blockCo'&&!confirm('标记后该公司的所有对外发送（含域名匹配）都会在发送前被拦截。确定？'))return;
     api('/admin/api/crm/companies/'+encodeURIComponent(id),{method:'PATCH',body:{do_not_contact:act==='blockCo'}}).then(function(){toast(act==='blockCo'?'已标记公司禁止联系，后续发送将被拦截':'已解除公司禁联');openDetail(id);loadCompanies().then(renderStats);}).catch(function(err){toast(err.message,true);});
@@ -6328,6 +6450,7 @@ $('dBody').addEventListener('click',function(e){
     if(!$('daSummary').value.trim()){toast('内容不能为空',true);return;}
     var body2={company_id:id,type:$('daType').value,summary:$('daSummary').value};
     if($('daDue').value&&body2.type==='task')body2.due_date=$('daDue').value;
+    if(body2.type==='task'&&$('daOwner').value.trim())body2.owner=$('daOwner').value.trim();
     api('/admin/api/crm/activities',{method:'POST',body:body2}).then(function(){toast('已记录');openDetail(id);loadTasks().then(renderStats);}).catch(function(err){toast(err.message,true);});
   }else if(act==='recheckDomain'){
     toast('正在检测域名…');
