@@ -227,6 +227,10 @@ export const IMPORT_HEADERS: Record<ImportEntity, Record<string, string>> = {
     website: "domain", 网址: "domain", 网站: "domain", 官网: "domain", 主页: "domain",
     country: "country", 国家: "country", 国家地区: "country", 地区: "country",
     industry: "industry", 行业: "industry", 行业类别: "industry",
+    // 「产品与服务」类列也归 industry（CRM 无独立产品字段，公司详情页以
+    // 行业展示，语义上是该公司的主营业务描述）。
+    products: "industry", productsservices: "industry", productsandservices: "industry",
+    产品: "industry", 产品与服务: "industry", 主营产品: "industry", 主营业务: "industry",
     tier: "tier", 分级: "tier", 等级: "tier", 客户分级: "tier",
     chinese_remarks: "chinese_remarks", 备注: "chinese_remarks", 中文备注: "chinese_remarks",
     remark: "chinese_remarks", remarks: "chinese_remarks", 备注2: "chinese_remarks",
@@ -237,14 +241,25 @@ export const IMPORT_HEADERS: Record<ImportEntity, Record<string, string>> = {
     customer: "company", customername: "company",
     full_name: "full_name", 姓名: "full_name", 联系人: "full_name", 联系人姓名: "full_name",
     contact: "full_name", contactname: "full_name", name: "full_name",
+    // 拆分姓名列（Puerto Rico 表布局）：First/Last 各归一列，导入时拼成
+    // full_name；只有单列姓名时仍走上面的 full_name。
+    first_name: "first_name", firstname: "first_name", 名字: "first_name",
+    givenname: "first_name",
+    last_name: "last_name", lastname: "last_name", 姓: "last_name",
+    姓氏: "last_name", surname: "last_name", familyname: "last_name",
     job_title: "job_title", 职务: "job_title", 职位: "job_title", title: "job_title",
     jobtitle: "job_title", 职称: "job_title",
     email: "email", 邮箱: "email", 电子邮箱: "email", 邮件: "email", mail: "email",
     电子邮件: "email",
-    whatsapp_or_phone: "whatsapp_or_phone", 电话: "whatsapp_or_phone",
-    联系电话: "whatsapp_or_phone", 联系方式: "whatsapp_or_phone", 手机: "whatsapp_or_phone",
-    手机号: "whatsapp_or_phone", 手机号码: "whatsapp_or_phone", 电话号码: "whatsapp_or_phone",
-    phone: "whatsapp_or_phone", whatsapp: "whatsapp_or_phone",
+    // 电话类列拆三档（导入时按 WhatsApp > 手机 > 座机 合并进 whatsapp_or_phone），
+    // 避免多个电话列互相抢占同一个字段导致整列丢失。
+    whatsapp_or_phone: "whatsapp_or_phone", whatsapp: "whatsapp_or_phone",
+    whatsappnumber: "whatsapp_or_phone",
+    cellphone: "cellphone", cell: "cellphone", mobile: "cellphone",
+    mobilephone: "cellphone", 手机: "cellphone", 手机号: "cellphone",
+    手机号码: "cellphone", 移动电话: "cellphone",
+    tel: "tel", telephone: "tel", phone: "tel", phonenumber: "tel",
+    telnumber: "tel", 电话: "tel", 联系电话: "tel", 电话号码: "tel", 联系方式: "tel",
     linkedin_url: "linkedin_url", linkedin: "linkedin_url", 领英: "linkedin_url",
     is_primary: "is_primary", 主联: "is_primary", 主要联系人: "is_primary",
   },
@@ -266,12 +281,18 @@ export const IMPORT_HEADERS: Record<ImportEntity, Record<string, string>> = {
   },
 };
 
-/** 各实体的必需字段（识别不到 → 换实体或 400）。 */
+/** 各实体的必需字段（识别不到 → 换实体或 400）。contacts 的姓名可为
+ *  full_name 单列，或 first_name + last_name 拆分列（见 hasContactName）。 */
 export const REQUIRED_KEYS: Record<ImportEntity, string[]> = {
   companies: ["name"],
-  contacts: ["full_name", "company"],
+  contacts: ["company"],
   deals: ["title", "company"],
 };
+
+/** contacts 是否具备可用姓名：完整姓名列，或拆分的名/姓列。 */
+export function hasContactName(keys: Set<string>): boolean {
+  return keys.has("full_name") || keys.has("first_name") || keys.has("last_name");
+}
 
 /** 表头归一化：小写、去空格/下划线/中划线/括号/冒号。 */
 export function normalizeHeader(h: string): string {
@@ -353,6 +374,10 @@ export function detectEntity(header: string[]): ImportEntity {
   const candidates: ImportEntity[] = ["contacts", "deals", "companies"];
   for (const entity of candidates) {
     const { keys } = matchColumns(entity, header);
+    if (entity === "contacts") {
+      if (keys.has("company") && hasContactName(keys)) return entity;
+      continue;
+    }
     if (REQUIRED_KEYS[entity].every((k) => keys.has(k))) return entity;
   }
   // 兜底：有公司名称类列 → companies。
@@ -360,6 +385,23 @@ export function detectEntity(header: string[]): ImportEntity {
 }
 
 /* ── 值清洗 ─────────────────────────────────────────────────────────────── */
+
+/** 社交/建站平台域名：Facebook 主页等不是公司自有域名。多家公司共用此类
+ *  域名（真实表格中 Facebook 主页 URL 极常见），若当公司域名入库会触发
+ *  domain 唯一约束冲突、并让后到的公司被错误匹配到先到的公司上。 */
+const SOCIAL_DOMAINS: ReadonlySet<string> = new Set([
+  "facebook.com", "m.facebook.com", "web.facebook.com", "instagram.com",
+  "twitter.com", "x.com", "linkedin.com", "youtube.com", "youtu.be",
+  "tiktok.com", "linktr.ee", "business.site", "wixsite.com", "godaddysites.com",
+]);
+
+function isSocialDomain(host: string): boolean {
+  if (SOCIAL_DOMAINS.has(host)) return true;
+  for (const d of SOCIAL_DOMAINS) {
+    if (host.endsWith(`.${d}`)) return true;
+  }
+  return false;
+}
 
 /** Website 列常见完整 URL → 纯域名（acme.com）；无协议原样返回（小写、去斜杠后缀）。 */
 export function cleanDomainValue(v: string): string {
@@ -369,7 +411,17 @@ export function cleanDomainValue(v: string): string {
     const host = /^(?:https?:\/\/)?([^/?#\s]+)/.exec(s)?.[1] ?? "";
     s = host;
   }
-  return s.replace(/^www\./, "").replace(/\/+$/, "");
+  s = s.replace(/^www\./, "").replace(/\/+$/, "");
+  // 社交平台主页不是公司官网 → 不作为域名（公司仍按名称匹配/创建）。
+  if (isSocialDomain(s)) return "";
+  return s;
+}
+
+/** Excel 公式错误字面量（#N/A、#REF! 等，含 WPS 的 #N/A/N/A）→ 按空值处理。 */
+export function isExcelErrorValue(v: string): boolean {
+  return /^#(n\/a(\/n\/a)?|ref!|value!|div\/0!|name\?|null!|num!|getting_data|calc!)$/i.test(
+    v.trim(),
+  );
 }
 
 /** Excel 日期序列号（1900 体系，25569 = 1970-01-01）→ YYYY-MM-DD；非序列号原样返回。 */

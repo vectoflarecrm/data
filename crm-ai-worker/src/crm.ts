@@ -57,6 +57,8 @@ import {
   decodeBase64,
   detectEntity,
   excelSerialToIsoDate,
+  hasContactName,
+  isExcelErrorValue,
   matchColumns,
   normalizeStageValue,
   parseXlsx,
@@ -1511,27 +1513,41 @@ async function runImportRows(
   }
 
   const { keyByIndex, keys } = matchColumns(entity, rows[0]);
-  const missing = REQUIRED_KEYS[entity].filter((k) => !keys.has(k));
+  let missing = REQUIRED_KEYS[entity].filter((k) => !keys.has(k));
+  // contacts 的姓名可由 full_name 单列或 first_name + last_name 拆分列表达。
+  if (entity === "contacts" && !missing.length && !hasContactName(keys)) {
+    missing = ["姓名 (姓名 / First Name / Last Name)"];
+  }
   if (missing.length) {
     throw new HttpError(
       400,
       `表头无法识别必需列: ${missing.join(" / ")}。请检查表头（支持中英文，如「公司名称 / Company Name」「姓名」「Email」）`,
     );
   }
+  // contacts/deals 导入时，表内公司级列（国家/官网/中文备注/产品服务）用于
+  // 补全自动创建的公司 —— 用 companies 视角对同一表头再映射一遍。
+  const companyMap =
+    entity === "companies" ? keyByIndex : matchColumns("companies", rows[0]).keyByIndex;
   const columns: Record<string, string> = {};
   const unmapped: string[] = [];
   rows[0].forEach((h, i) => {
     const t = h.trim();
     if (!t) return;
-    if (keyByIndex[i]) columns[t] = keyByIndex[i]!;
+    const key = keyByIndex[i] ?? companyMap[i];
+    if (key) columns[t] = key;
     else unmapped.push(t);
   });
 
-  // 行 → rec（智能值清洗：Website URL → 域名、Excel 日期序列号 → ISO、中文阶段 → 英文）。
-  const buildRec = (row: string[]): Record<string, string> => {
+  // 行 → rec（智能值清洗：Website URL → 域名、Excel 日期序列号 → ISO、中文
+  // 阶段 → 英文、Excel 公式错误字面量（#N/A 等）→ 空值）。
+  const recFromRow = (row: string[], map: Array<string | null>): Record<string, string> => {
     const rec: Record<string, string> = {};
-    for (let c = 0; c < keyByIndex.length; c++) {
-      if (keyByIndex[c]) rec[keyByIndex[c]!] = (row[c] ?? "").trim();
+    for (let c = 0; c < map.length; c++) {
+      const key = map[c];
+      if (!key) continue;
+      let v = (row[c] ?? "").trim();
+      if (isExcelErrorValue(v)) v = "";
+      rec[key] = v;
     }
     if (rec.domain) rec.domain = cleanDomainValue(rec.domain);
     if (rec.expected_close_date) {
@@ -1540,6 +1556,7 @@ async function runImportRows(
     if (rec.stage) rec.stage = normalizeStageValue(rec.stage);
     return rec;
   };
+  const buildRec = (row: string[]): Record<string, string> => recFromRow(row, keyByIndex);
 
   const result: ImportResult = { created: 0, skipped: 0, errors: [] };
   type CrmStatement = ReturnType<AdminEnv["DB"]["prepare"]>;
@@ -1549,30 +1566,40 @@ async function runImportRows(
 
   const resolveCompany = (
     rec: Record<string, string>,
+    companyRec: Record<string, string>,
     rowIndex: number,
   ): { id: string } | { error: string } => {
     const name = (rec.company ?? "").trim();
-    const domain = (rec.domain ?? "").trim().toLowerCase();
+    const domain = (companyRec.domain ?? "").trim().toLowerCase();
     if (!name && !domain) return { error: `第 ${rowIndex} 行: 缺少公司名称/域名` };
-    if (domain && companies.byDomain.has(domain)) return { id: companies.byDomain.get(domain)! };
-    if (name && companies.byName.has(name.toLowerCase())) return { id: companies.byName.get(name.toLowerCase())! };
+    // 名称优先匹配：真实表格中同一公司名写法一致，是更强的身份键。
+    if (name && companies.byName.has(name.toLowerCase())) {
+      return { id: companies.byName.get(name.toLowerCase())! };
+    }
+    // 无名行才按域名兜底匹配：不同公司共享域名（经销商共用品牌官网）时
+    // 不可凭域名把后到的公司并到先到的公司上。
+    if (!name && domain && companies.byDomain.has(domain)) {
+      return { id: companies.byDomain.get(domain)! };
+    }
     // Auto-create the company (OpenCRM import behavior): contacts/deals rows
     // name a company that does not exist yet — create it so the row imports.
+    // 域名已被其他公司占用 → 不绑定（domain 唯一约束 + 归属正确性）。
+    const bindDomain = domain && !companies.byDomain.has(domain) ? domain : null;
     const id = crypto.randomUUID();
     const companyName = name || domain;
     if (name) companies.byName.set(name.toLowerCase(), id);
-    if (domain) companies.byDomain.set(domain, id);
+    if (bindDomain) companies.byDomain.set(bindDomain, id);
     statements.push(
       env.DB.prepare(
-        `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status, source)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'new', 'csv_import')`,
+        `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status, chinese_remarks, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'unqualified', 'new', ?6, 'csv_import')`,
       ).bind(
         id,
         companyName,
-        domain || null,
-        (rec.industry ?? "").trim() || null,
-        (rec.country ?? "").trim() || null,
-        "unqualified",
+        bindDomain,
+        (companyRec.industry ?? "").trim() || null,
+        (companyRec.country ?? "").trim() || null,
+        (companyRec.chinese_remarks ?? "").trim() || null,
       ),
     );
     companiesCreated++;
@@ -1615,22 +1642,35 @@ async function runImportRows(
       result.created++;
     }
   } else if (entity === "contacts") {
-    // Dedupe key: same company + same email (when present).
+    // Dedupe key: same company + same email (when present)；无邮箱行按
+    // 公司 + 姓名去重（重复导入同一张表不会重复建联系人）。
     const existing = await env.DB.prepare(
-      "SELECT company_id, LOWER(IFNULL(email, '')) AS lemail FROM crm_contacts LIMIT 50000",
-    ).all<{ company_id: string; lemail: string }>();
-    const seen = new Set(existing.results.map((r) => `${r.company_id}|${r.lemail}`));
+      "SELECT company_id, LOWER(IFNULL(email, '')) AS lemail, LOWER(full_name) AS lname FROM crm_contacts LIMIT 50000",
+    ).all<{ company_id: string; lemail: string; lname: string }>();
+    const seen = new Set<string>();
+    for (const r of existing.results) {
+      seen.add(`${r.company_id}|${r.lemail}`);
+      seen.add(`${r.company_id}|n|${r.lname}`);
+    }
     for (let i = 1; i < rows.length; i++) {
       const rec = buildRec(rows[i]);
+      const companyRec = recFromRow(rows[i], companyMap);
       const rowIndex = i + 1;
-      const fullName = (rec.full_name ?? "").trim();
+      // 姓名：完整姓名列优先；拆分列（First Name + Last Name）拼接。
+      let fullName = (rec.full_name ?? "").trim();
       if (!fullName) {
-        result.errors.push(`第 ${rowIndex} 行: 缺少联系人姓名`);
-        continue;
+        fullName = [(rec.first_name ?? "").trim(), (rec.last_name ?? "").trim()]
+          .filter(Boolean)
+          .join(" ");
       }
-      const resolved = resolveCompany(rec, rowIndex);
+      // 公司先落库：无联系人姓名的公司行（只有公司数据）也要完整导入。
+      const resolved = resolveCompany(rec, companyRec, rowIndex);
       if ("error" in resolved) {
         result.errors.push(resolved.error);
+        continue;
+      }
+      if (!fullName) {
+        result.skipped++; // 公司行（无联系人）：公司已入库，本行无联系人可建
         continue;
       }
       const email = (rec.email ?? "").trim().toLowerCase();
@@ -1638,10 +1678,21 @@ async function runImportRows(
         result.skipped++;
         continue;
       }
+      if (!email && seen.has(`${resolved.id}|n|${fullName.toLowerCase()}`)) {
+        result.skipped++;
+        continue;
+      }
       if (email) seen.add(`${resolved.id}|${email}`);
+      seen.add(`${resolved.id}|n|${fullName.toLowerCase()}`);
       const isPrimary = ["1", "true", "是", "y", "yes"].includes((rec.is_primary ?? "").trim().toLowerCase())
         ? 1
         : 0;
+      // 电话类列合并：WhatsApp > 手机（Cellphone/Mobile）> 座机（TEL/Phone）。
+      const phone =
+        (rec.whatsapp_or_phone ?? "").trim() ||
+        (rec.cellphone ?? "").trim() ||
+        (rec.tel ?? "").trim() ||
+        null;
       statements.push(
         env.DB.prepare(
           `INSERT INTO crm_contacts (id, company_id, full_name, job_title, email, whatsapp_or_phone, linkedin_url, is_primary)
@@ -1652,7 +1703,7 @@ async function runImportRows(
           fullName,
           (rec.job_title ?? "").trim() || null,
           (rec.email ?? "").trim() || null,
-          (rec.whatsapp_or_phone ?? "").trim() || null,
+          phone,
           (rec.linkedin_url ?? "").trim() || null,
           isPrimary,
         ),
@@ -1668,13 +1719,14 @@ async function runImportRows(
     for (const r of posRows.results) maxPos.set(r.stage, r.m ?? 0);
     for (let i = 1; i < rows.length; i++) {
       const rec = buildRec(rows[i]);
+      const companyRec = recFromRow(rows[i], companyMap);
       const rowIndex = i + 1;
       const title = (rec.title ?? "").trim();
       if (!title) {
         result.errors.push(`第 ${rowIndex} 行: 缺少商机名称`);
         continue;
       }
-      const resolved = resolveCompany(rec, rowIndex);
+      const resolved = resolveCompany(rec, companyRec, rowIndex);
       if ("error" in resolved) {
         result.errors.push(resolved.error);
         continue;
