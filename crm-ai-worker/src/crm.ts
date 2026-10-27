@@ -610,8 +610,31 @@ async function mergeCompanies(
       .bind(source.domain, source.id)
       .first<{ id: string }>());
 
+  // 数据保全：来源公司的非空字段在目标为空时回填（行业/国家/0041 扩展列），
+  // 中文备注以 [并入备注] 追加保留 —— 来源行随后删除，不保全即丢失。
+  const carrySets: string[] = [];
+  const carryBinds: unknown[] = [];
+  const carryFields: Array<[string, unknown, unknown]> = [
+    ["industry", source.industry, target.industry],
+    ["country", source.country, target.country],
+    ["address", source.address, target.address],
+    ["external_id", source.external_id, target.external_id],
+    ["dealer_brands", source.dealer_brands, target.dealer_brands],
+  ];
+  for (const [field, rawSource, rawTarget] of carryFields) {
+    const sv = String(rawSource ?? "").trim();
+    const tv = String(rawTarget ?? "").trim();
+    if (sv && !tv) {
+      carrySets.push(`${String(field)} = ?${carryBinds.length + 3}`);
+      carryBinds.push(sv);
+    }
+  }
+
   const remarkLine = `[合并] ${new Date().toISOString().slice(0, 10)} 并入重复公司 ${source.name}（ID: ${source.id}）`;
-  const newRemarks = `${target.chinese_remarks ? target.chinese_remarks + "\n" : ""}${remarkLine}`;
+  const sourceRemarkLine = source.chinese_remarks
+    ? `\n[并入备注] ${source.name}: ${source.chinese_remarks}`
+    : "";
+  const newRemarks = `${target.chinese_remarks ? target.chinese_remarks + "\n" : ""}${remarkLine}${sourceRemarkLine}`;
   const newMerged = `${target.merged_from_ids ? target.merged_from_ids + "," : ""}${source.id}`;
 
   // ONE D1 batch = one transaction: the merge either fully happens or not at
@@ -629,9 +652,10 @@ async function mergeCompanies(
     ),
     env.DB.prepare(
       `UPDATE crm_companies
-       SET chinese_remarks = ?1, merged_from_ids = ?2, updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?3`,
-    ).bind(newRemarks, newMerged, targetId),
+       SET chinese_remarks = ?1, merged_from_ids = ?2${carrySets.length ? ", " + carrySets.join(", ") : ""},
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?${carryBinds.length + 3}`,
+    ).bind(newRemarks, newMerged, ...carryBinds, targetId),
     env.DB.prepare(
       `INSERT INTO crm_activities (id, company_id, type, summary)
        VALUES (?1, ?2, 'company_merged', ?3)`,

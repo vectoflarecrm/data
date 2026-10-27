@@ -78,6 +78,7 @@ async function makeDb() {
       id TEXT PRIMARY KEY, name TEXT NOT NULL, domain TEXT UNIQUE, industry TEXT,
       country TEXT, tier TEXT DEFAULT 'unqualified', lead_status TEXT DEFAULT 'new',
       merged_from_ids TEXT, chinese_remarks TEXT, customer_since TEXT,
+      address TEXT, external_id TEXT, dealer_brands TEXT,
       do_not_contact INTEGER DEFAULT 0,
       domain_email_status TEXT NOT NULL DEFAULT 'pending',
       source TEXT NOT NULL DEFAULT 'unknown',
@@ -327,6 +328,40 @@ describe("公司合并 (merge)", () => {
       source_company_id: "x",
     });
     expect(r.status).toBe(400);
+  });
+
+  it("preserves source 0041 fields and remarks when merging (数据保全)", async () => {
+    const { db, env } = await makeDb();
+    // 目标：已有行业/地址，无编号/经销品牌/来源备注（0041 字段面板创建
+    // 接口不收，直接 INSERT 构造）。
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, domain, country, industry, address, chinese_remarks, source)
+       VALUES ('tgt_1', 'Keep Co', 'keep.com', 'PR', 'Marine', 'Carr 1', '目标备注', 'csv_import')`,
+    ).run();
+    // 来源：有编号/经销品牌/中文备注，行业/地址为空
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, external_id, dealer_brands, chinese_remarks, source)
+       VALUES ('src_1', 'Dupe Co', 'PR-999', 'cressi, Garmin', '来源方重要备注', 'csv_import')`,
+    ).run();
+    const target = db.prepare("SELECT * FROM crm_companies WHERE id = 'tgt_1'").get() as any;
+    const source = db.prepare("SELECT * FROM crm_companies WHERE id = 'src_1'").get() as any;
+
+    const merged = await call(env, "POST", "/admin/api/crm/companies/merge", {
+      target_company_id: target.id,
+      source_company_id: source.id,
+    });
+    expect(merged.status).toBe(200);
+    const row = db.prepare("SELECT * FROM crm_companies WHERE id = ?").get(target.id) as any;
+    // 目标已有字段不被覆盖
+    expect(row.industry).toBe("Marine");
+    expect(row.address).toBe("Carr 1");
+    // 来源非空、目标为空的字段回填保全
+    expect(row.external_id).toBe("PR-999");
+    expect(row.dealer_brands).toBe("cressi, Garmin");
+    // 来源备注以 [并入备注] 追加保留
+    expect(row.chinese_remarks).toContain("目标备注");
+    expect(row.chinese_remarks).toContain("[合并]");
+    expect(row.chinese_remarks).toContain("[并入备注] Dupe Co: 来源方重要备注");
   });
 
   it("404s when the source company does not exist", async () => {
