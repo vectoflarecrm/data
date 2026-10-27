@@ -684,16 +684,17 @@ async function mergeCompanies(
   return jsonResponse({ company });
 }
 
-/* ── 疑似重复公司检测（名称相同/包含/低频专名重合 + 联系人重合） ────────────
- * domain 是 UNIQUE 列，导入归并失败的公司一家拿到域名、另一家为 NULL，
- * 库里不存在「共域名对」——检测只能靠名称与联系人：
- *   1) 联系人重合：同邮箱/同电话（SQL），或同姓名且非通用名（JS）；
- *   2) 名称相同：去括号注记后归一化相等；
- *   3) 名称包含：归一化后整词边界前缀/后缀（括号内容保留）；
- *   4) 低频专名重合：共同词长 ≥5 且只在 ≤3 家公司名中出现
- *      （"crashboat" 是信号，"surf/sailing/yachts" 高频自动失效）。
- * 名称相似行业词误报率极高（surf shop × N），靠文档频率自适应而非停用
- * 词枚举。结果只做人工比对候选，是否合并由人在比对页决定。 */
+/* ── 疑似重复公司检测（≥2 项近似 或 名称强匹配） ────────────────────────────
+ * 规则（用户定义）：以下各项中至少 2 项近似相同才列为候选比对：
+ *   ① 公司名称   ② 地址   ③ 电话   ④ 网址(域名)   ⑤ 公司邮箱后缀
+ *   ⑥ WhatsApp   ⑦ Cellphone   ⑧ 联系人重合（同邮箱/同电话/同姓名，
+ *     作为额外信号补入计项池）
+ * ③⑥⑦ 在库里同存于 crm_contacts.whatsapp_or_phone 一个字段 → 合为 1 项
+ * 「电话/WhatsApp」信号。名称强匹配（归一化后相同 / 整词包含）可单独
+ * 入选（BOATS R US ⊂ Boats R Us Corp 这类一行建两档的常见形态）。
+ * domain 是 UNIQUE 列，两家不可能同域 →「网址」按核心标签包含近似判
+ * 定。邮箱后缀排除 gmail/yahoo 等免费域。结果只做人工比对候选，是否
+ * 合并由人在比对页决定。 */
 interface DupPair {
   a_id: string;
   a_name: string;
@@ -706,6 +707,15 @@ const CO_NAME_STOPWORDS = new Set([
   "the", "and", "of", "de", "del", "la", "el", "los", "las", "inc", "llc", "corp",
   "corporation", "co", "company", "ltd",
 ]);
+/* 免费邮箱域不做「公司邮箱后缀」信号 —— 两个陌生人同用 gmail 不构成
+ * 公司重合证据。 */
+const FREE_EMAIL_DOMAINS = new Set([
+  "gmail.com", "yahoo.com", "yahoo.es", "hotmail.com", "hotmail.es", "outlook.com",
+  "outlook.es", "aol.com", "icloud.com", "me.com", "live.com", "msn.com",
+  "protonmail.com", "proton.me", "gmx.com", "mail.com", "yandex.com", "yandex.ru",
+  "mail.ru", "zoho.com", "comcast.net", "verizon.net", "att.net", "sbcglobal.net",
+]);
+/* 通用联系人姓名跨公司大面积误报，不作为「联系人重合」证据。 */
 const GENERIC_CONTACT_NAMES = new Set([
   "admin", "owner", "info", "manager", "sales", "contact", "office", "general",
   "gerencia", "oficina", "staff", "team", "hello", "support", "bookings", "booking",
@@ -745,7 +755,8 @@ function coNameNoParens(name: string): string {
     .trim();
 }
 
-function nameMatchReason(na: string, nb: string, df: Map<string, number>): string | null {
+/* 名称强匹配：归一化后相同（去括号注记）或整词包含 —— 可单独入选。 */
+function nameStrongKind(na: string, nb: string): string | null {
   const da = coNameNoParens(na);
   const db = coNameNoParens(nb);
   if (da && da === db) return "名称相同";
@@ -756,83 +767,173 @@ function nameMatchReason(na: string, nb: string, df: Map<string, number>): strin
       return "名称包含";
     }
   }
+  return null;
+}
+
+/* 名称弱近似：低频专名重合（"crashboat" 是信号，"surf/sailing" 高频自动
+ * 失效）—— 只作 1 项，须凑满 ≥2 项才入选。 */
+function nameLowFreqMatch(na: string, nb: string, df: Map<string, number>): boolean {
   const sa = new Set(coNameTokens(na));
   const sb = new Set(coNameTokens(nb));
   let lowFreqCommon = 0;
   sa.forEach((t) => {
     if (sb.has(t) && t.length >= DUP_TOKEN_MIN_LEN && (df.get(t) ?? 0) <= DUP_DF_MAX) lowFreqCommon++;
   });
-  if (lowFreqCommon >= 1) return "名称相似";
-  return null;
+  return lowFreqCommon >= 1;
+}
+
+/* 电话/WhatsApp（同一存储字段）：去非数字、去美国国家码前缀 1；
+ * 近似 = 完全相等，或双方 ≥7 位且末 7 位相同（区号/国家码写法差异）。 */
+function normalizePhone(raw: string | null): string | null {
+  if (!raw) return null;
+  let d = raw.replace(/\D/g, "");
+  if (!d) return null;
+  if (d.length === 11 && d.startsWith("1")) d = d.slice(1);
+  return d;
+}
+
+function phonesOverlap(pa: Set<string>, pb: Set<string>): boolean {
+  for (const p of pa) {
+    if (pb.has(p)) return true;
+    if (p.length >= 7) {
+      const tail = p.slice(-7);
+      for (const q of pb) {
+        if (q.length >= 7 && q.slice(-7) === tail) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/* 公司邮箱后缀：@ 后域名，排除免费邮箱域。 */
+function emailSuffixOf(email: string | null): string | null {
+  if (!email) return null;
+  const at = email.lastIndexOf("@");
+  if (at < 1 || at === email.length - 1) return null;
+  const suffix = email.slice(at + 1).trim().toLowerCase();
+  return FREE_EMAIL_DOMAINS.has(suffix) ? null : suffix;
+}
+
+/* 地址近似：归一化后相等，或一方包含另一方（<4 字符不判，太短易误报）。 */
+function addressMatch(aa: string | null, ab: string | null): boolean {
+  const na = aa ? foldAscii(aa.toLowerCase()).replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim() : "";
+  const nb = ab ? foldAscii(ab.toLowerCase()).replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim() : "";
+  if (na.length < 4 || nb.length < 4) return false;
+  return na === nb || nb.includes(na) || na.includes(nb);
+}
+
+/* 网址近似：域名核心标签（去 www./TLD）相等或一方包含另一方。 */
+function domainMatch(da: string | null, db: string | null): boolean {
+  if (!da || !db) return false;
+  const core = (d: string) => d.toLowerCase().replace(/^www\./, "").replace(/\..*$/, "");
+  const ca = core(da);
+  const cb = core(db);
+  return ca === cb || ca.includes(cb) || cb.includes(ca);
+}
+
+function setsOverlap<T>(sa: Set<T>, sb: Set<T>): boolean {
+  for (const s of sa) {
+    if (sb.has(s)) return true;
+  }
+  return false;
 }
 
 async function listDuplicateCompanies(env: AdminEnv): Promise<Response> {
   const { results: companies } = await env.DB.prepare(
-    "SELECT id, name FROM crm_companies",
-  ).all<{ id: string; name: string }>();
-  const byId = new Map((companies ?? []).map((c) => [c.id, c]));
+    "SELECT id, name, domain, address FROM crm_companies",
+  ).all<{ id: string; name: string; domain: string | null; address: string | null }>();
+  const { results: contacts } = await env.DB.prepare(
+    "SELECT company_id, full_name, email, whatsapp_or_phone FROM crm_contacts",
+  ).all<{
+    company_id: string;
+    full_name: string;
+    email: string | null;
+    whatsapp_or_phone: string | null;
+  }>();
 
-  const pairs = new Map<string, DupPair>();
-  const addPair = (aId: string, bId: string, reason: string) => {
-    const [x, y] = aId < bId ? [aId, bId] : [bId, aId];
-    const ca = byId.get(x);
-    const cb = byId.get(y);
-    if (!ca || !cb) return;
-    const key = x + "|" + y;
-    const pair =
-      pairs.get(key) ?? { a_id: x, a_name: ca.name, b_id: y, b_name: cb.name, reasons: [] };
-    if (!pair.reasons.includes(reason)) pair.reasons.push(reason);
-    pairs.set(key, pair);
-  };
-
-  // 1a) 同邮箱/同电话（强信号）
-  const { results: strongPairs } = await env.DB.prepare(
-    `SELECT DISTINCT c1.company_id AS a_id, c2.company_id AS b_id
-     FROM crm_contacts c1
-     JOIN crm_contacts c2 ON c1.company_id < c2.company_id
-     WHERE (COALESCE(c1.email, '') != '' AND LOWER(c1.email) = LOWER(c2.email))
-        OR (COALESCE(c1.whatsapp_or_phone, '') != ''
-            AND c1.whatsapp_or_phone = c2.whatsapp_or_phone)`,
-  ).all<{ a_id: string; b_id: string }>();
-  for (const p of strongPairs ?? []) addPair(p.a_id, p.b_id, "联系人重合");
-
-  // 1b) 同姓名且非通用名（"Admin"/"Info" 等会跨公司大面积误报）
-  const { results: namedContacts } = await env.DB.prepare(
-    "SELECT company_id, full_name FROM crm_contacts WHERE TRIM(COALESCE(full_name, '')) != ''",
-  ).all<{ company_id: string; full_name: string }>();
-  const byName = new Map<string, Set<string>>();
-  for (const ct of namedContacts ?? []) {
-    const n = foldAscii(ct.full_name.trim().toLowerCase());
-    if (n.replace(/\s/g, "").length < 4 || GENERIC_CONTACT_NAMES.has(n)) continue;
-    const set = byName.get(n) ?? new Set<string>();
-    set.add(ct.company_id);
-    byName.set(n, set);
+  interface DupAgg {
+    id: string;
+    name: string;
+    domain: string | null;
+    address: string | null;
+    suffixes: Set<string>;
+    phones: Set<string>;
+    emails: Set<string>;
+    contactNames: Set<string>;
   }
-  for (const ids of byName.values()) {
-    if (ids.size < 2) continue;
-    const arr = [...ids].sort();
-    for (let i = 0; i < arr.length; i++) {
-      for (let j = i + 1; j < arr.length; j++) addPair(arr[i], arr[j], "联系人重合");
+  const agg = new Map<string, DupAgg>();
+  for (const c of companies ?? []) {
+    agg.set(c.id, {
+      id: c.id,
+      name: c.name,
+      domain: c.domain,
+      address: c.address,
+      suffixes: new Set<string>(),
+      phones: new Set<string>(),
+      emails: new Set<string>(),
+      contactNames: new Set<string>(),
+    });
+  }
+  for (const ct of contacts ?? []) {
+    const a = agg.get(ct.company_id);
+    if (!a) continue;
+    if (ct.email) {
+      const email = ct.email.trim().toLowerCase();
+      if (email.includes("@") && !email.startsWith("@") && !email.endsWith("@")) {
+        a.emails.add(email);
+      }
+      const suffix = emailSuffixOf(ct.email);
+      if (suffix) a.suffixes.add(suffix);
+    }
+    const phone = normalizePhone(ct.whatsapp_or_phone);
+    if (phone) a.phones.add(phone);
+    const cname = foldAscii((ct.full_name ?? "").trim().toLowerCase());
+    if (cname.replace(/\s/g, "").length >= 4 && !GENERIC_CONTACT_NAMES.has(cname)) {
+      a.contactNames.add(cname);
     }
   }
 
-  // 2-4) 名称规则（文档频率自适应）
+  // 名称文档频率（低频专名自适应）
   const df = new Map<string, number>();
-  for (const c of byId.values()) {
-    for (const t of new Set(coNameTokens(c.name))) df.set(t, (df.get(t) ?? 0) + 1);
+  for (const a of agg.values()) {
+    for (const t of new Set(coNameTokens(a.name))) df.set(t, (df.get(t) ?? 0) + 1);
   }
-  const list = [...byId.values()];
+
+  const byId = new Map((companies ?? []).map((c) => [c.id, c]));
+  const list = [...agg.values()];
+  const pairs: DupPair[] = [];
   for (let i = 0; i < list.length; i++) {
     for (let j = i + 1; j < list.length; j++) {
-      const reason = nameMatchReason(list[i].name, list[j].name, df);
-      if (reason) addPair(list[i].id, list[j].id, reason);
+      const a = list[i];
+      const b = list[j];
+      const strong = nameStrongKind(a.name, b.name);
+      const reasons: string[] = [];
+      if (strong) reasons.push(strong);
+      else if (nameLowFreqMatch(a.name, b.name, df)) reasons.push("名称相似");
+      if (addressMatch(a.address, b.address)) reasons.push("地址近似");
+      if (phonesOverlap(a.phones, b.phones)) reasons.push("电话/WhatsApp");
+      if (domainMatch(a.domain, b.domain)) reasons.push("网址近似");
+      if (setsOverlap(a.suffixes, b.suffixes)) reasons.push("邮箱后缀");
+      if (
+        setsOverlap(a.emails, b.emails) ||
+        phonesOverlap(a.phones, b.phones) ||
+        setsOverlap(a.contactNames, b.contactNames)
+      ) {
+        reasons.push("联系人重合");
+      }
+      /* 名称强匹配可单独入选；其余须 ≥2 项近似。 */
+      if (!strong && reasons.length < 2) continue;
+      const [x, y] = a.id < b.id ? [a.id, b.id] : [b.id, a.id];
+      const ca = byId.get(x);
+      const cb = byId.get(y);
+      if (!ca || !cb) continue;
+      pairs.push({ a_id: x, a_name: ca.name, b_id: y, b_name: cb.name, reasons });
     }
   }
-
-  const duplicates = [...pairs.values()].sort(
+  pairs.sort(
     (p, q) => q.reasons.length - p.reasons.length || p.a_name.localeCompare(q.a_name),
   );
-  return jsonResponse({ duplicates });
+  return jsonResponse({ duplicates: pairs });
 }
 
 /* ── Contact merge（重复联系人去重，Atomic CRM 风格） ───────────────────── */

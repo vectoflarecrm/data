@@ -5932,11 +5932,11 @@ function renderCompanies(){
   for(var i=0;i<STATE.companies.length;i++){
     var c=STATE.companies[i];
     var dup=STATE.dupMap[c.id];
-    var dupBadge=dup?'<button class="btn btn-xs" style="background:#b45309;margin-top:3px" data-act="cmpDup" data-id="'+esc(c.id)+'" data-oid="'+esc(dup)+'" title="名称相似或联系人重合，点击打开全字段比对">🔀 疑似重复 · 点击比对</button> ':'';
+    var dupBadge=dup?'<button class="btn btn-xs" style="background:#b45309;margin-top:3px" data-act="cmpDup" data-id="'+esc(c.id)+'" data-oid="'+esc(dup)+'" title="名称/地址/电话/网址/邮箱后缀/联系人中至少 2 项近似（或名称强匹配），点击打开全字段比对">🔀 疑似重复 · 点击比对</button> ':'';
     rows+='<tr><td><strong>'+esc(c.name)+'</strong><div class="hint" style="margin:0">'+esc(c.id)+'</div>'+dupBadge+'</td><td>'+esc(c.country||'—')+'</td><td>'+tierBadge(c.tier)+'</td><td>'+statusBadge(c.lead_status)+(c.customer_since?' <span class="badge b-cust" title="自 '+esc(c.customer_since)+' 起成交">客户</span>':'')+'</td><td>'+esc(c.domain||'—')+'</td><td>'+Number(c.open_deals||0)+'</td><td>'+Number(c.open_tasks||0)+'</td><td><button class="btn btn-p btn-xs" data-act="detail" data-id="'+esc(c.id)+'">详情</button> <button class="btn btn-d btn-xs" data-act="delCo" data-id="'+esc(c.id)+'">删除</button></td></tr>';
   }
   $('coRows').innerHTML=rows||'<tr><td colspan="8" class="hint">暂无公司 — 先从下面的「提升线索」开始，或点右上角「新建公司」。</td></tr>';
-  $('coHint').textContent='共 '+STATE.total+' 家公司'+(STATE.total>STATE.companies.length?'（当前显示前 '+STATE.companies.length+' 家）':'')+(STATE.dupPairs.length?' · 🔀 '+STATE.dupPairs.length+' 对疑似重复（共域名）待人工比对':'');
+  $('coHint').textContent='共 '+STATE.total+' 家公司'+(STATE.total>STATE.companies.length?'（当前显示前 '+STATE.companies.length+' 家）':'')+(STATE.dupPairs.length?' · 🔀 '+STATE.dupPairs.length+' 对疑似重复（≥2 项近似或名称强匹配）待人工比对':'');
 }
 function loadDeals(){
   return api('/admin/api/crm/deals').then(function(b){STATE.deals=b.deals||[];renderKanban();});

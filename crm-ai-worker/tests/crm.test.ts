@@ -375,7 +375,7 @@ describe("公司合并 (merge)", () => {
     expect(r.status).toBe(404);
   });
 
-  it("detects duplicates by name similarity and contact overlap, clears after merge", async () => {
+  it("lists duplicate candidates by ≥2 criteria, strong name match, or contact overlap", async () => {
     const { db, env } = await makeDb();
     db.prepare(
       `INSERT INTO crm_companies (id, name, domain, source)
@@ -383,36 +383,72 @@ describe("公司合并 (merge)", () => {
               ('dup_b', 'Mini Boat Adventures', NULL, 'csv_import'),
               ('name_a', 'BOATS R US', 'boatsruspr.com', 'csv_import'),
               ('name_b', 'Boats R Us Corp', NULL, 'csv_import'),
+              ('wk_a', 'Crashboat Surf & Skate', NULL, 'csv_import'),
+              ('wk_b', 'Crashboat Surf Shop', NULL, 'csv_import'),
               ('solo', 'Solo Co', 'solo.com', 'csv_import')`,
     ).run();
-    // Kayaking/Mini Boat 共用同一联系人（姓名+邮箱重合）
+    // dup_a/dup_b：同联系人（同邮箱+同电话）→ 电话/邮箱后缀/联系人重合 3 项
     for (const cid of ["dup_a", "dup_b"]) {
       await call(env, "POST", "/admin/api/crm/contacts", {
         company_id: cid,
         full_name: "Rick Morales",
         email: "rick@kayakingpr.com",
+        whatsapp_or_phone: "787-555-0199",
       });
     }
 
-    const list = await call(env, "GET", "/admin/api/crm/companies/duplicates");
-    expect(list.status).toBe(200);
-    const dups = list.body.duplicates;
+    // 阶段一：名称强匹配（BOATS R US ⊂ Boats R Us Corp）单独入选；
+    // 仅名称弱近似（Crashboat 对）1 项不入选
+    const list1 = await call(env, "GET", "/admin/api/crm/companies/duplicates");
+    expect(list1.status).toBe(200);
+    let dups = list1.body.duplicates;
     expect(dups).toHaveLength(2);
-    const byKeys = dups.map((d: any) => `${d.a_id}|${d.b_id}|${d.reasons.join(",")}`);
-    expect(byKeys.some((k: string) => k === "dup_a|dup_b|联系人重合")).toBe(true);
-    expect(byKeys.some((k: string) => k.startsWith("name_a|name_b|"))).toBe(true);
-    // 无关公司不出现在任何配对里
-    expect(JSON.stringify(dups)).not.toContain("solo");
+    const dupPair = dups.find((d: any) => d.a_id === "dup_a");
+    expect(dupPair.reasons).toEqual(["电话/WhatsApp", "邮箱后缀", "联系人重合"]);
+    const namePair = dups.find((d: any) => d.a_id === "name_a");
+    expect(namePair.reasons).toEqual(["名称包含"]);
+    expect(JSON.stringify(dups)).not.toContain("wk_");
 
-    // 合并联系人重合对后配对消失，名称对仍在
+    // 阶段二：给 name_a/name_b 补相同地址 → 名称包含+地址近似
+    db.prepare(
+      `UPDATE crm_companies SET address = 'Carr 2, Rincón' WHERE id IN ('name_a','name_b')`,
+    ).run();
+    const list2 = await call(env, "GET", "/admin/api/crm/companies/duplicates");
+    dups = list2.body.duplicates;
+    expect(dups).toHaveLength(2);
+    expect(dups.find((d: any) => d.a_id === "name_a").reasons).toEqual(["名称包含", "地址近似"]);
+
+    // 阶段三：Crashboat 对补同联系人姓名 → 名称相似+联系人重合 2 项入选
+    for (const cid of ["wk_a", "wk_b"]) {
+      await call(env, "POST", "/admin/api/crm/contacts", {
+        company_id: cid,
+        full_name: "Juan Carlo",
+      });
+    }
+    const list3 = await call(env, "GET", "/admin/api/crm/companies/duplicates");
+    dups = list3.body.duplicates;
+    expect(dups).toHaveLength(3);
+    expect(dups.find((d: any) => d.a_id === "wk_a").reasons).toEqual(["名称相似", "联系人重合"]);
+
+    // 免费邮箱后缀不算信号：给 solo 加 gmail 联系人，不产生任何配对
+    await call(env, "POST", "/admin/api/crm/contacts", {
+      company_id: "solo",
+      full_name: "Someone Else",
+      email: "someone@gmail.com",
+    });
+    const list4 = await call(env, "GET", "/admin/api/crm/companies/duplicates");
+    expect(list4.body.duplicates).toHaveLength(3);
+    expect(JSON.stringify(list4.body.duplicates)).not.toContain("solo");
+
+    // 合并联系人重合对后该配对消失，其余对仍在
     const merged = await call(env, "POST", "/admin/api/crm/companies/merge", {
       target_company_id: "dup_a",
       source_company_id: "dup_b",
     });
     expect(merged.status).toBe(200);
     const after = await call(env, "GET", "/admin/api/crm/companies/duplicates");
-    expect(after.body.duplicates).toHaveLength(1);
-    expect(after.body.duplicates[0].a_id).toBe("name_a");
+    expect(after.body.duplicates).toHaveLength(2);
+    expect(JSON.stringify(after.body.duplicates)).not.toContain("dup_b");
   });
 });
 
