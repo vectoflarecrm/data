@@ -88,6 +88,9 @@ CREATE TABLE IF NOT EXISTS customers (
   -- Stage 43 or were skipped by the relevance precheck. Existing databases
   -- get the column via the CI ALTER step (deploy-worker.yml).
   lead_score_breakdown TEXT,
+  -- 0039 线索自动发现：发现该线索的规则 id（lead_discovery_rules.id）；
+  -- NULL = CSV 导入/手工录入等非发现渠道。
+  discovery_rule_id TEXT,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -1037,3 +1040,38 @@ CREATE TABLE IF NOT EXISTS crm_signal_checks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_signal_checks_company ON crm_signal_checks(company_id, detected_at);
+
+-- 0039 ① 自动寻找新客户：发现规则 + 运行日志。cron 空闲 tick 自动运行
+-- 到期规则（搜索舰队查询 → 候选提取 → 去重 → customers pending），
+-- customers.discovery_rule_id 记录来源规则。见 migrations/0039。
+CREATE TABLE IF NOT EXISTS lead_discovery_rules (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  keywords TEXT NOT NULL,
+  industry TEXT,
+  country TEXT,
+  max_results INTEGER NOT NULL DEFAULT 20,
+  interval_hours INTEGER NOT NULL DEFAULT 168,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_run_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovery_rules_due ON lead_discovery_rules(enabled, last_run_at);
+
+CREATE TABLE IF NOT EXISTS lead_discovery_log (
+  id TEXT PRIMARY KEY,
+  rule_id TEXT NOT NULL,
+  run_at TEXT NOT NULL DEFAULT (datetime('now')),
+  query TEXT NOT NULL,
+  company_name TEXT NOT NULL,
+  domain TEXT,
+  source_url TEXT,
+  snippet TEXT,
+  outcome TEXT NOT NULL DEFAULT 'inserted' CHECK (outcome IN ('inserted', 'duplicate', 'skipped')),
+  customer_id INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovery_log_rule ON lead_discovery_log(rule_id, run_at);
+CREATE INDEX IF NOT EXISTS idx_discovery_log_customer ON lead_discovery_log(customer_id);
+CREATE INDEX IF NOT EXISTS idx_customers_discovery_rule ON customers(discovery_rule_id);

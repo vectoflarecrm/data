@@ -55,6 +55,16 @@ import {
 import { CampaignLockedError } from "./campaign-lock";
 import { handleCrmApi } from "./crm";
 import { buildFilterOptions } from "./facets";
+import {
+  createDiscoveryRule,
+  deleteDiscoveryRule,
+  getDiscoveryLog,
+  getDiscoveryRuleById,
+  listDiscoveryRules,
+  parseDiscoveryRuleInput,
+  runDiscoveryRuleById,
+  updateDiscoveryRule,
+} from "./lead-discovery";
 import { LEAD_SCORE_WEIGHTS } from "./lead-score-dims";
 import {
   loadLeadScoreConfig,
@@ -2698,7 +2708,9 @@ interface AuditLogViewRow {
   metadata_json: string | null;
 }
 
-async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthContext): Promise<Response> {
+// Exported for tests (same pattern as handleCrmApi): discovery/CRUD suites
+// drive the HTTP layer directly without the session/auth scaffolding.
+export async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthContext): Promise<Response> {
   try {
     const url = new URL(request.url);
     if (url.pathname === "/admin/api/customers" && request.method === "GET") {
@@ -2709,6 +2721,83 @@ async function handleAdminApi(request: Request, env: AdminEnv, auth: AdminAuthCo
     // are inserted as pending customers so the cron pipeline enriches them.
     if (url.pathname === "/admin/api/customers/import" && request.method === "POST") {
       return await importCustomersCsv(request, env, auth);
+    }
+    // 0039 ① 自动寻找新客户: discovery rules CRUD + run-now + run log.
+    // GET  /admin/api/discovery/rules        — list rules with inserted/
+    //                                         duplicate counts.
+    // POST /admin/api/discovery/rules        — create (validated, audited).
+    // PATCH/DELETE /admin/api/discovery/rules/:id — edit / remove.
+    // POST /admin/api/discovery/rules/:id/run — run now (fleet search →
+    //                                         dedupe → customers pending).
+    // GET  /admin/api/discovery/rules/:id/log — run log (outcome trail).
+    if (url.pathname === "/admin/api/discovery/rules" && request.method === "GET") {
+      const rules = await listDiscoveryRules(env);
+      return jsonResponse({ rules });
+    }
+    if (url.pathname === "/admin/api/discovery/rules" && request.method === "POST") {
+      const raw: unknown = await request.json().catch(() => null);
+      const parsed = parseDiscoveryRuleInput(raw);
+      if (!parsed.ok) return jsonResponse({ detail: parsed.error }, 400);
+      const rule = await createDiscoveryRule(env, parsed.value);
+      await auditAdminAction(env, request, auth, "CREATE_DISCOVERY_RULE", "lead_discovery_rule", rule.id, {
+        name: rule.name,
+        keywords: rule.keywords,
+        industry: rule.industry,
+        country: rule.country,
+        max_results: rule.max_results,
+        interval_hours: rule.interval_hours,
+        enabled: rule.enabled,
+      });
+      return jsonResponse({ rule }, 201);
+    }
+    const discoveryRuleMatch = url.pathname.match(/^\/admin\/api\/discovery\/rules\/([^/]+)$/);
+    if (discoveryRuleMatch) {
+      const discoveryRuleId = decodeURIComponent(discoveryRuleMatch[1]);
+      if (request.method === "PATCH") {
+        const raw: unknown = await request.json().catch(() => null);
+        const parsed = parseDiscoveryRuleInput(raw);
+        if (!parsed.ok) return jsonResponse({ detail: parsed.error }, 400);
+        const rule = await updateDiscoveryRule(env, discoveryRuleId, parsed.value);
+        if (!rule) return jsonResponse({ detail: "发现规则不存在" }, 404);
+        await auditAdminAction(env, request, auth, "UPDATE_DISCOVERY_RULE", "lead_discovery_rule", rule.id, {
+          name: rule.name,
+          keywords: rule.keywords,
+          enabled: rule.enabled,
+        });
+        return jsonResponse({ rule });
+      }
+      if (request.method === "DELETE") {
+        const rule = await getDiscoveryRuleById(env, discoveryRuleId);
+        if (!rule) return jsonResponse({ detail: "发现规则不存在" }, 404);
+        await deleteDiscoveryRule(env, discoveryRuleId);
+        await auditAdminAction(env, request, auth, "DELETE_DISCOVERY_RULE", "lead_discovery_rule", discoveryRuleId, {
+          name: rule.name,
+        });
+        return jsonResponse({ ok: true });
+      }
+    }
+    const discoveryRunMatch = url.pathname.match(/^\/admin\/api\/discovery\/rules\/([^/]+)\/run$/);
+    if (discoveryRunMatch && request.method === "POST") {
+      const discoveryRuleId = decodeURIComponent(discoveryRunMatch[1]);
+      const rule = await getDiscoveryRuleById(env, discoveryRuleId);
+      if (!rule) return jsonResponse({ detail: "发现规则不存在" }, 404);
+      const report = await runDiscoveryRuleById(env, discoveryRuleId);
+      if (!report) return jsonResponse({ detail: "发现规则不存在" }, 404);
+      await auditAdminAction(env, request, auth, "RUN_DISCOVERY_RULE", "lead_discovery_rule", discoveryRuleId, {
+        name: rule.name,
+        inserted: report.inserted,
+        duplicates: report.duplicates,
+        queries: report.queries.length,
+      });
+      return jsonResponse({ report });
+    }
+    const discoveryLogMatch = url.pathname.match(/^\/admin\/api\/discovery\/rules\/([^/]+)\/log$/);
+    if (discoveryLogMatch && request.method === "GET") {
+      const discoveryRuleId = decodeURIComponent(discoveryLogMatch[1]);
+      const rawLimit = Number(url.searchParams.get("limit") ?? "100");
+      const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 100;
+      const entries = await getDiscoveryLog(env, discoveryRuleId, limit);
+      return jsonResponse({ entries });
     }
     // GET /admin/api/customers/pre-filter — 海选: SQL-only targeting over
     // verified fields so users can shrink 50k rows to a research-worthy set
@@ -3895,6 +3984,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 .s-mw64{min-width:64px;width:64px;padding:6px 8px}
 </style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div class="s-dfx-g12-aic"><a href="/admin/security" class="top-nav-link">🛡️ 安全设置</a><a href="/admin/outreach" class="top-nav-link">📧 开发信管理</a><a href="/admin/crm" class="top-nav-link">🎯 CRM 销售</a><a href="/admin/keys" class="top-nav-link">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
 <section class="panel"><h2>📥 客户数据导入（Seed CSV）</h2><p class="s-note">粘贴 CSV（需表头，支持列：company_name, country, domain/website, email, product）。原始数据永久保存在 customer_imports（不可变原始层）；域名或公司名匹配的行自动去重跳过，新公司以 pending 状态进入研究队列。</p><div class="toolbar"><input id="importFileName" placeholder="文件名备注（可选）" class="s-xw220"><button class="button" id="importBtn">导入并去重入队</button></div><textarea id="importCsv" rows="6" placeholder="company_name,country,website,email,product\nABC Sports,USA,,buyer@abcsports.com,SUP\nOcean Pro,Germany,oceanpro.de,,RIB"></textarea><div id="importMsg" class="notice hidden"></div></section>
+<section class="panel"><h2>🔍 自动寻找新客户</h2><p class="s-note">按规则自动搜索潜在客户（经销商/进口商/批发商/零售商）：基于现有搜索舰队（Tavily/Exa/Searlo/DuckDuckGo，零新增付费 API）生成查询，提取公司名称与域名后自动去重（对比研究队列、CRM 与历史记录），新公司以 pending 状态进入研究队列——与 CSV 导入同一管线，研究完成后可在 CRM 面板「线索提升」。空闲 cron 自动运行到期规则，也可手动「立即运行」。</p><div class="toolbar"><input id="dRuleName" placeholder="规则名称（如：欧洲桨板经销商）" class="s-xw220"><input id="dRuleKeywords" placeholder="产品关键词（必填，如：inflatable boat SUP）"><input id="dRuleIndustry" placeholder="行业（可选，如：water sports）" class="s-xw220"><input id="dRuleCountry" placeholder="国家（可选，如：Germany）" class="s-xw220"><input id="dRuleMax" type="number" min="1" max="50" value="20" class="s-mw64" title="每次入库上限"><input id="dRuleInterval" type="number" min="1" max="8760" value="168" class="s-mw64" title="自动运行间隔（小时）"><button class="button" id="dRuleAdd">➕ 创建规则</button></div><p class="s-note">两个数字框：每次入库上限（1-50） · 自动运行间隔小时（默认 168 = 每周，cron 空闲时自动跑）</p><div id="dRuleMsg" class="notice hidden"></div><table><thead><tr><th>规则</th><th>关键词</th><th>行业 / 国家</th><th>上限 / 间隔</th><th>状态</th><th>最近运行</th><th>已入库 / 重复</th><th>操作</th></tr></thead><tbody id="dRuleRows"></tbody></table><div id="dLogArea" class="hidden"><div class="section-title" id="dLogTitle">发现记录</div><table><thead><tr><th>时间</th><th>公司</th><th>域名</th><th>结果</th><th>研究状态</th><th>来源</th></tr></thead><tbody id="dLogRows"></tbody></table></div></section>
 <section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p class="s-note">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围：「统计匹配」后可「重新入队」让管道二次研究高价值客户，「写开发信」把当前条件带入定向群发生成分批开发信，「导出全部数据」按当前条件下载全量 CSV。筛选项为下拉勾选，右侧数字是该条件当前命中的客户数（勾选「有邮箱」后只计有邮箱的）。</p><div class="toolbar"><span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span><span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span><span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span><select id="pfMinScore" class="s-mw130"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="50">最低分 ≥50</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select><label class="s-chiprow"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><label class="s-chiprow"><input type="checkbox" id="pfHasSignal"> 有购买信号</label><input id="pfPersonaRoles" placeholder="人物角色（逗号分隔，如：采购总监）" class="s-p8-bd1 ol cbd5e1-br6-fs13-mw180"><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button><button class="button" id="pfOutreach">✉️ 写开发信</button><button class="button secondary" id="pfExport">📥 导出全部数据</button></div><div id="pfResult" class="notice hidden"></div></section>
 <section class="panel"><h2>🎯 线索评分权重（Phase 10 可调）</h2><p class="s-note">六维权重决定评分结构：每维 0-100 的整数，六维合计必须恰好 100（总分 0-100 契约）。保存仅写入配置；已评分客户仍是旧权重结果——点「重算存量评分」按当前权重全量重算（不相关客户归零，未完成客户不受影响，数据完整度分不重算，不重新研究）。</p><div class="toolbar" id="lsInputs"></div><p class="s-note" id="lsMeta"></p><div class="toolbar"><span id="lsSum" class="s-fs12-fw700-mt2"></span><button class="button secondary" id="lsDefaultsBtn">恢复默认</button><button class="button" id="lsSaveBtn" disabled>保存权重</button><button class="button secondary" id="lsRescoreBtn">重算存量评分</button></div><div id="lsMsg" class="notice hidden"></div></section>
 <section class="panel"><h2>客户列表</h2><div id="scoreCard" class="hidden s-mb12" ></div><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>评分</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
@@ -3947,6 +4037,40 @@ const ADMIN_PANEL_HTML = `<!doctype html>
   // Seed CSV import (docx ① Data Import)
   var doImport=function(){var csv=$('importCsv').value;if(!csv.trim()){showMsg('importMsg','请先粘贴 CSV 内容',false);return}$('importBtn').disabled=true;$('importBtn').textContent='导入中…';api('/admin/api/customers/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({csv:csv,file_name:$('importFileName').value||null})}).then(function(d){showMsg('importMsg','✅ 导入完成：新增 '+d.inserted+' 家（进入研究队列），匹配已有 '+d.matched+' 家（跳过），无效行 '+d.skipped+'。导入批次：'+d.import_id,true);$('importCsv').value='';load()}).catch(function(e){showMsg('importMsg',e.message,false)}).finally(function(){$('importBtn').disabled=false;$('importBtn').textContent='导入并去重入队'})};
   $('importBtn').onclick=doImport;
+  // 0039 ① 自动寻找新客户: discovery rules CRUD + run-now + run log.
+  // Rules are cached by id so 启用/停用 PATCHes the full validated body
+  // (parseDiscoveryRuleInput requires name+keywords anyway).
+  var dRules={};
+  var dLoadRules=function(){api('/admin/api/discovery/rules').then(function(d){var rules=d.rules||[];dRules={};
+    $('dRuleRows').innerHTML=rules.map(function(r){dRules[r.id]=r;
+      var st=r.enabled?'<span class="badge badge-completed">启用</span>':'<span class="badge badge-pending">停用</span>';
+      return '<tr><td>'+esc(r.name)+'</td><td>'+esc(r.keywords)+'</td><td>'+esc(r.industry||'-')+' / '+esc(r.country||'-')+'</td><td>'+r.max_results+' / '+r.interval_hours+'h</td><td>'+st+'</td><td>'+esc(r.last_run_at||'未运行')+'</td><td><b>'+r.inserted_count+'</b> / '+r.duplicate_count+'</td>'
+      +'<td><button class="button small" data-drun="'+esc(r.id)+'">▶ 立即运行</button> <button class="button secondary small" data-dtoggle="'+esc(r.id)+'">'+(r.enabled?'停用':'启用')+'</button> <button class="button secondary small" data-dlog="'+esc(r.id)+'">📋 记录</button> <button class="button danger small" data-ddel="'+esc(r.id)+'">删除</button></td></tr>'}).join('')||'<tr><td colspan="8">暂无发现规则——填写上方表单创建第一条。</td></tr>';
+  }).catch(function(e){showMsg('dRuleMsg',e.message,false)})};
+  var dRuleBody=function(r,overrides){var b={name:r.name,keywords:r.keywords,industry:r.industry||null,country:r.country||null,max_results:r.max_results,interval_hours:r.interval_hours,enabled:r.enabled?1:0};var o=overrides||{};for(var k in o)b[k]=o[k];return b};
+  $('dRuleAdd').onclick=function(){var name=$('dRuleName').value.trim(),keywords=$('dRuleKeywords').value.trim();
+    if(!name||!keywords){showMsg('dRuleMsg','规则名称和产品关键词不能为空',false);return}
+    var b=$('dRuleAdd');b.disabled=true;b.textContent='创建中…';
+    api('/admin/api/discovery/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,keywords:keywords,industry:$('dRuleIndustry').value.trim()||null,country:$('dRuleCountry').value.trim()||null,max_results:Number($('dRuleMax').value)||20,interval_hours:Number($('dRuleInterval').value)||168})}).then(function(){showMsg('dRuleMsg','✅ 规则已创建。空闲 cron 会按间隔自动运行，或点「立即运行」马上搜一次。',true);$('dRuleName').value='';$('dRuleKeywords').value='';dLoadRules()}).catch(function(e){showMsg('dRuleMsg',e.message,false)}).finally(function(){b.disabled=false;b.textContent='➕ 创建规则'})};
+  $('dRuleRows').addEventListener('click',function(ev){
+    var t=ev.target.closest('[data-drun],[data-dtoggle],[data-dlog],[data-ddel]');if(!t)return;
+    var id;
+    if(t.hasAttribute('data-drun')){t.disabled=true;
+      api('/admin/api/discovery/rules/'+encodeURIComponent(t.getAttribute('data-drun'))+'/run',{method:'POST'}).then(function(d){var r=d.report;showMsg('dRuleMsg','✅ 运行完成：执行 '+r.queries.length+' 组查询，新入库 '+r.inserted+' 家，重复跳过 '+r.duplicates+' 家。新线索已进入研究队列（客户列表 pending 可见，研究完成后可在 CRM 提升）。',true);dLoadRules()}).catch(function(e){showMsg('dRuleMsg',e.message,false)}).finally(function(){t.disabled=false});return}
+    if(t.hasAttribute('data-dtoggle')){id=t.getAttribute('data-dtoggle');var r0=dRules[id];if(!r0)return;var next=r0.enabled?0:1;
+      api('/admin/api/discovery/rules/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(dRuleBody(r0,{enabled:next}))}).then(function(){dLoadRules()}).catch(function(e){showMsg('dRuleMsg',e.message,false)});return}
+    if(t.hasAttribute('data-dlog')){id=t.getAttribute('data-dlog');
+      api('/admin/api/discovery/rules/'+encodeURIComponent(id)+'/log?limit=100').then(function(d){var entries=d.entries||[];if(!entries.length){showMsg('dRuleMsg','该规则还没有运行记录——点「立即运行」生成第一条。',true);return}
+        $('dLogTitle').textContent='📋 发现记录 — '+(dRules[id]?dRules[id].name:id)+'（最近 '+entries.length+' 条）';
+        $('dLogRows').innerHTML=entries.map(function(e){var oc=e.outcome==='inserted'?'<span class="badge badge-completed">入库</span>':e.outcome==='duplicate'?'<span class="badge badge-pending">重复</span>':'<span class="badge badge-failed">跳过</span>';
+          var cs=e.customer_status?badge(e.customer_status):'<span class="s-faint2">—</span>';
+          return '<tr><td>'+esc((e.run_at||'').slice(0,19))+'</td><td>'+esc(e.company_name)+'</td><td>'+(e.domain?esc(e.domain):'—')+'</td><td>'+oc+'</td><td>'+cs+(e.customer_lead_score!=null?' · '+e.customer_lead_score+'分':'')+'</td><td>'+(e.source_url?'<a href="'+esc(e.source_url)+'" target="_blank">来源</a>':'—')+'</td></tr>'}).join('');
+        $('dLogArea').classList.remove('hidden')}).catch(function(e2){showMsg('dRuleMsg',e2.message,false)});return}
+    if(t.hasAttribute('data-ddel')){id=t.getAttribute('data-ddel');var r1=dRules[id];if(!r1)return;
+      if(!confirm('确定删除发现规则「'+r1.name+'」？已发现的公司与运行记录会保留（可追溯），只是不再自动搜索。'))return;
+      api('/admin/api/discovery/rules/'+encodeURIComponent(id),{method:'DELETE'}).then(function(){showMsg('dRuleMsg','已删除规则「'+r1.name+'」',true);dLoadRules()}).catch(function(e){showMsg('dRuleMsg',e.message,false)});return}
+  });
+  dLoadRules();
   // Pre-filter 海选 (docx Step 2)
   /* ── 多选下拉（国家/细分/产品）：勾选式选择项，替代手填输入框 ── */
   var pfDDOpts={countries:[],segments:[],products:[]};
