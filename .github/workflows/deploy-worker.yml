@@ -836,3 +836,26 @@ jobs:
             printf '%s' "$ADMIN_PANEL_TOKEN" | npx wrangler secret put ADMIN_PANEL_TOKEN
             echo "Synced ADMIN_PANEL_TOKEN from GitHub (workers.dev sessions will need to re-login)"
           fi
+
+      # Post-deploy liveness probe. /health answers 200 ONLY when the D1
+      # binding answers a trivial query (src/index.ts), so a green check
+      # proves the new deployment is live AND wired to a working database.
+      # The GitHub runner can reach workers.dev (some dev boxes cannot),
+      # retries absorb the few seconds a fresh deployment needs to
+      # propagate, and the body is grepped for "ok":true so a captive 200
+      # cannot fake a pass. Override the URL (e.g. a custom domain) via the
+      # repo variable WORKER_HEALTH_URL.
+      - name: Smoke-test deployed worker (/health)
+        env:
+          HEALTH_URL: ${{ vars.WORKER_HEALTH_URL || 'https://crm-ai-worker.qdu.workers.dev/health' }}
+        run: |
+          for i in $(seq 1 6); do
+            echo "Attempt $i/6: GET $HEALTH_URL"
+            body="$(curl -sS --fail --max-time 30 "$HEALTH_URL")" \
+              && echo "$body" | grep -q '"ok": *true' \
+              && { echo "Health check passed: $body"; exit 0; } \
+              || echo "Attempt $i/6 failed; retrying in 10s"
+            sleep 10
+          done
+          echo "Health check failed after 6 attempts - deployment did not come up healthy"
+          exit 1
