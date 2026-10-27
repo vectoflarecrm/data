@@ -374,6 +374,46 @@ describe("公司合并 (merge)", () => {
     });
     expect(r.status).toBe(404);
   });
+
+  it("detects duplicates by name similarity and contact overlap, clears after merge", async () => {
+    const { db, env } = await makeDb();
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, domain, source)
+       VALUES ('dup_a', 'Kayaking Puerto Rico', 'kayakingpr.com', 'csv_import'),
+              ('dup_b', 'Mini Boat Adventures', NULL, 'csv_import'),
+              ('name_a', 'BOATS R US', 'boatsruspr.com', 'csv_import'),
+              ('name_b', 'Boats R Us Corp', NULL, 'csv_import'),
+              ('solo', 'Solo Co', 'solo.com', 'csv_import')`,
+    ).run();
+    // Kayaking/Mini Boat 共用同一联系人（姓名+邮箱重合）
+    for (const cid of ["dup_a", "dup_b"]) {
+      await call(env, "POST", "/admin/api/crm/contacts", {
+        company_id: cid,
+        full_name: "Rick Morales",
+        email: "rick@kayakingpr.com",
+      });
+    }
+
+    const list = await call(env, "GET", "/admin/api/crm/companies/duplicates");
+    expect(list.status).toBe(200);
+    const dups = list.body.duplicates;
+    expect(dups).toHaveLength(2);
+    const byKeys = dups.map((d: any) => `${d.a_id}|${d.b_id}|${d.reasons.join(",")}`);
+    expect(byKeys.some((k: string) => k === "dup_a|dup_b|联系人重合")).toBe(true);
+    expect(byKeys.some((k: string) => k.startsWith("name_a|name_b|"))).toBe(true);
+    // 无关公司不出现在任何配对里
+    expect(JSON.stringify(dups)).not.toContain("solo");
+
+    // 合并联系人重合对后配对消失，名称对仍在
+    const merged = await call(env, "POST", "/admin/api/crm/companies/merge", {
+      target_company_id: "dup_a",
+      source_company_id: "dup_b",
+    });
+    expect(merged.status).toBe(200);
+    const after = await call(env, "GET", "/admin/api/crm/companies/duplicates");
+    expect(after.body.duplicates).toHaveLength(1);
+    expect(after.body.duplicates[0].a_id).toBe("name_a");
+  });
 });
 
 /* ── 商机阶段 ───────────────────────────────────────────────────────────── */

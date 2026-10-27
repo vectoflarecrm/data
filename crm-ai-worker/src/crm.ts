@@ -684,6 +684,157 @@ async function mergeCompanies(
   return jsonResponse({ company });
 }
 
+/* ── 疑似重复公司检测（名称相同/包含/低频专名重合 + 联系人重合） ────────────
+ * domain 是 UNIQUE 列，导入归并失败的公司一家拿到域名、另一家为 NULL，
+ * 库里不存在「共域名对」——检测只能靠名称与联系人：
+ *   1) 联系人重合：同邮箱/同电话（SQL），或同姓名且非通用名（JS）；
+ *   2) 名称相同：去括号注记后归一化相等；
+ *   3) 名称包含：归一化后整词边界前缀/后缀（括号内容保留）；
+ *   4) 低频专名重合：共同词长 ≥5 且只在 ≤3 家公司名中出现
+ *      （"crashboat" 是信号，"surf/sailing/yachts" 高频自动失效）。
+ * 名称相似行业词误报率极高（surf shop × N），靠文档频率自适应而非停用
+ * 词枚举。结果只做人工比对候选，是否合并由人在比对页决定。 */
+interface DupPair {
+  a_id: string;
+  a_name: string;
+  b_id: string;
+  b_name: string;
+  reasons: string[];
+}
+
+const CO_NAME_STOPWORDS = new Set([
+  "the", "and", "of", "de", "del", "la", "el", "los", "las", "inc", "llc", "corp",
+  "corporation", "co", "company", "ltd",
+]);
+const GENERIC_CONTACT_NAMES = new Set([
+  "admin", "owner", "info", "manager", "sales", "contact", "office", "general",
+  "gerencia", "oficina", "staff", "team", "hello", "support", "bookings", "booking",
+  "reservation", "reservations",
+]);
+const DUP_DF_MAX = 3;
+const DUP_TOKEN_MIN_LEN = 5;
+
+function foldAscii(s: string): string {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function coNameTokens(name: string): string[] {
+  return foldAscii(name.toLowerCase())
+    .replace(/[()]/g, " ")
+    .replace(/&/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length >= 2 && !CO_NAME_STOPWORDS.has(t));
+}
+
+function coNameFull(name: string): string {
+  return foldAscii(name.toLowerCase())
+    .replace(/[()]/g, " ")
+    .replace(/&/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function coNameNoParens(name: string): string {
+  return foldAscii(name.toLowerCase())
+    .replace(/[（(][^)）]*[)）]/g, " ")
+    .replace(/&/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function nameMatchReason(na: string, nb: string, df: Map<string, number>): string | null {
+  const da = coNameNoParens(na);
+  const db = coNameNoParens(nb);
+  if (da && da === db) return "名称相同";
+  const ka = coNameFull(na);
+  const kb = coNameFull(nb);
+  if (ka && kb && ka !== kb) {
+    if (kb.startsWith(ka + " ") || kb.endsWith(" " + ka) || ka.startsWith(kb + " ") || ka.endsWith(" " + kb)) {
+      return "名称包含";
+    }
+  }
+  const sa = new Set(coNameTokens(na));
+  const sb = new Set(coNameTokens(nb));
+  let lowFreqCommon = 0;
+  sa.forEach((t) => {
+    if (sb.has(t) && t.length >= DUP_TOKEN_MIN_LEN && (df.get(t) ?? 0) <= DUP_DF_MAX) lowFreqCommon++;
+  });
+  if (lowFreqCommon >= 1) return "名称相似";
+  return null;
+}
+
+async function listDuplicateCompanies(env: AdminEnv): Promise<Response> {
+  const { results: companies } = await env.DB.prepare(
+    "SELECT id, name FROM crm_companies",
+  ).all<{ id: string; name: string }>();
+  const byId = new Map((companies ?? []).map((c) => [c.id, c]));
+
+  const pairs = new Map<string, DupPair>();
+  const addPair = (aId: string, bId: string, reason: string) => {
+    const [x, y] = aId < bId ? [aId, bId] : [bId, aId];
+    const ca = byId.get(x);
+    const cb = byId.get(y);
+    if (!ca || !cb) return;
+    const key = x + "|" + y;
+    const pair =
+      pairs.get(key) ?? { a_id: x, a_name: ca.name, b_id: y, b_name: cb.name, reasons: [] };
+    if (!pair.reasons.includes(reason)) pair.reasons.push(reason);
+    pairs.set(key, pair);
+  };
+
+  // 1a) 同邮箱/同电话（强信号）
+  const { results: strongPairs } = await env.DB.prepare(
+    `SELECT DISTINCT c1.company_id AS a_id, c2.company_id AS b_id
+     FROM crm_contacts c1
+     JOIN crm_contacts c2 ON c1.company_id < c2.company_id
+     WHERE (COALESCE(c1.email, '') != '' AND LOWER(c1.email) = LOWER(c2.email))
+        OR (COALESCE(c1.whatsapp_or_phone, '') != ''
+            AND c1.whatsapp_or_phone = c2.whatsapp_or_phone)`,
+  ).all<{ a_id: string; b_id: string }>();
+  for (const p of strongPairs ?? []) addPair(p.a_id, p.b_id, "联系人重合");
+
+  // 1b) 同姓名且非通用名（"Admin"/"Info" 等会跨公司大面积误报）
+  const { results: namedContacts } = await env.DB.prepare(
+    "SELECT company_id, full_name FROM crm_contacts WHERE TRIM(COALESCE(full_name, '')) != ''",
+  ).all<{ company_id: string; full_name: string }>();
+  const byName = new Map<string, Set<string>>();
+  for (const ct of namedContacts ?? []) {
+    const n = foldAscii(ct.full_name.trim().toLowerCase());
+    if (n.replace(/\s/g, "").length < 4 || GENERIC_CONTACT_NAMES.has(n)) continue;
+    const set = byName.get(n) ?? new Set<string>();
+    set.add(ct.company_id);
+    byName.set(n, set);
+  }
+  for (const ids of byName.values()) {
+    if (ids.size < 2) continue;
+    const arr = [...ids].sort();
+    for (let i = 0; i < arr.length; i++) {
+      for (let j = i + 1; j < arr.length; j++) addPair(arr[i], arr[j], "联系人重合");
+    }
+  }
+
+  // 2-4) 名称规则（文档频率自适应）
+  const df = new Map<string, number>();
+  for (const c of byId.values()) {
+    for (const t of new Set(coNameTokens(c.name))) df.set(t, (df.get(t) ?? 0) + 1);
+  }
+  const list = [...byId.values()];
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      const reason = nameMatchReason(list[i].name, list[j].name, df);
+      if (reason) addPair(list[i].id, list[j].id, reason);
+    }
+  }
+
+  const duplicates = [...pairs.values()].sort(
+    (p, q) => q.reasons.length - p.reasons.length || p.a_name.localeCompare(q.a_name),
+  );
+  return jsonResponse({ duplicates });
+}
+
 /* ── Contact merge（重复联系人去重，Atomic CRM 风格） ───────────────────── */
 
 async function mergeContacts(
@@ -2127,6 +2278,7 @@ export async function handleCrmApi(
       if (!id && method === "POST") return await createCompany(request, env, auth);
       if (id === "promote" && method === "POST") return await promoteLead(request, env, auth);
       if (id === "merge" && method === "POST") return await mergeCompanies(request, env, auth);
+      if (id === "duplicates" && method === "GET") return await listDuplicateCompanies(env);
       if (id && sub === "recheck-domain" && method === "POST") return await recheckCompanyDomain(request, env, auth, id);
       // ⑥ 持续意向监测：companies/:id/check-signals 立即检查；companies/:id/watch 改监测配置。
       if (id && sub === "check-signals" && method === "POST") return await forceSignalCheck(request, env, auth, id);

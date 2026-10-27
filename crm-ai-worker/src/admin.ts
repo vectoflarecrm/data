@@ -5861,6 +5861,10 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
   <div id="dBody"></div>
   </div></div>
 
+<div class="modal-back" id="mCompare"><div class="modal" style="max-width:980px">
+  <div id="cmpBody"></div>
+  </div></div>
+
 <div class="modal-back" id="mSeqNew"><div class="modal">
   <h3>➕ 新建销售序列</h3>
   <div id="snBody"></div>
@@ -5877,7 +5881,7 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 <script>
 (function(){
 'use strict';
-  var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[],funnel:null,sequences:[],domainChecks:[],signalWatch:[],signalList:[],attribution:null,attrDim:'sources',calendar:null,calMonth:new Date().toISOString().slice(0,7)};
+  var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[],funnel:null,sequences:[],domainChecks:[],signalWatch:[],signalList:[],attribution:null,attrDim:'sources',calendar:null,calMonth:new Date().toISOString().slice(0,7),dupPairs:[],dupMap:{}};
 var STAGES=['inquiry','sample_quoted','pi_sent','deposit_paid','won','lost'];
 var STAGE_L={inquiry:'询盘',sample_quoted:'样品报价',pi_sent:'PI 已发',deposit_paid:'定金到账',won:'赢单',lost:'输单'};
 var TIER_L={A:'A级',B:'B级',C:'C级',VIP:'VIP',unqualified:'未分级'};
@@ -5910,14 +5914,29 @@ function loadCompanies(){
   var p='/admin/api/crm/companies?limit=200&q='+encodeURIComponent($('coSearch').value)+'&tier='+encodeURIComponent($('coTier').value)+'&lead_status='+encodeURIComponent($('coStatus').value);
   return api(p).then(function(b){STATE.companies=b.companies||[];STATE.total=b.total||0;renderCompanies();});
 }
+/* 疑似重复（共域名对）：列表 🔀 标注 + 比对页入口。 */
+function loadDuplicates(){
+  return api('/admin/api/crm/companies/duplicates').then(function(b){
+    STATE.dupPairs=b.duplicates||[];
+    var m={};
+    for(var i=0;i<STATE.dupPairs.length;i++){
+      var p=STATE.dupPairs[i];
+      m[p.a_id]=p.b_id;m[p.b_id]=p.a_id;
+    }
+    STATE.dupMap=m;
+    renderCompanies();
+  });
+}
 function renderCompanies(){
   var rows='';
   for(var i=0;i<STATE.companies.length;i++){
     var c=STATE.companies[i];
-    rows+='<tr><td><strong>'+esc(c.name)+'</strong><div class="hint" style="margin:0">'+esc(c.id)+'</div></td><td>'+esc(c.country||'—')+'</td><td>'+tierBadge(c.tier)+'</td><td>'+statusBadge(c.lead_status)+(c.customer_since?' <span class="badge b-cust" title="自 '+esc(c.customer_since)+' 起成交">客户</span>':'')+'</td><td>'+esc(c.domain||'—')+'</td><td>'+Number(c.open_deals||0)+'</td><td>'+Number(c.open_tasks||0)+'</td><td><button class="btn btn-p btn-xs" data-act="detail" data-id="'+esc(c.id)+'">详情</button> <button class="btn btn-d btn-xs" data-act="delCo" data-id="'+esc(c.id)+'">删除</button></td></tr>';
+    var dup=STATE.dupMap[c.id];
+    var dupBadge=dup?'<button class="btn btn-xs" style="background:#b45309;margin-top:3px" data-act="cmpDup" data-id="'+esc(c.id)+'" data-oid="'+esc(dup)+'" title="名称相似或联系人重合，点击打开全字段比对">🔀 疑似重复 · 点击比对</button> ':'';
+    rows+='<tr><td><strong>'+esc(c.name)+'</strong><div class="hint" style="margin:0">'+esc(c.id)+'</div>'+dupBadge+'</td><td>'+esc(c.country||'—')+'</td><td>'+tierBadge(c.tier)+'</td><td>'+statusBadge(c.lead_status)+(c.customer_since?' <span class="badge b-cust" title="自 '+esc(c.customer_since)+' 起成交">客户</span>':'')+'</td><td>'+esc(c.domain||'—')+'</td><td>'+Number(c.open_deals||0)+'</td><td>'+Number(c.open_tasks||0)+'</td><td><button class="btn btn-p btn-xs" data-act="detail" data-id="'+esc(c.id)+'">详情</button> <button class="btn btn-d btn-xs" data-act="delCo" data-id="'+esc(c.id)+'">删除</button></td></tr>';
   }
   $('coRows').innerHTML=rows||'<tr><td colspan="8" class="hint">暂无公司 — 先从下面的「提升线索」开始，或点右上角「新建公司」。</td></tr>';
-  $('coHint').textContent='共 '+STATE.total+' 家公司'+(STATE.total>STATE.companies.length?'（当前显示前 '+STATE.companies.length+' 家）':'');
+  $('coHint').textContent='共 '+STATE.total+' 家公司'+(STATE.total>STATE.companies.length?'（当前显示前 '+STATE.companies.length+' 家）':'')+(STATE.dupPairs.length?' · 🔀 '+STATE.dupPairs.length+' 对疑似重复（共域名）待人工比对':'');
 }
 function loadDeals(){
   return api('/admin/api/crm/deals').then(function(b){STATE.deals=b.deals||[];renderKanban();});
@@ -6297,7 +6316,7 @@ $('calIcs').onclick=function(){window.open('/admin/api/crm/calendar.ics');};
 $('calOverdue').addEventListener('click',calAct);
 $('calToday').addEventListener('click',calAct);
 function loadAll(){
-  return Promise.all([loadCompanies(),loadDeals(),loadTasks(),loadStats(),loadSequences(),loadDomains(),loadSignals(),loadAttribution(),loadCalendar()]).catch(function(e){toast(e.message,true);});
+  return Promise.all([loadCompanies(),loadDeals(),loadTasks(),loadStats(),loadSequences(),loadDomains(),loadSignals(),loadAttribution(),loadCalendar(),loadDuplicates()]).catch(function(e){toast(e.message,true);});
 }
 
 /* ── 公司详情 ───────────────────────────────────────────── */
@@ -6432,10 +6451,85 @@ $('coStatus').addEventListener('change',loadCompanies);
 $('coRows').addEventListener('click',function(e){
   var b=e.target.closest('[data-act]');if(!b)return;
   if(b.getAttribute('data-act')==='detail')openDetail(b.getAttribute('data-id'));
+  else if(b.getAttribute('data-act')==='cmpDup')openCompare(b.getAttribute('data-id'),b.getAttribute('data-oid'));
   else if(b.getAttribute('data-act')==='delCo'){
     if(!confirm('确定删除该公司及其全部联系人、商机、动态？不可撤销。'))return;
     api('/admin/api/crm/companies/'+encodeURIComponent(b.getAttribute('data-id')),{method:'DELETE'}).then(function(){toast('已删除');loadAll();}).catch(function(err){toast(err.message,true);});
   }
+});
+
+/* ── 疑似重复公司比对页 ─────────────────────────────────── */
+function cmpContactsHtml(list){
+  if(!list.length)return '<span class="hint">无联系人</span>';
+  var h='';
+  for(var i=0;i<list.length;i++){
+    var c=list[i];
+    h+='<div style="padding:3px 0;border-bottom:1px dashed #e5e7eb">'+esc(c.full_name)+(c.job_title?' · '+esc(c.job_title):'')+(c.email?' · ✉ '+esc(c.email):'')+(c.whatsapp_or_phone?' · ☎ '+esc(c.whatsapp_or_phone):'')+(Number(c.is_primary)?' · ★主联':'')+'</div>';
+  }
+  return h;
+}
+function cmpDealsHtml(list){
+  if(!list.length)return '<span class="hint">无商机</span>';
+  var h='';
+  for(var i=0;i<list.length;i++){
+    h+='<div style="padding:3px 0;border-bottom:1px dashed #e5e7eb">'+esc(list[i].title)+' · '+STAGE_L[list[i].stage]+' · '+fmtAmt(list[i].amount)+'</div>';
+  }
+  return h;
+}
+/* 一行比对：值不同时整行高亮，提示人工重点核对。 */
+function cmpRow(label,va,vb){
+  var diff=(va===null||va===undefined?'':String(va))!==(vb===null||vb===undefined?'':String(vb));
+  return '<tr'+(diff?' style="background:#fef3c7"':'')+'><td class="hint" style="white-space:nowrap">'+label+'</td><td style="white-space:normal">'+va+'</td><td style="white-space:normal">'+vb+'</td></tr>';
+}
+function cmpV(c,f){return c[f]===null||c[f]===undefined||c[f]===''?'<span class="hint">—</span>':esc(c[f]);}
+function openCompare(aId,bId){
+  var pair=null;
+  for(var i=0;i<STATE.dupPairs.length;i++){
+    var p=STATE.dupPairs[i];
+    if((p.a_id===aId&&p.b_id===bId)||(p.a_id===bId&&p.b_id===aId)){pair=p;break;}
+  }
+  var reasons=pair&&pair.reasons?pair.reasons.join('、'):'';
+  $('cmpBody').innerHTML='<p class="hint">正在加载两家公司的完整信息…</p>';
+  openModal('mCompare');
+  Promise.all([api('/admin/api/crm/companies/'+encodeURIComponent(aId)),api('/admin/api/crm/companies/'+encodeURIComponent(bId))]).then(function(r){
+    var A=r[0],B=r[1];
+    var a=A.company,b=B.company;
+    var h='<h3>🔀 疑似重复公司比对 '+(reasons?'<span class="badge b-warn" style="font-size:12px">'+esc(reasons)+'</span>':'')+'</h3>';
+    h+='<p class="hint">'+(reasons?'判定依据：'+esc(reasons)+'。':'')+'黄色高亮行 = 两侧不一致的字段，请重点核对。选择保留方后合并：另一方的联系人/商机/动态全部并入，缺失字段自动补齐，来源中文备注以 [并入备注] 保留，对方被删除（单事务、可溯源）。连锁分店等非重复情况请点「非重复，暂不处理」。</p>';
+    h+='<table><thead><tr><th style="width:110px">字段</th><th>公司 A</th><th>公司 B</th></tr></thead><tbody>';
+    h+=cmpRow('名称','<strong>'+esc(a.name)+'</strong>','<strong>'+esc(b.name)+'</strong>');
+    h+=cmpRow('ID',cmpV(a,'id'),cmpV(b,'id'));
+    h+=cmpRow('域名',cmpV(a,'domain'),cmpV(b,'domain'));
+    h+=cmpRow('国家',cmpV(a,'country'),cmpV(b,'country'));
+    h+=cmpRow('行业',cmpV(a,'industry'),cmpV(b,'industry'));
+    h+=cmpRow('📍 地址',cmpV(a,'address'),cmpV(b,'address'));
+    h+=cmpRow('编号',cmpV(a,'external_id'),cmpV(b,'external_id'));
+    h+=cmpRow('经销/代理品牌',cmpV(a,'dealer_brands'),cmpV(b,'dealer_brands'));
+    h+=cmpRow('分级',tierBadge(a.tier),tierBadge(b.tier));
+    h+=cmpRow('销售状态',statusBadge(a.lead_status),statusBadge(b.lead_status));
+    h+=cmpRow('客户来源',SOURCE_L[a.source||'unknown']||esc(a.source||'unknown'),SOURCE_L[b.source||'unknown']||esc(b.source||'unknown'));
+    h+=cmpRow('正式客户',cmpV(a,'customer_since'),cmpV(b,'customer_since'));
+    h+=cmpRow('禁止联系',Number(a.do_not_contact)?'是':'否',Number(b.do_not_contact)?'是':'否');
+    h+=cmpRow('创建时间',cmpV(a,'created_at'),cmpV(b,'created_at'));
+    h+=cmpRow('联系人（'+(A.contacts||[]).length+' / '+(B.contacts||[]).length+'）',cmpContactsHtml(A.contacts||[]),cmpContactsHtml(B.contacts||[]));
+    h+=cmpRow('商机（'+(A.deals||[]).length+' / '+(B.deals||[]).length+'）',cmpDealsHtml(A.deals||[]),cmpDealsHtml(B.deals||[]));
+    h+=cmpRow('动态条数',(A.activities||[]).length,(B.activities||[]).length);
+    h+=cmpRow('中文备注',cmpV(a,'chinese_remarks'),cmpV(b,'chinese_remarks'));
+    h+=cmpRow('已并入来源',cmpV(a,'merged_from_ids'),cmpV(b,'merged_from_ids'));
+    h+='</tbody></table>';
+    h+='<div class="mrow" style="margin-top:14px;flex-wrap:wrap">';
+    h+='<button class="btn btn-p" data-act="cmpMerge" data-tgt="'+esc(a.id)+'" data-src="'+esc(b.id)+'" data-tname="'+esc(a.name)+'" data-sname="'+esc(b.name)+'">⬅ 保留 A「'+esc(a.name)+'」，并入 B</button>';
+    h+='<button class="btn btn-p" data-act="cmpMerge" data-tgt="'+esc(b.id)+'" data-src="'+esc(a.id)+'" data-tname="'+esc(b.name)+'" data-sname="'+esc(a.name)+'">保留 B「'+esc(b.name)+'」，并入 A ➡</button>';
+    h+='<button class="btn btn-s" data-close="mCompare">非重复，暂不处理</button>';
+    h+='</div>';
+    $('cmpBody').innerHTML=h;
+  }).catch(function(e){toast(e.message,true);});
+}
+$('cmpBody').addEventListener('click',function(e){
+  var b=e.target.closest('[data-act="cmpMerge"]');if(!b)return;
+  var tn=b.getAttribute('data-tname'),sn=b.getAttribute('data-sname');
+  if(!confirm('将把「'+sn+'」的联系人、商机、动态全部并入「'+tn+'」并删除「'+sn+'」。\n缺失字段自动补齐，来源中文备注以 [并入备注] 保留。\n确定继续？'))return;
+  api('/admin/api/crm/companies/merge',{method:'POST',body:{target_company_id:b.getAttribute('data-tgt'),source_company_id:b.getAttribute('data-src')}}).then(function(){toast('合并完成：已保留「'+tn+'」');closeModal('mCompare');loadAll();}).catch(function(err){toast(err.message,true);});
 });
 function moveDeal(dealId,stage,pos){
   var body={stage:stage};
