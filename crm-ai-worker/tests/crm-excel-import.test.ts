@@ -880,3 +880,139 @@ describe("POST /admin/api/crm/import — Excel 智能导入", () => {
     expect(co.body.contacts[0]).toMatchObject({ full_name: "李四", email: "a@acme.com" });
   });
 });
+
+/* ── 修复模式（mode=repair）：旧规则存量重上传，只回填不新建 ─────────────── */
+
+describe("POST /admin/api/crm/import — 修复模式 (mode=repair)", () => {
+  it("旧规则存量（电话塌缩/产品错放 industry）重传同表 → 回填三列电话 + industry 归位，不新建", async () => {
+    const { env, db } = makeEnv();
+    // 生产现状形态：0042 前导入 —— 产品文本在 industry，联系人电话全塌缩在
+    // 遗留列（迁移后镜像到 whatsapp），tel/cellphone 为空。
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, domain, country, industry, source)
+       VALUES ('c_1', '787 Yachts', '787yachts.com', 'Puerto Rico',
+               'Yacht brokerage, sales and luxury charters.', 'csv_import')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO crm_contacts (id, company_id, full_name, job_title, email, whatsapp_or_phone, whatsapp)
+       VALUES ('ct_1', 'c_1', 'Isaias Rodriguez', 'Owner/CEO', 'info@787yachts.com',
+               '+1 7876054927', '+1 7876054927')`,
+    ).run();
+    const before = {
+      companies: (db.prepare("SELECT COUNT(*) AS n FROM crm_companies").get() as any).n,
+      contacts: (db.prepare("SELECT COUNT(*) AS n FROM crm_contacts").get() as any).n,
+    };
+    const xlsx = await buildZip([
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([
+        ["company name", "First Name", "Last Name", "TEL", "EMAIL", "Website", "Cellphone", "WhatsApp", "Products & Services in English"],
+        ["787 Yachts", "Isaias", "Rodriguez", "+1 787-605-4927", "info@787yachts.com", "787yachts.com", "+1 787-605-4927", "+1 7876054927", "Yacht brokerage, sales and luxury charters."],
+      ])) },
+    ]);
+    const r = await call(env, "POST", "/admin/api/crm/import", { mode: "repair", xlsx_base64: b64(xlsx) });
+    expect(r.status).toBe(200);
+    expect(r.body.mode).toBe("repair");
+    expect(r.body.created).toBe(0);
+    expect(r.body.companies_created).toBe(0);
+    expect(r.body.repaired_contacts).toBe(1);
+    expect(r.body.repaired_companies).toBe(1);
+    // 不新建任何行
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_companies").get() as any).n).toBe(before.companies);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_contacts").get() as any).n).toBe(before.contacts);
+    // 联系人三列电话就位（whatsapp 已有值保持）
+    const ct = db.prepare("SELECT * FROM crm_contacts WHERE id = 'ct_1'").get() as any;
+    expect(ct.tel).toBe("+1 787-605-4927");
+    expect(ct.cellphone).toBe("+1 787-605-4927");
+    expect(ct.whatsapp).toBe("+1 7876054927");
+    // 公司：产品归位 products_services，industry 不再存同一文本
+    const co = db.prepare("SELECT * FROM crm_companies WHERE id = 'c_1'").get() as any;
+    expect(co.products_services).toBe("Yacht brokerage, sales and luxury charters.");
+    expect(co.industry).toBeNull();
+  });
+
+  it("表内 WhatsApp 为空的行：塌缩进遗留列的手机号/座机归位（whatsapp 清空，tel/cellphone 补上）", async () => {
+    const { env, db } = makeEnv();
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, source) VALUES ('c_2', 'Abe Snorkeling', 'csv_import')`,
+    ).run();
+    // 旧导入只保了一个号（TEL 塌缩进遗留列），表内 WhatsApp 本来就是空
+    db.prepare(
+      `INSERT INTO crm_contacts (id, company_id, full_name, whatsapp_or_phone, whatsapp)
+       VALUES ('ct_2', 'c_2', 'Abe Gutierrez', '+1 787-741-2134', '+1 787-741-2134')`,
+    ).run();
+    const xlsx = await buildZip([
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([
+        ["company name", "First Name", "Last Name", "TEL", "Cellphone", "WhatsApp"],
+        ["Abe Snorkeling", "Abe", "Gutierrez", "+1 787-741-2134", "+1 787-435-1362", ""],
+      ])) },
+    ]);
+    const r = await call(env, "POST", "/admin/api/crm/import", { mode: "repair", xlsx_base64: b64(xlsx) });
+    expect(r.status).toBe(200);
+    expect(r.body.repaired_contacts).toBe(1);
+    const ct = db.prepare("SELECT * FROM crm_contacts WHERE id = 'ct_2'").get() as any;
+    expect(ct.tel).toBe("+1 787-741-2134");
+    expect(ct.cellphone).toBe("+1 787-435-1362");
+    expect(ct.whatsapp).toBeNull(); // 不再冒充 WhatsApp（表内 WhatsApp 为空）
+    expect(ct.whatsapp_or_phone).toBe("+1 787-741-2134"); // 遗留镜像不动
+  });
+
+  it("合并后的源公司不复活：表内公司/联系人库里没有 → 跳过，零新建", async () => {
+    const { env, db } = makeEnv();
+    const xlsx = await buildZip([
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([
+        ["company name", "First Name", "Last Name", "EMAIL", "TEL"],
+        ["Ghost Co", "Nobody", "Here", "nobody@ghost.com", "+1 787-000-0000"],
+      ])) },
+    ]);
+    const r = await call(env, "POST", "/admin/api/crm/import", { mode: "repair", xlsx_base64: b64(xlsx) });
+    expect(r.status).toBe(200);
+    expect(r.body.created).toBe(0);
+    expect(r.body.companies_created).toBe(0);
+    expect(r.body.repaired_contacts).toBe(0);
+    expect(r.body.repaired_companies).toBe(0);
+    expect(r.body.skipped).toBe(1);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_companies").get() as any).n).toBe(0);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_contacts").get() as any).n).toBe(0);
+  });
+
+  it("源公司已合并删除：联系人按全局邮箱命中修复，不复活源公司", async () => {
+    const { env, db } = makeEnv();
+    // 合并后形态：源公司已删除，联系人搬到目标公司名下（旧规则电话塌缩）
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, source) VALUES ('c_3', 'Crashboat Surf & Skate', 'csv_import')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO crm_contacts (id, company_id, full_name, email, whatsapp_or_phone, whatsapp)
+       VALUES ('ct_3', 'c_3', 'Rick Morales', 'rick@crashboat.com', '787-555-0199', '787-555-0199')`,
+    ).run();
+    const xlsx = await buildZip([
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([
+        ["company name", "First Name", "Last Name", "TEL", "EMAIL", "Cellphone", "WhatsApp"],
+        ["Crashboat Surf Shop", "Rick", "Morales", "787-555-0199", "rick@crashboat.com", "787-555-0199", "787-555-0199"],
+      ])) },
+    ]);
+    const r = await call(env, "POST", "/admin/api/crm/import", { mode: "repair", xlsx_base64: b64(xlsx) });
+    expect(r.status).toBe(200);
+    expect(r.body.repaired_contacts).toBe(1);
+    expect(r.body.repaired_companies).toBe(0); // 源公司不复活，无公司可修
+    expect(r.body.created).toBe(0);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_companies").get() as any).n).toBe(1);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_contacts").get() as any).n).toBe(1);
+    const ct = db.prepare("SELECT * FROM crm_contacts WHERE id = 'ct_3'").get() as any;
+    expect(ct.tel).toBe("787-555-0199");
+    expect(ct.cellphone).toBe("787-555-0199");
+    expect(ct.company_id).toBe("c_3"); // 留在合并后的目标公司
+  });
+
+  it("修复模式不支持商机表 → 400", async () => {
+    const { env } = makeEnv();
+    const xlsx = await buildZip([
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([
+        ["公司名称", "商机名称", "金额"],
+        ["Acme", "大单", "1200"],
+      ])) },
+    ]);
+    const r = await call(env, "POST", "/admin/api/crm/import", { mode: "repair", xlsx_base64: b64(xlsx) });
+    expect(r.status).toBe(400);
+    expect(String(r.body.detail)).toContain("修复模式");
+  });
+});

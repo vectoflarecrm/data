@@ -2037,17 +2037,27 @@ interface ImportOutcome {
   columns: Record<string, string>;
   /** 未识别的表头（安全忽略）。 */
   unmapped: string[];
+  /** 修复模式（mode=repair）：回填了空缺字段的公司/联系人数。 */
+  repairedCompanies?: number;
+  repairedContacts?: number;
 }
 
-/** 把已解析的行列矩阵导入 DB（CSV 与 Excel 共用核心）。 */
+/** 把已解析的行列矩阵导入 DB（CSV 与 Excel 共用核心）。
+ *  repair=true 为修复模式：只回填已有公司/联系人的空缺字段（0042 电话三列、
+ *  admin 对齐列、industry 归位），绝不新建任何行 —— 用于旧规则导入的存量
+ *  表格重新上传修正（普通重导入会因已合并公司复活重复数据，不安全）。 */
 async function runImportRows(
   entity: ImportEntity,
   rows: string[][],
   env: AdminEnv,
+  repair = false,
 ): Promise<ImportOutcome> {
   if (rows.length < 2) throw new HttpError(400, "至少需要表头 + 一行数据");
   if (rows.length - 1 > IMPORT_ROW_LIMIT) {
     throw new HttpError(400, `最多 ${IMPORT_ROW_LIMIT} 行数据`);
+  }
+  if (repair && entity === "deals") {
+    throw new HttpError(400, "修复模式仅支持公司 / 联系人表");
   }
 
   const { keyByIndex, keys } = matchColumns(entity, rows[0]);
@@ -2115,7 +2125,7 @@ async function runImportRows(
   // 公司时，第一行可能只带编号没带品牌，不能因此拦掉后续行对该字段的回填。
   // 0042 admin 对齐列同样只补空值；is_* 勾选真值只升不降（置 1）。
   const enrichedFields = new Set<string>();
-  const backfillCompany = (id: string, companyRec: Record<string, string>): void => {
+  const backfillCompany = (id: string, companyRec: Record<string, string>): boolean => {
     const fields: Array<[string, string]> = [
       ["address", (companyRec.address ?? "").trim()],
       ["external_id", (companyRec.external_id ?? "").trim()],
@@ -2131,6 +2141,19 @@ async function runImportRows(
       enrichedFields.add(`${id}|${field}`);
       sets.push(`${field} = COALESCE(NULLIF(${field}, ''), ?${binds.length + 1}, ${field})`);
       binds.push(value);
+    }
+    // 0042 归位修复：旧规则把「产品与服务」写进 industry（当年还没有
+    // products_services 列）。回填 products_services 的同时，若 industry 仍是
+    // 同一文本（且 products_services 原本为空）→ 清掉，避免同一文本存两份。
+    const productsRepair = (companyRec.products_services ?? "").trim();
+    if (productsRepair && !enrichedFields.has(`${id}|industry_repair`)) {
+      enrichedFields.add(`${id}|industry_repair`);
+      sets.push(
+        `industry = CASE WHEN TRIM(IFNULL(industry, '')) != ''` +
+          ` AND (products_services IS NULL OR TRIM(products_services) = '')` +
+          ` AND industry = ?${binds.length + 1} THEN NULL ELSE industry END`,
+      );
+      binds.push(productsRepair);
     }
     // 0042 is_* 业务角色：真值导入只升不降（已有 1 不动，0 → 1）。
     for (const flag of COMPANY_ROLE_FLAGS) {
@@ -2155,12 +2178,13 @@ async function runImportRows(
       sets.push(`domain = COALESCE(NULLIF(domain, ''), ?${binds.length + 1}, domain)`);
       binds.push(domain);
     }
-    if (!sets.length) return;
+    if (!sets.length) return false;
     statements.push(
       env.DB.prepare(
         `UPDATE crm_companies SET ${sets.join(", ")} WHERE id = ?${binds.length + 1}`,
       ).bind(...binds, id),
     );
+    return true;
   };
 
   const resolveCompany = (
@@ -2233,6 +2257,150 @@ async function runImportRows(
     companiesCreated++;
     return { id };
   };
+
+  if (repair) {
+    const repairedCompanies = new Set<string>();
+    const repairedContacts = new Set<string>();
+    if (entity === "companies") {
+      for (let i = 1; i < rows.length; i++) {
+        const rec = buildRec(rows[i]);
+        const rowIndex = i + 1;
+        const name = (rec.name ?? "").trim();
+        const domain = (rec.domain ?? "").trim().toLowerCase();
+        if (!name && !domain) {
+          result.errors.push(`第 ${rowIndex} 行: 缺少公司名称/域名`);
+          continue;
+        }
+        const existingId =
+          (name ? companies.byName.get(name.toLowerCase()) : undefined) ??
+          (domain ? companies.byDomain.get(domain) : undefined);
+        if (!existingId) {
+          result.skipped++; // 不存在的公司：跳过，不新建
+          continue;
+        }
+        if (backfillCompany(existingId, rec)) repairedCompanies.add(existingId);
+      }
+    } else {
+      // contacts 修复：联系人按 公司+邮箱 → 全局邮箱（合并后换了公司）→
+      // 公司+姓名 匹配；命中则只补空缺字段，未命中只修公司或跳过。
+      interface RepairContactRow {
+        id: string;
+        company_id: string;
+        lemail: string;
+        lname: string;
+        tel: string;
+        cellphone: string;
+        whatsapp: string;
+        wop: string;
+        job_title: string;
+      }
+      const existingContacts = await env.DB.prepare(
+        "SELECT id, company_id, LOWER(IFNULL(email, '')) AS lemail, LOWER(full_name) AS lname," +
+          " IFNULL(tel, '') AS tel, IFNULL(cellphone, '') AS cellphone, IFNULL(whatsapp, '') AS whatsapp," +
+          " IFNULL(whatsapp_or_phone, '') AS wop, IFNULL(job_title, '') AS job_title" +
+          " FROM crm_contacts LIMIT 50000",
+      ).all<RepairContactRow>();
+      const byCompanyEmail = new Map<string, RepairContactRow>();
+      const byCompanyName = new Map<string, RepairContactRow>();
+      const byEmail = new Map<string, RepairContactRow>();
+      for (const r of existingContacts.results) {
+        if (r.lemail) {
+          byCompanyEmail.set(`${r.company_id}|${r.lemail}`, r);
+          if (!byEmail.has(r.lemail)) byEmail.set(r.lemail, r);
+        }
+        byCompanyName.set(`${r.company_id}|n|${r.lname}`, r);
+      }
+      for (let i = 1; i < rows.length; i++) {
+        const rec = buildRec(rows[i]);
+        const companyRec = recFromRow(rows[i], companyMap);
+        const rowIndex = i + 1;
+        let fullName = (rec.full_name ?? "").trim();
+        if (!fullName) {
+          fullName = [(rec.first_name ?? "").trim(), (rec.last_name ?? "").trim()]
+            .filter(Boolean)
+            .join(" ");
+        }
+        const name = (rec.company ?? "").trim();
+        const domain = (companyRec.domain ?? "").trim().toLowerCase();
+        // 公司匹配（不新建）：名称优先，域名兜底。
+        const companyId =
+          (name ? companies.byName.get(name.toLowerCase()) : undefined) ??
+          (domain ? companies.byDomain.get(domain) : undefined) ??
+          null;
+        const emailRaw = (rec.email ?? "").trim();
+        const email = emailRaw.toLowerCase();
+        let matched: RepairContactRow | undefined;
+        if (email && companyId) matched = byCompanyEmail.get(`${companyId}|${email}`);
+        if (!matched && email) matched = byEmail.get(email);
+        if (!matched && !email && companyId) {
+          matched = byCompanyName.get(`${companyId}|n|${fullName.toLowerCase()}`);
+        }
+        if (!matched) {
+          // 联系人未命中：公司命中 → 只修公司；都未命中 → 跳过
+          // （合并后已删除的源公司绝不复活）。
+          if (companyId && backfillCompany(companyId, companyRec)) {
+            repairedCompanies.add(companyId);
+          }
+          result.skipped++;
+          continue;
+        }
+        if (companyId && backfillCompany(companyId, companyRec)) {
+          repairedCompanies.add(companyId);
+        }
+        // 0042 电话归位：只补空缺；旧导入塌缩进遗留列的 TEL/手机号
+        // （迁移时镜像到了 whatsapp）在表内 WhatsApp 为空且与 tel/cellphone
+        // 同值时清空归位 —— 号码已在正确的列里，不再冒充 WhatsApp。
+        const newTel = (rec.tel ?? "").trim();
+        const newCell = (rec.cellphone ?? "").trim();
+        const newWa = (rec.whatsapp ?? "").trim();
+        const dbTel = matched.tel.trim();
+        const dbCell = matched.cellphone.trim();
+        const dbWa = matched.whatsapp.trim();
+        const dbWop = matched.wop.trim();
+        const finalTel = dbTel || newTel;
+        const finalCell = dbCell || newCell;
+        let finalWa = dbWa || newWa;
+        if (!newWa && dbWa && dbWa === dbWop && (dbWa === newTel || dbWa === newCell)) {
+          finalWa = "";
+        }
+        const finalMirror = finalWa || finalCell || finalTel;
+        const sets: string[] = [];
+        const binds: unknown[] = [];
+        const setCol = (col: string, v: string): void => {
+          sets.push(`${col} = ?${binds.length + 1}`);
+          binds.push(v || null);
+        };
+        if (finalTel !== dbTel) setCol("tel", finalTel);
+        if (finalCell !== dbCell) setCol("cellphone", finalCell);
+        if (finalWa !== dbWa) setCol("whatsapp", finalWa);
+        if (!dbWop && finalMirror) setCol("whatsapp_or_phone", finalMirror);
+        if (!matched.lemail && emailRaw) setCol("email", emailRaw);
+        const newJob = (rec.job_title ?? "").trim();
+        if (!matched.job_title.trim() && newJob) setCol("job_title", newJob);
+        if (sets.length) {
+          statements.push(
+            env.DB.prepare(
+              `UPDATE crm_contacts SET ${sets.join(", ")} WHERE id = ?${binds.length + 1}`,
+            ).bind(...binds, matched.id),
+          );
+          repairedContacts.add(matched.id);
+        }
+      }
+    }
+    for (let i = 0; i < statements.length; i += 50) {
+      await env.DB.batch(statements.slice(i, i + 50));
+    }
+    return {
+      created: 0,
+      companiesCreated: 0,
+      skipped: result.skipped,
+      errors: result.errors,
+      columns,
+      unmapped,
+      repairedCompanies: repairedCompanies.size,
+      repairedContacts: repairedContacts.size,
+    };
+  }
 
   if (entity === "companies") {
     for (let i = 1; i < rows.length; i++) {
@@ -2448,9 +2616,9 @@ async function runImportRows(
   };
 }
 
-/** 统一导入响应（含识别到的实体、列映射与未识别表头）。 */
+/** 统一导入响应（含识别到的实体、列映射与未识别表头；修复模式附带修复计数）。 */
 function importResponse(outcome: ImportOutcome, entity: ImportEntity): Response {
-  return jsonResponse({
+  const payload: Record<string, unknown> = {
     created: outcome.created,
     companies_created: outcome.companiesCreated,
     skipped: outcome.skipped,
@@ -2459,7 +2627,13 @@ function importResponse(outcome: ImportOutcome, entity: ImportEntity): Response 
     entity_used: entity,
     columns: outcome.columns,
     unmapped: outcome.unmapped,
-  });
+  };
+  if (outcome.repairedContacts !== undefined || outcome.repairedCompanies !== undefined) {
+    payload.mode = "repair";
+    payload.repaired_contacts = outcome.repairedContacts ?? 0;
+    payload.repaired_companies = outcome.repairedCompanies ?? 0;
+  }
+  return jsonResponse(payload);
 }
 
 /** POST /admin/api/crm/import — CSV 文本（粘贴或前端读取的文件内容）。 */
@@ -2477,12 +2651,14 @@ async function importCrmCsv(
   const csv = reqString(body.csv, "csv", 400_000);
   const rows = parseCsv(csv);
   const entity = resolveImportEntity(body.entity, rows[0] ?? []);
-  const outcome = await runImportRows(entity, rows, env);
+  const repair = body.mode === "repair";
+  const outcome = await runImportRows(entity, rows, env, repair);
   await auditAdminAction(env, request, auth, "CRM_CSV_IMPORT", `crm_${entity}`, null, {
     rows: rows.length - 1,
     created: outcome.created,
     skipped: outcome.skipped,
     errors: outcome.errors.length,
+    ...(repair ? { mode: "repair", repaired: (outcome.repairedContacts ?? 0) + (outcome.repairedCompanies ?? 0) } : {}),
   });
   return importResponse(outcome, entity);
 }
@@ -2507,12 +2683,14 @@ async function importCrmExcel(
     throw new HttpError(400, e instanceof Error ? e.message : "xlsx 解析失败");
   }
   const entity = resolveImportEntity(body.entity, rows[0] ?? []);
-  const outcome = await runImportRows(entity, rows, env);
+  const repair = body.mode === "repair";
+  const outcome = await runImportRows(entity, rows, env, repair);
   await auditAdminAction(env, request, auth, "CRM_EXCEL_IMPORT", `crm_${entity}`, null, {
     rows: rows.length - 1,
     created: outcome.created,
     skipped: outcome.skipped,
     errors: outcome.errors.length,
+    ...(repair ? { mode: "repair", repaired: (outcome.repairedContacts ?? 0) + (outcome.repairedCompanies ?? 0) } : {}),
   });
   return importResponse(outcome, entity);
 }

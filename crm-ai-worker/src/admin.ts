@@ -5828,7 +5828,8 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 <div class="panel">
 <div class="sec-head"><h2>📥 Excel / CSV 导入</h2></div>
 <p class="hint">支持 .xlsx 和 .csv，公司 / 联系人 / 商机三种实体可自动识别（也可手动指定）。表头智能匹配中英文别名（如「公司名称 / Company Name」「联系电话」「预计成交日期」，无需逐字对应）；Excel 日期序列号、网址形式域名、中文阶段（询盘/报价/赢单…）会自动转换。公司按名称/域名去重；联系人和商机的公司不存在时自动创建。暂不支持旧版 .xls（请在 Excel 中另存为 .xlsx）。</p>
-<div class="toolbar"><select id="impEntity"><option value="auto">自动识别</option><option value="companies">导入公司</option><option value="contacts">导入联系人</option><option value="deals">导入商机</option></select><input type="file" id="impFile" accept=".csv,.xlsx,.txt"><button class="btn btn-p" id="impBtn">开始导入</button></div>
+<div class="toolbar"><select id="impEntity"><option value="auto">自动识别</option><option value="companies">导入公司</option><option value="contacts">导入联系人</option><option value="deals">导入商机</option></select><label style="display:inline-flex;align-items:center;gap:4px;font-weight:600"><input type="checkbox" id="impRepair">修复模式</label><input type="file" id="impFile" accept=".csv,.xlsx,.txt"><button class="btn btn-p" id="impBtn">开始导入</button></div>
+<p class="hint" id="impRepairHint" style="display:none">修复模式：不新建任何公司/联系人/商机，只用表内数据回填<b>已有</b>记录的空缺字段（0042 电话三列 tel/cellphone/whatsapp、公司新列），并归位旧导入错放的数据（产品与服务从 industry 移到 products_services）。适合同一张表在数据库规则升级后重新上传修正存量；表里数据库不存在的行会被跳过。</p>
 <div class="f"><textarea id="impCsv" placeholder="选择 .csv 文件后内容会显示在这里（可编辑），或直接粘贴 CSV；.xlsx 文件则整包上传，无需粘贴。"></textarea></div>
 <div class="hint" id="impMsg"></div>
 </div>
@@ -6702,14 +6703,22 @@ $('impFile').addEventListener('change',function(){
     rd.readAsText(f);
   }
 });
+$('impRepair').onchange=function(){$('impRepairHint').style.display=this.checked?'block':'none';};
 $('impBtn').onclick=function(){
   var csv=$('impCsv').value;
   if(!impXlsx&&!csv.trim()){toast('请先选择文件或粘贴内容',true);return;}
+  if($('impRepair').checked&&$('impEntity').value==='deals'){toast('修复模式仅支持公司 / 联系人表',true);return;}
   $('impMsg').textContent='导入中…';
-  var body=impXlsx?{entity:$('impEntity').value,xlsx_base64:impXlsx}:{entity:$('impEntity').value,csv:csv};
+  var repair=$('impRepair').checked;
+  var body=impXlsx?{entity:$('impEntity').value,mode:repair?'repair':'',xlsx_base64:impXlsx}:{entity:$('impEntity').value,mode:repair?'repair':'',csv:csv};
   api('/admin/api/crm/import',{method:'POST',body:body}).then(function(b){
-    var msg='['+String(b.entity_used||'?')+'] 新建 '+Number(b.created||0)+' · 跳过 '+Number(b.skipped||0)+' · 出错 '+Number(b.error_total||0);
-    if(b.companies_created)msg+='（自动建公司 '+Number(b.companies_created)+'）';
+    var msg;
+    if(b.mode==='repair'){
+      msg='[修复模式·'+String(b.entity_used||'?')+'] 修复联系人 '+Number(b.repaired_contacts||0)+' · 修复公司 '+Number(b.repaired_companies||0)+' · 跳过 '+Number(b.skipped||0)+' · 出错 '+Number(b.error_total||0)+'（未新建任何记录）';
+    }else{
+      msg='['+String(b.entity_used||'?')+'] 新建 '+Number(b.created||0)+' · 跳过 '+Number(b.skipped||0)+' · 出错 '+Number(b.error_total||0);
+      if(b.companies_created)msg+='（自动建公司 '+Number(b.companies_created)+'）';
+    }
     if(b.columns&&Object.keys(b.columns).length){
       var ks=Object.keys(b.columns),pairs=[];
       for(var i=0;i<ks.length;i++)pairs.push(ks[i]+'→'+b.columns[ks[i]]);
