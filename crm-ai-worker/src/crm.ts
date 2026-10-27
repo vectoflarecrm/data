@@ -667,7 +667,9 @@ async function mergeCompanies(
     env.DB.prepare("DELETE FROM crm_companies WHERE id = ?1").bind(sourceId),
   ];
   if (inheritDomain) {
-    statements.unshift(
+    // 域名继承必须排在 DELETE 来源之后：domain 是 UNIQUE 列，来源行还
+    // 占着该域名时先写目标会撞唯一约束、整批中止（生产 500 事故）。
+    statements.push(
       env.DB.prepare("UPDATE crm_companies SET domain = ?1 WHERE id = ?2").bind(
         source.domain,
         targetId,

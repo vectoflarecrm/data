@@ -330,6 +330,28 @@ describe("公司合并 (merge)", () => {
     expect(r.status).toBe(400);
   });
 
+  it("inherits the source domain after the source row is freed (UNIQUE domain)", async () => {
+    // 生产事故回归：domain 是 UNIQUE 列，域名继承 UPDATE 若排在 DELETE
+    // 来源之前，来源行还占着该域名时目标写入撞唯一约束 → 整批 500。
+    const { db, env } = await makeDb();
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, source)
+       VALUES ('tgt_d', 'No Domain Co', 'csv_import'),
+              ('src_d', 'Has Domain Co', 'csv_import')`,
+    ).run();
+    db.prepare(
+      `UPDATE crm_companies SET domain = 'hasdomain.com' WHERE id = 'src_d'`,
+    ).run();
+    const merged = await call(env, "POST", "/admin/api/crm/companies/merge", {
+      target_company_id: "tgt_d",
+      source_company_id: "src_d",
+    });
+    expect(merged.status).toBe(200);
+    const row = db.prepare("SELECT * FROM crm_companies WHERE id = 'tgt_d'").get() as any;
+    expect(row.domain).toBe("hasdomain.com");
+    expect(db.prepare("SELECT id FROM crm_companies WHERE id = 'src_d'").get()).toBeUndefined();
+  });
+
   it("preserves source 0041 fields and remarks when merging (数据保全)", async () => {
     const { db, env } = await makeDb();
     // 目标：已有行业/地址，无编号/经销品牌/来源备注（0041 字段面板创建
