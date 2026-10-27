@@ -365,6 +365,133 @@ jobs:
             exit 1
           }
 
+      - name: Migrate CRM 0032-0039 columns (production schema gap fix)
+        # Root cause of the 500 on /admin/crm: migrations 0032-0039 added ALTER
+        # TABLE columns that schema.sql's CREATE TABLE IF NOT EXISTS can never
+        # add to an existing database, and no workflow step ever ran those
+        # files against production (verified via D1 REST: 19 columns missing
+        # across customers/crm_companies/crm_contacts/crm_deals/crm_activities).
+        # Run the six migration files per-statement — duplicate column /
+        # already exists means already applied (re-runs are no-ops); any other
+        # SQL error fails the deploy. The pragma canary counts at the end prove
+        # the gap is closed before the generic runner below baselines these
+        # files as applied.
+        run: |
+          python3 - <<'PY'
+          import re, subprocess, sys
+
+          def d1(*args):
+              return subprocess.run(
+                  ['npx', 'wrangler', 'd1', 'execute', 'crm-ai-db', '--remote'] + list(args),
+                  capture_output=True, text=True)
+
+          def fail(msg, out=''):
+              print(msg)
+              print(out)
+              sys.exit(1)
+
+          for path in ['migrations/0032_crm_sales_ext.sql',
+                       'migrations/0034_crm_contactability.sql',
+                       'migrations/0036_domain_email_checks.sql',
+                       'migrations/0037_contact_roles_signal_monitor.sql',
+                       'migrations/0038_source_attribution_task_calendar.sql',
+                       'migrations/0039_lead_discovery.sql']:
+              sql = open(path, encoding='utf-8').read()
+              body = '\n'.join(l for l in sql.split('\n') if not l.lstrip().startswith('--'))
+              stmts = [s.strip() for s in re.split(r';\s*\n', body) if s.strip()]
+              for s in stmts:
+                  p = d1('--command', s)
+                  if p.returncode == 0:
+                      continue
+                  out = p.stdout + p.stderr
+                  if 'duplicate column name' in out or 'already exists' in out:
+                      print(f'TOLERATED (already applied): {path}: {s.splitlines()[0][:80]}')
+                      continue
+                  fail(f'FAILED: {path}: {s}', out)
+              print(f'applied: {path} ({len(stmts)} statements)')
+
+          checks = [
+              ('crm_deals', "('lost_reason','won_at','position','archived_at')", 4),
+              ('crm_contacts', "('email_status','email_verified_at','unsubscribed_at','do_not_contact','email_check_status','procurement_role','role_evidence','role_updated_at')", 8),
+              ('crm_companies', "('customer_since','do_not_contact','domain_email_status','source')", 4),
+              ('crm_activities', "('owner')", 1),
+              ('customers', "('discovery_rule_id')", 1),
+          ]
+          for table, cols, want in checks:
+              p = d1('--json', '--command',
+                     f"SELECT COUNT(*) AS n FROM pragma_table_info('{table}') WHERE name IN {cols}")
+              if p.returncode != 0:
+                  fail(f'canary check failed: {table}', p.stdout + p.stderr)
+              out = p.stdout + p.stderr
+              if f'"n": {want}' not in out:
+                  fail(f'canary check failed: {table}: expected {want} columns of {cols}', out)
+          print('CRM 0032-0039 gap fix complete: all canary columns present')
+          PY
+
+      - name: Apply pending D1 migrations
+        # Generic migration runner (closes the 0032-0039 gap class: ALTERs in
+        # migrations/*.sql that schema.sql's CREATE TABLE IF NOT EXISTS can
+        # never add to an existing database). Every file in migrations/ not
+        # yet recorded in schema_migrations runs in numeric order on deploy.
+        # First run baselines: the repo convention is that schema.sql stays
+        # in sync with every migration, so a schema.sql-initialized database
+        # already reflects all existing files — they are recorded as applied
+        # without re-running; only files added after this step run
+        # automatically. Tolerates duplicate column / already exists (an
+        # idempotent re-run); any other SQL error fails the deploy.
+        run: |
+          python3 - <<'PY'
+          import glob, os, re, subprocess, sys
+
+          def d1(*args):
+              return subprocess.run(
+                  ['npx', 'wrangler', 'd1', 'execute', 'crm-ai-db', '--remote'] + list(args),
+                  capture_output=True, text=True)
+
+          def fail(p, where):
+              print(f'{where} failed:')
+              print(p.stdout + p.stderr)
+              sys.exit(1)
+
+          p = d1('--command', 'CREATE TABLE IF NOT EXISTS schema_migrations '
+              '(id TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime(\'now\')))')
+          if p.returncode != 0:
+              fail(p, 'schema_migrations create')
+
+          p = d1('--json', '--command', 'SELECT id FROM schema_migrations')
+          if p.returncode != 0:
+              fail(p, 'schema_migrations read')
+          applied = set(re.findall(r'"id":\s*"([^"]+)"', p.stdout))
+
+          files = sorted(glob.glob('migrations/*.sql'))
+          ids = [os.path.basename(f)[:-4] for f in files]
+
+          if not applied:
+              values = ','.join(f"('{i}')" for i in ids)
+              p = d1('--command', f'INSERT INTO schema_migrations (id) VALUES {values}')
+              if p.returncode != 0:
+                  fail(p, 'baseline insert')
+              print(f'first run: baselined {len(ids)} existing migration files as applied')
+          else:
+              pending = [(f, i) for f, i in zip(files, ids) if i not in applied]
+              print(f'{len(applied)} recorded, {len(pending)} pending')
+              for f, i in pending:
+                  p = d1('--file', f'./{f}')
+                  if p.returncode != 0:
+                      out = p.stdout + p.stderr
+                      if 'duplicate column name' in out or 'already exists' in out:
+                          print(f'TOLERATED (idempotent re-run): {i}')
+                      else:
+                          print(f'MIGRATION FAILED: {i}')
+                          print(out)
+                          sys.exit(1)
+                  p = d1('--command', f"INSERT INTO schema_migrations (id) VALUES ('{i}')")
+                  if p.returncode != 0:
+                      fail(p, f'record {i}')
+                  print(f'applied: {i}')
+          print('migration runner complete')
+          PY
+
       - name: Migrate customers profile columns
         # ADD COLUMN is not idempotent in D1 files (a duplicate column fails
         # the whole batch), so migrations run per-statement and ignore the
