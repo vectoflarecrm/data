@@ -5647,10 +5647,10 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 </div>
 
 <div class="panel">
-<div class="sec-head"><h2>📥 CSV 导入</h2></div>
-<p class="hint">支持公司 / 联系人 / 商机三种实体。表头可用中文或英文（公司导入：名称、域名、国家、行业、分级、备注；联系人导入：公司、姓名、职务、邮箱、电话、LinkedIn、主联；商机导入：公司、名称、阶段、金额、条款、预计成交、输单原因）。公司按名称/域名自动去重；联系人和商机的公司不存在时自动创建；未知阶段回落到询盘。</p>
-<div class="toolbar"><select id="impEntity"><option value="companies">导入公司</option><option value="contacts">导入联系人</option><option value="deals">导入商机</option></select><input type="file" id="impFile" accept=".csv,text/csv,text/plain"><button class="btn btn-p" id="impBtn">开始导入</button></div>
-<div class="f"><textarea id="impCsv" placeholder="选择上面的文件，或把 CSV 内容（表头 + 数据行）直接粘贴到这里…"></textarea></div>
+<div class="sec-head"><h2>📥 Excel / CSV 导入</h2></div>
+<p class="hint">支持 .xlsx 和 .csv，公司 / 联系人 / 商机三种实体可自动识别（也可手动指定）。表头智能匹配中英文别名（如「公司名称 / Company Name」「联系电话」「预计成交日期」，无需逐字对应）；Excel 日期序列号、网址形式域名、中文阶段（询盘/报价/赢单…）会自动转换。公司按名称/域名去重；联系人和商机的公司不存在时自动创建。暂不支持旧版 .xls（请在 Excel 中另存为 .xlsx）。</p>
+<div class="toolbar"><select id="impEntity"><option value="auto">自动识别</option><option value="companies">导入公司</option><option value="contacts">导入联系人</option><option value="deals">导入商机</option></select><input type="file" id="impFile" accept=".csv,.xlsx,.txt"><button class="btn btn-p" id="impBtn">开始导入</button></div>
+<div class="f"><textarea id="impCsv" placeholder="选择 .csv 文件后内容会显示在这里（可编辑），或直接粘贴 CSV；.xlsx 文件则整包上传，无需粘贴。"></textarea></div>
 <div class="hint" id="impMsg"></div>
 </div>
 </main>
@@ -6369,28 +6369,52 @@ $('promoteBtn').onclick=function(){
     $('promoteMsg').textContent='';
     toast(b.already_promoted?'该线索已是销售公司（幂等跳过）':'已提升为销售公司: '+b.company.name);
     $('promoteId').value='';
+    loadAll();
+  }).catch(function(err){$('promoteMsg').textContent='';toast(err.message,true);});
+};
+var impXlsx='';
 $('impFile').addEventListener('change',function(){
   var f=this.files&&this.files[0];
   if(!f)return;
-  var rd=new FileReader();
-  rd.onload=function(){$('impCsv').value=String(rd.result||'');};
-  rd.readAsText(f);
+  var fname=(f.name||'').toLowerCase();
+  if(fname.lastIndexOf('.xlsx')===fname.length-5){
+    var xr=new FileReader();
+    xr.onload=function(){
+      var bytes=new Uint8Array(xr.result);
+      var bin='',CH=32768;
+      for(var i=0;i<bytes.length;i+=CH)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+CH));
+      impXlsx=btoa(bin);
+      $('impCsv').value='';
+      $('impMsg').textContent='已选择 Excel 文件「'+f.name+'」（'+bytes.length+' 字节），点击「开始导入」上传解析。';
+    };
+    xr.readAsArrayBuffer(f);
+  }else{
+    impXlsx='';
+    var rd=new FileReader();
+    rd.onload=function(){$('impCsv').value=String(rd.result||'');};
+    rd.readAsText(f);
+  }
 });
 $('impBtn').onclick=function(){
   var csv=$('impCsv').value;
-  if(!csv.trim()){toast('请先选择 CSV 文件或粘贴内容',true);return;}
+  if(!impXlsx&&!csv.trim()){toast('请先选择文件或粘贴内容',true);return;}
   $('impMsg').textContent='导入中…';
-  api('/admin/api/crm/import',{method:'POST',body:{entity:$('impEntity').value,csv:csv}}).then(function(b){
-    var msg='新建 '+Number(b.created||0)+' · 跳过 '+Number(b.skipped||0)+' · 出错 '+Number(b.error_total||0);
+  var body=impXlsx?{entity:$('impEntity').value,xlsx_base64:impXlsx}:{entity:$('impEntity').value,csv:csv};
+  api('/admin/api/crm/import',{method:'POST',body:body}).then(function(b){
+    var msg='['+String(b.entity_used||'?')+'] 新建 '+Number(b.created||0)+' · 跳过 '+Number(b.skipped||0)+' · 出错 '+Number(b.error_total||0);
     if(b.companies_created)msg+='（自动建公司 '+Number(b.companies_created)+'）';
+    if(b.columns&&Object.keys(b.columns).length){
+      var ks=Object.keys(b.columns),pairs=[];
+      for(var i=0;i<ks.length;i++)pairs.push(ks[i]+'→'+b.columns[ks[i]]);
+      msg+='；列映射: '+pairs.join('，');
+    }
+    if(b.unmapped&&b.unmapped.length)msg+='；未识别列(忽略): '+b.unmapped.join('，');
     $('impMsg').textContent=msg+((b.errors&&b.errors.length)?' —— '+b.errors.join('；'):'');
     toast('导入完成');
+    impXlsx='';
+    $('impFile').value='';
     loadAll();
   }).catch(function(err){$('impMsg').textContent='';toast(err.message,true);});
-};
-
-loadAll();
-  }).catch(function(err){$('promoteMsg').textContent='';toast(err.message,true);});
 };
 $('coNew').onclick=function(){['ncName','ncDomain','ncCountry','ncIndustry'].forEach(function(id){$(id).value='';});openModal('mNewCo');};
 $('ncSave').onclick=function(){

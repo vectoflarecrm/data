@@ -49,6 +49,18 @@ import {
 } from "./signal-monitor";
 import { COMPANY_SOURCES, getAttribution } from "./crm-attribution";
 import { buildIcsFeed, getTaskCalendar } from "./crm-calendar";
+import {
+  IMPORT_ENTITIES,
+  REQUIRED_KEYS,
+  type ImportEntity,
+  cleanDomainValue,
+  decodeBase64,
+  detectEntity,
+  excelSerialToIsoDate,
+  matchColumns,
+  normalizeStageValue,
+  parseXlsx,
+} from "./crm-excel-import";
 
 export interface CrmCompanyRow {
   id: string;
@@ -1443,41 +1455,6 @@ export function parseCsv(text: string): string[][] {
   return rows.filter((r) => r.some((c) => c.trim() !== ""));
 }
 
-const IMPORT_ENTITIES = ["companies", "contacts", "deals"] as const;
-type ImportEntity = (typeof IMPORT_ENTITIES)[number];
-
-/** Column aliases per entity — English and Chinese headers both accepted. */
-const IMPORT_HEADERS: Record<ImportEntity, Record<string, string>> = {
-  companies: {
-    name: "name", 名称: "name", 公司名称: "name", 公司: "name",
-    domain: "domain", 域名: "domain",
-    country: "country", 国家: "country",
-    industry: "industry", 行业: "industry",
-    tier: "tier", 分级: "tier",
-    chinese_remarks: "chinese_remarks", 备注: "chinese_remarks", 中文备注: "chinese_remarks",
-  },
-  contacts: {
-    company: "company", 公司: "company", 公司名称: "company", company_name: "company",
-    full_name: "full_name", 姓名: "full_name", 联系人: "full_name",
-    job_title: "job_title", 职务: "job_title", title: "job_title",
-    email: "email", 邮箱: "email",
-    whatsapp_or_phone: "whatsapp_or_phone", 电话: "whatsapp_or_phone", phone: "whatsapp_or_phone",
-    whatsapp: "whatsapp_or_phone", 手机: "whatsapp_or_phone",
-    linkedin_url: "linkedin_url", linkedin: "linkedin_url",
-    is_primary: "is_primary", 主联: "is_primary",
-  },
-  deals: {
-    company: "company", 公司: "company", 公司名称: "company", company_name: "company",
-    title: "title", 名称: "title", 商机名称: "title", 商机: "title",
-    stage: "stage", 阶段: "stage",
-    amount: "amount", 金额: "amount",
-    incoterms: "incoterms", 条款: "incoterms", 贸易条款: "incoterms",
-    expected_close_date: "expected_close_date", 预计成交: "expected_close_date",
-    预计成交日: "expected_close_date",
-    lost_reason: "lost_reason", 输单原因: "lost_reason",
-  },
-};
-
 interface ImportCompanyCache {
   byName: Map<string, string>; // lowercased name → id
   byDomain: Map<string, string>; // lowercased domain → id
@@ -1503,37 +1480,66 @@ interface ImportResult {
 
 const IMPORT_ROW_LIMIT = 1000;
 
-async function importCrmCsv(
-  request: Request,
+/** entity 解析：'auto'（默认）按表头自动识别，否则显式三选一。 */
+function resolveImportEntity(raw: unknown, header: string[]): ImportEntity {
+  if (raw === undefined || raw === null || raw === "" || raw === "auto") {
+    return detectEntity(header);
+  }
+  return oneOf(raw, IMPORT_ENTITIES, "entity");
+}
+
+interface ImportOutcome {
+  created: number;
+  companiesCreated: number;
+  skipped: number;
+  errors: string[];
+  /** 识别成功的列映射（表头原文 → 字段名），随响应回传。 */
+  columns: Record<string, string>;
+  /** 未识别的表头（安全忽略）。 */
+  unmapped: string[];
+}
+
+/** 把已解析的行列矩阵导入 DB（CSV 与 Excel 共用核心）。 */
+async function runImportRows(
+  entity: ImportEntity,
+  rows: string[][],
   env: AdminEnv,
-  auth: AdminAuthContext,
-): Promise<Response> {
-  const body = await readJsonBody(request);
-  const entity = oneOf(body.entity, IMPORT_ENTITIES, "entity");
-  const csv = reqString(body.csv, "csv", 400_000);
-  const rows = parseCsv(csv);
-  if (rows.length < 2) throw new HttpError(400, "CSV 至少需要表头 + 一行数据");
+): Promise<ImportOutcome> {
+  if (rows.length < 2) throw new HttpError(400, "至少需要表头 + 一行数据");
   if (rows.length - 1 > IMPORT_ROW_LIMIT) {
-    throw new HttpError(400, `CSV 最多 ${IMPORT_ROW_LIMIT} 行数据`);
+    throw new HttpError(400, `最多 ${IMPORT_ROW_LIMIT} 行数据`);
   }
 
-  const aliases = IMPORT_HEADERS[entity];
-  const header = rows[0].map((h) => h.trim().toLowerCase());
-  const keyByIndex = header.map((h) => aliases[h] ?? null);
-  const keys = new Set(keyByIndex.filter((k): k is string => k !== null));
-  const requireKey = (key: string, label: string) => {
-    if (!keys.has(key)) {
-      throw new HttpError(400, `缺少必需列「${label}」，可用表头: ${Object.keys(aliases).join(" / ")}`);
-    }
-  };
-  if (entity === "companies") requireKey("name", "名称");
-  else if (entity === "contacts") {
-    requireKey("full_name", "姓名");
-    requireKey("company", "公司");
-  } else {
-    requireKey("title", "名称");
-    requireKey("company", "公司");
+  const { keyByIndex, keys } = matchColumns(entity, rows[0]);
+  const missing = REQUIRED_KEYS[entity].filter((k) => !keys.has(k));
+  if (missing.length) {
+    throw new HttpError(
+      400,
+      `表头无法识别必需列: ${missing.join(" / ")}。请检查表头（支持中英文，如「公司名称 / Company Name」「姓名」「Email」）`,
+    );
   }
+  const columns: Record<string, string> = {};
+  const unmapped: string[] = [];
+  rows[0].forEach((h, i) => {
+    const t = h.trim();
+    if (!t) return;
+    if (keyByIndex[i]) columns[t] = keyByIndex[i]!;
+    else unmapped.push(t);
+  });
+
+  // 行 → rec（智能值清洗：Website URL → 域名、Excel 日期序列号 → ISO、中文阶段 → 英文）。
+  const buildRec = (row: string[]): Record<string, string> => {
+    const rec: Record<string, string> = {};
+    for (let c = 0; c < keyByIndex.length; c++) {
+      if (keyByIndex[c]) rec[keyByIndex[c]!] = (row[c] ?? "").trim();
+    }
+    if (rec.domain) rec.domain = cleanDomainValue(rec.domain);
+    if (rec.expected_close_date) {
+      rec.expected_close_date = excelSerialToIsoDate(rec.expected_close_date);
+    }
+    if (rec.stage) rec.stage = normalizeStageValue(rec.stage);
+    return rec;
+  };
 
   const result: ImportResult = { created: 0, skipped: 0, errors: [] };
   type CrmStatement = ReturnType<AdminEnv["DB"]["prepare"]>;
@@ -1575,10 +1581,7 @@ async function importCrmCsv(
 
   if (entity === "companies") {
     for (let i = 1; i < rows.length; i++) {
-      const rec: Record<string, string> = {};
-      for (let c = 0; c < keyByIndex.length; c++) {
-        if (keyByIndex[c]) rec[keyByIndex[c]!] = rows[i][c] ?? "";
-      }
+      const rec = buildRec(rows[i]);
       const rowIndex = i + 1;
       const name = (rec.name ?? "").trim();
       const domain = (rec.domain ?? "").trim().toLowerCase();
@@ -1618,10 +1621,7 @@ async function importCrmCsv(
     ).all<{ company_id: string; lemail: string }>();
     const seen = new Set(existing.results.map((r) => `${r.company_id}|${r.lemail}`));
     for (let i = 1; i < rows.length; i++) {
-      const rec: Record<string, string> = {};
-      for (let c = 0; c < keyByIndex.length; c++) {
-        if (keyByIndex[c]) rec[keyByIndex[c]!] = rows[i][c] ?? "";
-      }
+      const rec = buildRec(rows[i]);
       const rowIndex = i + 1;
       const fullName = (rec.full_name ?? "").trim();
       if (!fullName) {
@@ -1667,10 +1667,7 @@ async function importCrmCsv(
     ).all<{ stage: string; m: number | null }>();
     for (const r of posRows.results) maxPos.set(r.stage, r.m ?? 0);
     for (let i = 1; i < rows.length; i++) {
-      const rec: Record<string, string> = {};
-      for (let c = 0; c < keyByIndex.length; c++) {
-        if (keyByIndex[c]) rec[keyByIndex[c]!] = rows[i][c] ?? "";
-      }
+      const rec = buildRec(rows[i]);
       const rowIndex = i + 1;
       const title = (rec.title ?? "").trim();
       if (!title) {
@@ -1728,20 +1725,83 @@ async function importCrmCsv(
   for (let i = 0; i < statements.length; i += 50) {
     await env.DB.batch(statements.slice(i, i + 50));
   }
+  return {
+    created: result.created,
+    companiesCreated,
+    skipped: result.skipped,
+    errors: result.errors,
+    columns,
+    unmapped,
+  };
+}
 
+/** 统一导入响应（含识别到的实体、列映射与未识别表头）。 */
+function importResponse(outcome: ImportOutcome, entity: ImportEntity): Response {
+  return jsonResponse({
+    created: outcome.created,
+    companies_created: outcome.companiesCreated,
+    skipped: outcome.skipped,
+    error_total: outcome.errors.length,
+    errors: outcome.errors.slice(0, 20),
+    entity_used: entity,
+    columns: outcome.columns,
+    unmapped: outcome.unmapped,
+  });
+}
+
+/** POST /admin/api/crm/import — CSV 文本（粘贴或前端读取的文件内容）。 */
+async function importCrmCsv(
+  request: Request,
+  env: AdminEnv,
+  auth: AdminAuthContext,
+): Promise<Response> {
+  const body = await readJsonBody(request);
+  // Excel 上传走同一入口（body 带 xlsx_base64 字段时切换到 xlsx 分支；
+  // body 只读一次，避免二次消费 Request 流）。
+  if (typeof body.xlsx_base64 === "string" && body.xlsx_base64) {
+    return await importCrmExcel(body, request, env, auth);
+  }
+  const csv = reqString(body.csv, "csv", 400_000);
+  const rows = parseCsv(csv);
+  const entity = resolveImportEntity(body.entity, rows[0] ?? []);
+  const outcome = await runImportRows(entity, rows, env);
   await auditAdminAction(env, request, auth, "CRM_CSV_IMPORT", `crm_${entity}`, null, {
     rows: rows.length - 1,
-    created: result.created,
-    skipped: result.skipped,
-    errors: result.errors.length,
+    created: outcome.created,
+    skipped: outcome.skipped,
+    errors: outcome.errors.length,
   });
-  return jsonResponse({
-    created: result.created,
-    companies_created: companiesCreated,
-    skipped: result.skipped,
-    error_total: result.errors.length,
-    errors: result.errors.slice(0, 20),
+  return importResponse(outcome, entity);
+}
+
+/** POST /admin/api/crm/import — Excel(.xlsx)：base64 → 解析 → 同一核心导入。 */
+async function importCrmExcel(
+  body: Record<string, unknown>,
+  request: Request,
+  env: AdminEnv,
+  auth: AdminAuthContext,
+): Promise<Response> {
+  const b64 = reqString(body.xlsx_base64, "xlsx_base64", 2_800_000);
+  const bytes = decodeBase64(b64);
+  // D0 CF = 旧版 OLE2 .xls（Excel 97-2003）文件头 —— 明确提示另存为 .xlsx。
+  if (bytes.length > 4 && bytes[0] === 0xd0 && bytes[1] === 0xcf) {
+    throw new HttpError(400, "暂不支持旧版 .xls：请在 Excel/WPS 中「另存为 .xlsx」后重新导入");
+  }
+  let rows: string[][];
+  try {
+    rows = await parseXlsx(bytes);
+  } catch (e) {
+    throw new HttpError(400, e instanceof Error ? e.message : "xlsx 解析失败");
+  }
+  const entity = resolveImportEntity(body.entity, rows[0] ?? []);
+  const outcome = await runImportRows(entity, rows, env);
+  await auditAdminAction(env, request, auth, "CRM_EXCEL_IMPORT", `crm_${entity}`, null, {
+    rows: rows.length - 1,
+    created: outcome.created,
+    skipped: outcome.skipped,
+    errors: outcome.errors.length,
   });
+  return importResponse(outcome, entity);
 }
 
 
