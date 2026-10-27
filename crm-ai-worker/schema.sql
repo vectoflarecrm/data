@@ -1075,3 +1075,21 @@ CREATE TABLE IF NOT EXISTS lead_discovery_log (
 CREATE INDEX IF NOT EXISTS idx_discovery_log_rule ON lead_discovery_log(rule_id, run_at);
 CREATE INDEX IF NOT EXISTS idx_discovery_log_customer ON lead_discovery_log(customer_id);
 CREATE INDEX IF NOT EXISTS idx_customers_discovery_rule ON customers(discovery_rule_id);
+
+-- 0040 发现成本与合格率（Prospecting Engine 模块 A 验收指标）：每次发现
+-- 运行一条批次记录，搜索积分成本按引擎估算（Tavily advanced=2/次，
+-- Exa/Searlo=1/次，DDG=0），配合 customers.discovery_rule_id 出报表。
+-- 见 migrations/0040。
+CREATE TABLE IF NOT EXISTS lead_discovery_runs (
+  id TEXT PRIMARY KEY,
+  rule_id TEXT NOT NULL,
+  run_at TEXT NOT NULL DEFAULT (datetime('now')),
+  trigger_source TEXT NOT NULL DEFAULT 'manual' CHECK (trigger_source IN ('manual', 'cron')),
+  queries INTEGER NOT NULL DEFAULT 0,
+  candidates INTEGER NOT NULL DEFAULT 0,
+  inserted INTEGER NOT NULL DEFAULT 0,
+  duplicates INTEGER NOT NULL DEFAULT 0,
+  search_credits REAL NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovery_runs_rule ON lead_discovery_runs(rule_id, run_at);

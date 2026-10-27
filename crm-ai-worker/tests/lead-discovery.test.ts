@@ -10,8 +10,10 @@ import {
 import type { GoogleSearchResult } from "../src/web-search";
 
 /* 更新.txt ① 自动寻找新客户（migration 0039）：发现规则 CRUD / 立即运行 /
- * 去重入队 / 运行日志 / cron 到期调度。搜索舰队用 DDG fetch stub 固定行为；
- * Tavily/Exa/Searlo 无 key 时天然短路（多引擎链直接落到 DDG）。 */
+ * 去重入队 / 运行日志 / cron 到期调度。0040 补充批次成本记录（runs 表，
+ * trigger/积分）与合格率报表（GET /admin/api/discovery/stats）。搜索舰队用
+ * DDG fetch stub 固定行为；Tavily/Exa/Searlo 无 key 时天然短路（多引擎链
+ * 直接落到 DDG）。 */
 
 class FakeD1 {
   constructor(private db: any) {}
@@ -79,6 +81,20 @@ function makeDb() {
       source_url TEXT, snippet TEXT,
       outcome TEXT NOT NULL DEFAULT 'inserted' CHECK (outcome IN ('inserted', 'duplicate', 'skipped')),
       customer_id INTEGER
+    );
+    CREATE TABLE lead_discovery_runs (
+      id TEXT PRIMARY KEY, rule_id TEXT NOT NULL,
+      run_at TEXT NOT NULL DEFAULT (datetime('now')),
+      trigger_source TEXT NOT NULL DEFAULT 'manual' CHECK (trigger_source IN ('manual', 'cron')),
+      queries INTEGER NOT NULL DEFAULT 0,
+      candidates INTEGER NOT NULL DEFAULT 0,
+      inserted INTEGER NOT NULL DEFAULT 0,
+      duplicates INTEGER NOT NULL DEFAULT 0,
+      search_credits REAL NOT NULL DEFAULT 0
+    );
+    CREATE TABLE crm_deals (
+      id TEXT PRIMARY KEY, company_id TEXT NOT NULL, title TEXT,
+      stage TEXT, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE crm_companies (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, domain TEXT UNIQUE, industry TEXT,
@@ -383,5 +399,98 @@ describe("① cron 到期调度", () => {
 
     const bare = new DatabaseSync(":memory:");
     expect(await runDueDiscoveryRule({ DB: new FakeD1(bare) } as any)).toBeNull();
+  });
+
+  it("cron 运行的批次记录 trigger_source='cron'（0040）", async () => {
+    const { env, db } = makeEnv();
+    stubDdg();
+    db.prepare(
+      "INSERT INTO lead_discovery_rules (id, name, keywords) VALUES ('auto1', '自动', 'inflatable boat')",
+    ).run();
+    await runDueDiscoveryRule(env as any);
+    const run = db.prepare("SELECT trigger_source, queries, inserted, search_credits FROM lead_discovery_runs WHERE rule_id = 'auto1'").get() as any;
+    expect(run).toMatchObject({ trigger_source: "cron", queries: 3, inserted: 3, search_credits: 0 });
+  });
+});
+
+/* ── ④ 成本与合格率报表（migration 0040，模块 A 验收指标） ─────────────── */
+
+describe("④ 发现成本与合格率报表", () => {
+  it("手动运行写入批次记录：trigger='manual'、DDG 积分 0、报表返回触发来源与积分", async () => {
+    const { env, db } = makeEnv();
+    stubDdg();
+    const created = await call(env, "POST", "/admin/api/discovery/rules", { name: "欧洲", keywords: "inflatable boat", max_results: 10 });
+    const id = created.body.rule.id as string;
+
+    const run = await call(env, "POST", `/admin/api/discovery/rules/${id}/run`);
+    expect(run.body.report).toMatchObject({ inserted: 3, trigger_source: "manual", search_credits: 0 });
+
+    const row = db.prepare("SELECT trigger_source, queries, candidates, inserted, duplicates, search_credits FROM lead_discovery_runs WHERE rule_id = ?").get(id) as any;
+    // 3 组查询 → 批次 queries=3；候选 9（3 组 × 3 条，去重前累计）；
+    // 去重后 3 条入库；DDG 免费 → 积分 0
+    expect(row).toMatchObject({ trigger_source: "manual", queries: 3, candidates: 9, inserted: 3, duplicates: 0, search_credits: 0 });
+  });
+
+  it("runs 表缺失（未迁移窗口）：运行仍成功，批次记录 fail-open 跳过", async () => {
+    const { env, db } = makeEnv();
+    stubDdg();
+    db.exec("DROP TABLE lead_discovery_runs");
+    const created = await call(env, "POST", "/admin/api/discovery/rules", { name: "r", keywords: "sup", max_results: 10 });
+    const id = created.body.rule.id as string;
+    const run = await call(env, "POST", `/admin/api/discovery/rules/${id}/run`);
+    expect(run.status).toBe(200);
+    expect(run.body.report.inserted).toBe(3);
+  });
+
+  it("stats 汇总：漏斗（入库/重复/已研究/合格≥60/已提升/商机）+ 总计 + 最近批次", async () => {
+    const { env, db } = makeEnv();
+    stubDdg();
+    const created = await call(env, "POST", "/admin/api/discovery/rules", { name: "欧洲", keywords: "inflatable boat", max_results: 10 });
+    const id = created.body.rule.id as string;
+    await call(env, "POST", `/admin/api/discovery/rules/${id}/run`); // 3 入库
+
+    // 漏斗加工：Aqua 研究完成 77 分（合格）；Nordic 完成但 40 分（不合格）；OceanPro 仍 pending
+    db.prepare("UPDATE customers SET status = 'completed', lead_score = 77 WHERE company_name = 'Aqua Marine GmbH'").run();
+    db.prepare("UPDATE customers SET status = 'completed', lead_score = 40 WHERE company_name = 'Nordic SUP AB'").run();
+    // 提升 Aqua（promoteLead 保留 customers 行，crm_companies.id = 'c_'||customers.id，
+    // 在 JS 里拼接——生产代码同款，避免 node:sqlite 数字绑定变 'c_1.0'）并开一单商机
+    const aquaId = (db.prepare("SELECT id FROM customers WHERE company_name = 'Aqua Marine GmbH'").get() as any).id;
+    const aquaCrmId = "c_" + aquaId;
+    db.prepare("INSERT INTO crm_companies (id, name, domain, source) VALUES (?, 'Aqua Marine GmbH', 'aquamarine.example', 'promoted')").run(aquaCrmId);
+    db.prepare("INSERT INTO crm_deals (id, company_id, title, stage) VALUES ('deal_1', ?, '首单试单', 'qualified')").run(aquaCrmId);
+
+    const stats = await call(env, "GET", "/admin/api/discovery/stats");
+    expect(stats.status).toBe(200);
+    const rule = stats.body.stats.rules.find((r: any) => r.rule_id === id);
+    expect(rule).toMatchObject({
+      name: "欧洲", runs_count: 1, credits: 0,
+      inserted_count: 3, duplicate_count: 0,
+      discovered_count: 3, completed_count: 2, qualified_count: 1,
+      promoted_count: 1, deal_count: 1,
+    });
+    // totals 为各规则之和（只有一条规则 → 同值）
+    expect(stats.body.stats.totals).toMatchObject({
+      runs_count: 1, inserted_count: 3, qualified_count: 1, promoted_count: 1, deal_count: 1,
+    });
+    // 最近批次：1 条，手动触发、3 组查询
+    expect(stats.body.stats.recent_runs).toHaveLength(1);
+    expect(stats.body.stats.recent_runs[0]).toMatchObject({ rule_id: id, rule_name: "欧洲", trigger_source: "manual", queries: 3, inserted: 3, search_credits: 0 });
+  });
+
+  it("stats 在重复运行后反映重复数与批量批次历史", async () => {
+    const { env } = makeEnv();
+    stubDdg();
+    const created = await call(env, "POST", "/admin/api/discovery/rules", { name: "欧洲", keywords: "inflatable boat", max_results: 10 });
+    const id = created.body.rule.id as string;
+    await call(env, "POST", `/admin/api/discovery/rules/${id}/run`);
+    await call(env, "POST", `/admin/api/discovery/rules/${id}/run`); // 全部重复
+
+    const stats = await call(env, "GET", "/admin/api/discovery/stats");
+    const rule = stats.body.stats.rules.find((r: any) => r.rule_id === id);
+    expect(rule).toMatchObject({ runs_count: 2, inserted_count: 3, duplicate_count: 3 });
+    // 最近批次 2 条（同秒运行顺序不保证，校验重复数的集合而非第一条）
+    expect(stats.body.stats.recent_runs).toHaveLength(2);
+    const dupCounts = stats.body.stats.recent_runs.map((r: any) => r.duplicates).sort((a: number, b: number) => b - a);
+    expect(dupCounts).toEqual([3, 0]);
   });
 });

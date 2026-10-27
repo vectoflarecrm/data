@@ -60,6 +60,7 @@ import {
   deleteDiscoveryRule,
   getDiscoveryLog,
   getDiscoveryRuleById,
+  getDiscoveryStats,
   listDiscoveryRules,
   parseDiscoveryRuleInput,
   runDiscoveryRuleById,
@@ -2799,6 +2800,13 @@ export async function handleAdminApi(request: Request, env: AdminEnv, auth: Admi
       const entries = await getDiscoveryLog(env, discoveryRuleId, limit);
       return jsonResponse({ entries });
     }
+    // GET /admin/api/discovery/stats — 0040 发现成本与合格率报表（模块 A
+    // 验收指标）：每规则的批次/搜索积分/入库/重复率/已研究/合格（≥60）/
+    // 已提升/商机 + 最近 10 个批次。只读，不审计。
+    if (url.pathname === "/admin/api/discovery/stats" && request.method === "GET") {
+      const stats = await getDiscoveryStats(env);
+      return jsonResponse({ stats });
+    }
     // GET /admin/api/customers/pre-filter — 海选: SQL-only targeting over
     // verified fields so users can shrink 50k rows to a research-worthy set
     // before spending any crawl/AI budget (docx 建议 Step 2 Pre-Filter).
@@ -3984,7 +3992,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
 .s-mw64{min-width:64px;width:64px;padding:6px 8px}
 </style></head><body><header class="top"><h1>D1 CRM 客户管理面板</h1><div class="s-dfx-g12-aic"><a href="/admin/security" class="top-nav-link">🛡️ 安全设置</a><a href="/admin/outreach" class="top-nav-link">📧 开发信管理</a><a href="/admin/crm" class="top-nav-link">🎯 CRM 销售</a><a href="/admin/keys" class="top-nav-link">⚡ 动态 Key 池</a><form method="post" action="/admin/logout"><button class="button secondary" type="submit">退出登录</button></form></div></header><main class="wrap">
 <section class="panel"><h2>📥 客户数据导入（Seed CSV）</h2><p class="s-note">粘贴 CSV（需表头，支持列：company_name, country, domain/website, email, product）。原始数据永久保存在 customer_imports（不可变原始层）；域名或公司名匹配的行自动去重跳过，新公司以 pending 状态进入研究队列。</p><div class="toolbar"><input id="importFileName" placeholder="文件名备注（可选）" class="s-xw220"><button class="button" id="importBtn">导入并去重入队</button></div><textarea id="importCsv" rows="6" placeholder="company_name,country,website,email,product\nABC Sports,USA,,buyer@abcsports.com,SUP\nOcean Pro,Germany,oceanpro.de,,RIB"></textarea><div id="importMsg" class="notice hidden"></div></section>
-<section class="panel"><h2>🔍 自动寻找新客户</h2><p class="s-note">按规则自动搜索潜在客户（经销商/进口商/批发商/零售商）：基于现有搜索舰队（Tavily/Exa/Searlo/DuckDuckGo，零新增付费 API）生成查询，提取公司名称与域名后自动去重（对比研究队列、CRM 与历史记录），新公司以 pending 状态进入研究队列——与 CSV 导入同一管线，研究完成后可在 CRM 面板「线索提升」。空闲 cron 自动运行到期规则，也可手动「立即运行」。</p><div class="toolbar"><input id="dRuleName" placeholder="规则名称（如：欧洲桨板经销商）" class="s-xw220"><input id="dRuleKeywords" placeholder="产品关键词（必填，如：inflatable boat SUP）"><input id="dRuleIndustry" placeholder="行业（可选，如：water sports）" class="s-xw220"><input id="dRuleCountry" placeholder="国家（可选，如：Germany）" class="s-xw220"><input id="dRuleMax" type="number" min="1" max="50" value="20" class="s-mw64" title="每次入库上限"><input id="dRuleInterval" type="number" min="1" max="8760" value="168" class="s-mw64" title="自动运行间隔（小时）"><button class="button" id="dRuleAdd">➕ 创建规则</button></div><p class="s-note">两个数字框：每次入库上限（1-50） · 自动运行间隔小时（默认 168 = 每周，cron 空闲时自动跑）</p><div id="dRuleMsg" class="notice hidden"></div><table><thead><tr><th>规则</th><th>关键词</th><th>行业 / 国家</th><th>上限 / 间隔</th><th>状态</th><th>最近运行</th><th>已入库 / 重复</th><th>操作</th></tr></thead><tbody id="dRuleRows"></tbody></table><div id="dLogArea" class="hidden"><div class="section-title" id="dLogTitle">发现记录</div><table><thead><tr><th>时间</th><th>公司</th><th>域名</th><th>结果</th><th>研究状态</th><th>来源</th></tr></thead><tbody id="dLogRows"></tbody></table></div></section>
+<section class="panel"><h2>🔍 自动寻找新客户</h2><p class="s-note">按规则自动搜索潜在客户（经销商/进口商/批发商/零售商）：基于现有搜索舰队（Tavily/Exa/Searlo/DuckDuckGo，零新增付费 API）生成查询，提取公司名称与域名后自动去重（对比研究队列、CRM 与历史记录），新公司以 pending 状态进入研究队列——与 CSV 导入同一管线，研究完成后可在 CRM 面板「线索提升」。空闲 cron 自动运行到期规则，也可手动「立即运行」。</p><div class="toolbar"><input id="dRuleName" placeholder="规则名称（如：欧洲桨板经销商）" class="s-xw220"><input id="dRuleKeywords" placeholder="产品关键词（必填，如：inflatable boat SUP）"><input id="dRuleIndustry" placeholder="行业（可选，如：water sports）" class="s-xw220"><input id="dRuleCountry" placeholder="国家（可选，如：Germany）" class="s-xw220"><input id="dRuleMax" type="number" min="1" max="50" value="20" class="s-mw64" title="每次入库上限"><input id="dRuleInterval" type="number" min="1" max="8760" value="168" class="s-mw64" title="自动运行间隔（小时）"><button class="button" id="dRuleAdd">➕ 创建规则</button></div><p class="s-note">两个数字框：每次入库上限（1-50） · 自动运行间隔小时（默认 168 = 每周，cron 空闲时自动跑）</p><div id="dRuleMsg" class="notice hidden"></div><table><thead><tr><th>规则</th><th>关键词</th><th>行业 / 国家</th><th>上限 / 间隔</th><th>状态</th><th>最近运行</th><th>已入库 / 重复</th><th>操作</th></tr></thead><tbody id="dRuleRows"></tbody></table><div class="section-title">📊 发现成本与合格率（验收指标）</div><p class="s-note">合格 = 研究完成且 lead_score ≥ 60；搜索积分为引擎成本估算（Tavily advanced 2/次、Exa/Searlo 1/次、DuckDuckGo 免费）；合格线索成本 = 搜索积分 ÷ 合格数。</p><div id="dStatsArea"><p class="s-note">加载中…</p></div><div id="dLogArea" class="hidden"><div class="section-title" id="dLogTitle">发现记录</div><table><thead><tr><th>时间</th><th>公司</th><th>域名</th><th>结果</th><th>研究状态</th><th>来源</th></tr></thead><tbody id="dLogRows"></tbody></table></div></section>
 <section class="panel"><h2>🎯 海选过滤器（Pre-Filter）</h2><p class="s-note">纯 SQL 筛选已分析客户（零 AI 成本）。先用条件缩小目标范围：「统计匹配」后可「重新入队」让管道二次研究高价值客户，「写开发信」把当前条件带入定向群发生成分批开发信，「导出全部数据」按当前条件下载全量 CSV。筛选项为下拉勾选，右侧数字是该条件当前命中的客户数（勾选「有邮箱」后只计有邮箱的）。</p><div class="toolbar"><span class="cp-dd" id="ddCountries"><button type="button" class="cp-dd-btn" data-dd="countries">🌍 国家<span class="cp-dd-sum" id="ddSumCountries"></span> ▾</button><div class="cp-dd-panel" id="ddPanelCountries"></div></span><span class="cp-dd" id="ddSegments"><button type="button" class="cp-dd-btn" data-dd="segments">🏷️ 细分<span class="cp-dd-sum" id="ddSumSegments"></span> ▾</button><div class="cp-dd-panel" id="ddPanelSegments"></div></span><span class="cp-dd" id="ddProducts"><button type="button" class="cp-dd-btn" data-dd="products">📦 产品<span class="cp-dd-sum" id="ddSumProducts"></span> ▾</button><div class="cp-dd-panel" id="ddPanelProducts"></div></span><select id="pfMinScore" class="s-mw130"><option value="">最低分：不限</option><option value="40">最低分 ≥40</option><option value="50">最低分 ≥50</option><option value="60">最低分 ≥60</option><option value="70">最低分 ≥70</option><option value="80">最低分 ≥80</option><option value="90">最低分 ≥90</option></select><label class="s-chiprow"><input type="checkbox" id="pfHasEmail"> 有邮箱</label><label class="s-chiprow"><input type="checkbox" id="pfHasSignal"> 有购买信号</label><input id="pfPersonaRoles" placeholder="人物角色（逗号分隔，如：采购总监）" class="s-p8-bd1 ol cbd5e1-br6-fs13-mw180"><button class="button" id="pfCount">统计匹配</button><button class="button secondary" id="pfQueue">匹配项重新入队</button><button class="button" id="pfOutreach">✉️ 写开发信</button><button class="button secondary" id="pfExport">📥 导出全部数据</button></div><div id="pfResult" class="notice hidden"></div></section>
 <section class="panel"><h2>🎯 线索评分权重（Phase 10 可调）</h2><p class="s-note">六维权重决定评分结构：每维 0-100 的整数，六维合计必须恰好 100（总分 0-100 契约）。保存仅写入配置；已评分客户仍是旧权重结果——点「重算存量评分」按当前权重全量重算（不相关客户归零，未完成客户不受影响，数据完整度分不重算，不重新研究）。</p><div class="toolbar" id="lsInputs"></div><p class="s-note" id="lsMeta"></p><div class="toolbar"><span id="lsSum" class="s-fs12-fw700-mt2"></span><button class="button secondary" id="lsDefaultsBtn">恢复默认</button><button class="button" id="lsSaveBtn" disabled>保存权重</button><button class="button secondary" id="lsRescoreBtn">重算存量评分</button></div><div id="lsMsg" class="notice hidden"></div></section>
 <section class="panel"><h2>客户列表</h2><div id="scoreCard" class="hidden s-mb12" ></div><div class="toolbar"><input id="search" placeholder="公司 ID、网址、细分或备注"><select id="status"><option value="">全部状态</option><option value="pending">pending</option><option value="processing">processing</option><option value="completed">completed</option><option value="failed">failed</option></select><button class="button" id="load">刷新</button><span id="summary"></span></div><div id="listMessage"></div><table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>评分</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="pager"><button class="button secondary" id="prev">上一页</button><span id="pageInfo"></span><button class="button secondary" id="next">下一页</button></div></section>
@@ -4056,7 +4064,7 @@ const ADMIN_PANEL_HTML = `<!doctype html>
     var t=ev.target.closest('[data-drun],[data-dtoggle],[data-dlog],[data-ddel]');if(!t)return;
     var id;
     if(t.hasAttribute('data-drun')){t.disabled=true;
-      api('/admin/api/discovery/rules/'+encodeURIComponent(t.getAttribute('data-drun'))+'/run',{method:'POST'}).then(function(d){var r=d.report;showMsg('dRuleMsg','✅ 运行完成：执行 '+r.queries.length+' 组查询，新入库 '+r.inserted+' 家，重复跳过 '+r.duplicates+' 家。新线索已进入研究队列（客户列表 pending 可见，研究完成后可在 CRM 提升）。',true);dLoadRules()}).catch(function(e){showMsg('dRuleMsg',e.message,false)}).finally(function(){t.disabled=false});return}
+      api('/admin/api/discovery/rules/'+encodeURIComponent(t.getAttribute('data-drun'))+'/run',{method:'POST'}).then(function(d){var r=d.report;showMsg('dRuleMsg','✅ 运行完成：执行 '+r.queries.length+' 组查询，新入库 '+r.inserted+' 家，重复跳过 '+r.duplicates+' 家。新线索已进入研究队列（客户列表 pending 可见，研究完成后可在 CRM 提升）。',true);dLoadRules();dLoadStats()}).catch(function(e){showMsg('dRuleMsg',e.message,false)}).finally(function(){t.disabled=false});return}
     if(t.hasAttribute('data-dtoggle')){id=t.getAttribute('data-dtoggle');var r0=dRules[id];if(!r0)return;var next=r0.enabled?0:1;
       api('/admin/api/discovery/rules/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(dRuleBody(r0,{enabled:next}))}).then(function(){dLoadRules()}).catch(function(e){showMsg('dRuleMsg',e.message,false)});return}
     if(t.hasAttribute('data-dlog')){id=t.getAttribute('data-dlog');
@@ -4068,9 +4076,29 @@ const ADMIN_PANEL_HTML = `<!doctype html>
         $('dLogArea').classList.remove('hidden')}).catch(function(e2){showMsg('dRuleMsg',e2.message,false)});return}
     if(t.hasAttribute('data-ddel')){id=t.getAttribute('data-ddel');var r1=dRules[id];if(!r1)return;
       if(!confirm('确定删除发现规则「'+r1.name+'」？已发现的公司与运行记录会保留（可追溯），只是不再自动搜索。'))return;
-      api('/admin/api/discovery/rules/'+encodeURIComponent(id),{method:'DELETE'}).then(function(){showMsg('dRuleMsg','已删除规则「'+r1.name+'」',true);dLoadRules()}).catch(function(e){showMsg('dRuleMsg',e.message,false)});return}
+      api('/admin/api/discovery/rules/'+encodeURIComponent(id),{method:'DELETE'}).then(function(){showMsg('dRuleMsg','已删除规则「'+r1.name+'」',true);dLoadRules();dLoadStats()}).catch(function(e){showMsg('dRuleMsg',e.message,false)});return}
   });
+  // 0040 发现成本与合格率报表: totals chips + per-rule funnel + recent
+  // batches. Numbers come straight from GET /admin/api/discovery/stats;
+  // ratios (重复率/合格率/合格线索成本) are computed client-side with '—'
+  // guards so a fresh install never shows NaN.
+  var dPct=function(n,base){return base>0?Math.round(n/base*1000)/10+'%':'—'};
+  var dChip=function(icon,label,val){return '<div class="s-bgf8fafc-bd1 ol e2e8f0-br8-p10 14-dfx-aic-g8"><span class="s-fs18">'+icon+'</span><div><div class="s-fw600-fs13">'+label+'</div><div>'+val+'</div></div></div>'};
+  var dStatsRow=function(s,cls){var dupBase=s.inserted_count+s.duplicate_count;var cost=s.qualified_count>0?(Math.round(s.credits/s.qualified_count*100)/100+' 积分'):'—';
+    return '<tr'+(cls?' style="'+cls+'"':'')+'><td>'+esc(s.name)+'</td><td>'+s.runs_count+'</td><td>'+s.credits+'</td><td>'+s.inserted_count+'</td><td>'+dPct(s.duplicate_count,dupBase)+'</td><td>'+s.discovered_count+'</td><td>'+s.completed_count+'</td><td><b>'+s.qualified_count+'</b></td><td>'+dPct(s.qualified_count,s.inserted_count)+'</td><td>'+s.promoted_count+'</td><td>'+s.deal_count+'</td><td>'+cost+'</td></tr>'};
+  var dLoadStats=function(){api('/admin/api/discovery/stats').then(function(d){var s=d.stats||{};var rules=s.rules||[];var t=s.totals;var runs=s.recent_runs||[];
+    var h='<div class="s-dfx-fxww-g8">'+dChip('🧮','搜索积分总成本',t.credits)+dChip('📥','累计入库',t.inserted_count)+dChip('🔁','重复率',dPct(t.duplicate_count,t.inserted_count+t.duplicate_count))+dChip('🎯','合格线索（≥60）',t.qualified_count)+dChip('💰','单个合格线索成本',t.qualified_count>0?(Math.round(t.credits/t.qualified_count*100)/100+' 积分'):'—')+'</div>';
+    h+='<div style="overflow-x:auto"><table><thead><tr><th>规则</th><th>批次</th><th>搜索积分</th><th>入库</th><th>重复率</th><th>已发现</th><th>已研究</th><th>合格(≥60)</th><th>合格率</th><th>已提升</th><th>商机</th><th>合格线索成本</th></tr></thead><tbody>'
+      +rules.map(function(r){return dStatsRow(r,'')}).join('')
+      +(rules.length?dStatsRow(t,'background:#f8fafc;font-weight:600'):'<tr><td colspan="12">暂无发现规则</td></tr>')
+      +'</tbody></table></div>';
+    h+='<div class="section-title">🕘 最近批次（每批一条 lead_discovery_runs 记录）</div><div style="overflow-x:auto"><table><thead><tr><th>时间</th><th>规则</th><th>触发</th><th>查询</th><th>候选</th><th>入库</th><th>重复</th><th>积分</th></tr></thead><tbody>'
+      +(runs.map(function(b){return '<tr><td>'+esc((b.run_at||'').slice(0,19))+'</td><td>'+esc(b.rule_name||b.rule_id)+'</td><td>'+(b.trigger_source==='cron'?'<span class="badge badge-pending">自动</span>':'<span class="badge badge-completed">手动</span>')+'</td><td>'+b.queries+'</td><td>'+b.candidates+'</td><td>'+b.inserted+'</td><td>'+b.duplicates+'</td><td>'+b.search_credits+'</td></tr>'}).join('')||'<tr><td colspan="8">暂无批次记录</td></tr>')
+      +'</tbody></table></div>';
+    $('dStatsArea').innerHTML=h;
+  }).catch(function(e){$('dStatsArea').innerHTML='<div class="notice error">'+esc(e.message)+'</div>'})};
   dLoadRules();
+  dLoadStats();
   // Pre-filter 海选 (docx Step 2)
   /* ── 多选下拉（国家/细分/产品）：勾选式选择项，替代手填输入框 ── */
   var pfDDOpts={countries:[],segments:[],products:[]};

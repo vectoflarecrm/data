@@ -306,20 +306,53 @@ export async function duckduckgoSearch(query: string): Promise<GoogleSearchResul
   }
 }
 
-export async function multiEngineSearch(query: string, env: SearchEnv, tavilyKeyIndex = 0): Promise<GoogleSearchResult[]> {
+/** Per-call estimated credit cost of each fleet engine, used by the
+ * discovery cost report (0040): Tavily advanced search bills 2 credits per
+ * call, Exa/Searlo count 1, keyless DuckDuckGo is free. Estimates only —
+ * the panel reports them as 搜索积分, not real currency. */
+const ENGINE_CREDITS: Record<string, number> = {
+  tavily: 2,
+  searlo: 1,
+  exa: 1,
+  duckduckgo: 0,
+};
+
+export interface SearchUsageStats {
+  /** Engine that served the last winning query ("none" until one does). */
+  engine: string;
+  /** Cumulative estimated credit cost across all counted queries. */
+  credits: number;
+}
+
+export async function multiEngineSearch(query: string, env: SearchEnv, tavilyKeyIndex = 0, stats?: SearchUsageStats): Promise<GoogleSearchResult[]> {
   // Tavily is the primary fleet (up to 60 keys); Exa is the volume fallback
   // (4x more account-efficient); Searlo and keyless DuckDuckGo close the chain.
   // Brave was removed: its free tier now requires a payment method on file.
+  // `stats` (optional, 0040 discovery cost report) records the winning
+  // engine and adds its estimated credit cost — absent for research callers.
   let results = await tavilySearch(query, env, tavilyKeyIndex);
-  if (results.length > 0) return results;
+  if (results.length > 0) {
+    if (stats) { stats.engine = "tavily"; stats.credits += ENGINE_CREDITS.tavily; }
+    return results;
+  }
 
   results = await searloSearch(query, env);
-  if (results.length > 0) return results;
+  if (results.length > 0) {
+    if (stats) { stats.engine = "searlo"; stats.credits += ENGINE_CREDITS.searlo; }
+    return results;
+  }
 
   results = await exaSearch(query, env, tavilyKeyIndex);
-  if (results.length > 0) return results;
+  if (results.length > 0) {
+    if (stats) { stats.engine = "exa"; stats.credits += ENGINE_CREDITS.exa; }
+    return results;
+  }
 
   // DuckDuckGo is always available (no API key needed)
   results = await duckduckgoSearch(query);
+  if (results.length > 0 && stats) {
+    stats.engine = "duckduckgo";
+    stats.credits += ENGINE_CREDITS.duckduckgo;
+  }
   return results;
 }

@@ -5,7 +5,7 @@
 // 照常 enrich）→ 线索提升后进入 CRM。零新增付费 API；每条候选记录进
 // lead_discovery_log，可追溯可复查。
 import { safeLog } from "./security/safe-log";
-import { isNoiseResult, multiEngineSearch, type GoogleSearchResult, type SearchEnv } from "./web-search";
+import { isNoiseResult, multiEngineSearch, type GoogleSearchResult, type SearchEnv, type SearchUsageStats } from "./web-search";
 
 export interface DiscoveryRuleRow {
   id: string;
@@ -52,6 +52,10 @@ export interface DiscoveryRunReport {
   candidates: number;
   inserted: number;
   duplicates: number;
+  /** 0040: who started the run (manual panel click vs idle cron tick). */
+  trigger_source: "manual" | "cron";
+  /** 0040: estimated search-credit cost of the run (engine estimates). */
+  search_credits: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -359,8 +363,12 @@ async function findExistingCrmCompany(env: SearchEnv, candidate: DiscoveryCandid
 
 /** Run one discovery rule now: generate queries → search the fleet → extract
  * candidates → dedupe → insert pending customers + log rows. Also stamps
- * last_run_at so the cron scheduler leaves the rule alone until due. */
-export async function runDiscoveryRule(env: SearchEnv, rule: DiscoveryRuleRow): Promise<DiscoveryRunReport> {
+ * last_run_at so the cron scheduler leaves the rule alone until due, and
+ * (0040) writes one lead_discovery_runs batch row carrying the estimated
+ * search-credit cost for the 成本与合格率 report. */
+export async function runDiscoveryRule(env: SearchEnv, rule: DiscoveryRuleRow, opts?: { trigger?: "manual" | "cron" }): Promise<DiscoveryRunReport> {
+  const trigger: "manual" | "cron" = opts?.trigger === "cron" ? "cron" : "manual";
+  const usage: SearchUsageStats = { engine: "none", credits: 0 };
   const queries = buildDiscoveryQueries(rule);
   const seenDomains = new Set<string>();
   const seenNames = new Set<string>();
@@ -371,7 +379,7 @@ export async function runDiscoveryRule(env: SearchEnv, rule: DiscoveryRuleRow): 
 
   for (const query of queries) {
     if (inserted >= maxResults) break;
-    const results = await multiEngineSearch(query, env);
+      const results = await multiEngineSearch(query, env, 0, usage);
     for (const result of results) {
       if (inserted >= maxResults) break;
       const candidate = extractCandidate(result, query);
@@ -427,13 +435,29 @@ export async function runDiscoveryRule(env: SearchEnv, rule: DiscoveryRuleRow): 
   await env.DB.prepare(
     `UPDATE lead_discovery_rules SET last_run_at = datetime('now') WHERE id = ?`,
   ).bind(rule.id).run();
-  return { rule_id: rule.id, queries, candidates, inserted, duplicates };
+  // 0040 批次记录（fail-open）：表缺失（未迁移窗口）时成本报表缺一条，
+  // 发现本身不受影响。
+  try {
+    await env.DB.prepare(
+      `INSERT INTO lead_discovery_runs (id, rule_id, trigger_source, queries, candidates, inserted, duplicates, search_credits)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(crypto.randomUUID(), rule.id, trigger, queries.length, candidates, inserted, duplicates, usage.credits).run();
+  } catch { /* pre-0040 window: cost report loses one row, discovery unaffected */ }
+  return {
+    rule_id: rule.id,
+    queries,
+    candidates,
+    inserted,
+    duplicates,
+    trigger_source: trigger,
+    search_credits: usage.credits,
+  };
 }
 
 export async function runDiscoveryRuleById(env: SearchEnv, id: string): Promise<DiscoveryRunReport | null> {
   const rule = await getDiscoveryRuleById(env, id);
   if (!rule) return null;
-  return await runDiscoveryRule(env, rule);
+  return await runDiscoveryRule(env, rule, { trigger: "manual" });
 }
 
 /** Cron entry: run at most ONE due enabled rule per idle tick (subrequest
@@ -454,7 +478,104 @@ export async function runDueDiscoveryRule(env: SearchEnv): Promise<DiscoveryRunR
     return null; // pre-0039 database: feature not installed yet
   }
   if (!rule) return null;
-  const report = await runDiscoveryRule(env, rule);
+  const report = await runDiscoveryRule(env, rule, { trigger: "cron" });
   safeLog("log", `[lead-discovery] rule "${rule.name}" run: inserted=${report.inserted} duplicates=${report.duplicates} queries=${report.queries.length}`);
   return report;
+}
+
+// ---------------------------------------------------------------------------
+// 0040 成本与合格率报表（Prospecting Engine 模块 A 验收指标）
+// ---------------------------------------------------------------------------
+
+/** 合格线：研究完成且 lead_score ≥ 60（与评分直方图的「优质」档一致）。 */
+export const DISCOVERY_QUALIFIED_SCORE = 60;
+
+export interface DiscoveryRuleStatsRow {
+  rule_id: string;
+  name: string;
+  runs_count: number;
+  credits: number;
+  inserted_count: number;
+  duplicate_count: number;
+  discovered_count: number;
+  completed_count: number;
+  qualified_count: number;
+  promoted_count: number;
+  deal_count: number;
+}
+
+export interface DiscoveryRunBatchRow {
+  id: string;
+  rule_id: string;
+  rule_name: string | null;
+  run_at: string;
+  trigger_source: string;
+  queries: number;
+  candidates: number;
+  inserted: number;
+  duplicates: number;
+  search_credits: number;
+}
+
+export interface DiscoveryStatsReport {
+  rules: DiscoveryRuleStatsRow[];
+  totals: DiscoveryRuleStatsRow;
+  recent_runs: DiscoveryRunBatchRow[];
+}
+
+/** Per-rule prospecting funnel + cost: 批次/搜索积分 → 入库/重复率 → 已研究
+ * → 合格（完成且 ≥60）→ 已提升 → 商机，及单个合格线索成本（面板计算）。
+ * Aggregations ride the discovery_rule_id provenance column; promoted rows
+ * stay joinable because promoteLead keeps the customers row (id `c_<id>`). */
+export async function getDiscoveryStats(env: SearchEnv): Promise<DiscoveryStatsReport> {
+  const ruleRows = await env.DB.prepare(
+    `SELECT r.id AS rule_id, r.name,
+       (SELECT COUNT(*) FROM lead_discovery_runs s WHERE s.rule_id = r.id) AS runs_count,
+       COALESCE((SELECT SUM(s.search_credits) FROM lead_discovery_runs s WHERE s.rule_id = r.id), 0) AS credits,
+       (SELECT COUNT(*) FROM lead_discovery_log l WHERE l.rule_id = r.id AND l.outcome = 'inserted') AS inserted_count,
+       (SELECT COUNT(*) FROM lead_discovery_log l WHERE l.rule_id = r.id AND l.outcome = 'duplicate') AS duplicate_count,
+       (SELECT COUNT(*) FROM customers cu WHERE cu.discovery_rule_id = r.id) AS discovered_count,
+       (SELECT COUNT(*) FROM customers cu WHERE cu.discovery_rule_id = r.id AND cu.status = 'completed') AS completed_count,
+       (SELECT COUNT(*) FROM customers cu WHERE cu.discovery_rule_id = r.id AND cu.status = 'completed' AND cu.lead_score >= ?) AS qualified_count,
+       (SELECT COUNT(*) FROM crm_companies cc WHERE cc.id IN (SELECT 'c_' || cu.id FROM customers cu WHERE cu.discovery_rule_id = r.id)) AS promoted_count,
+       (SELECT COUNT(*) FROM crm_deals d WHERE d.company_id IN (SELECT 'c_' || cu.id FROM customers cu WHERE cu.discovery_rule_id = r.id)) AS deal_count
+     FROM lead_discovery_rules r
+     ORDER BY r.created_at DESC, r.id`,
+  ).bind(DISCOVERY_QUALIFIED_SCORE).all<DiscoveryRuleStatsRow>();
+  const rules = ruleRows.results ?? [];
+  // Totals: plain JS sum over the per-rule rows (discovery_rule_id is one
+  // value per customer, so no row is ever counted twice across rules).
+  const totals: DiscoveryRuleStatsRow = {
+    rule_id: "__all__",
+    name: "全部规则",
+    runs_count: 0,
+    credits: 0,
+    inserted_count: 0,
+    duplicate_count: 0,
+    discovered_count: 0,
+    completed_count: 0,
+    qualified_count: 0,
+    promoted_count: 0,
+    deal_count: 0,
+  };
+  for (const r of rules) {
+    totals.runs_count += r.runs_count;
+    totals.credits += r.credits;
+    totals.inserted_count += r.inserted_count;
+    totals.duplicate_count += r.duplicate_count;
+    totals.discovered_count += r.discovered_count;
+    totals.completed_count += r.completed_count;
+    totals.qualified_count += r.qualified_count;
+    totals.promoted_count += r.promoted_count;
+    totals.deal_count += r.deal_count;
+  }
+  const runRows = await env.DB.prepare(
+    `SELECT s.id, s.rule_id, r.name AS rule_name, s.run_at, s.trigger_source,
+            s.queries, s.candidates, s.inserted, s.duplicates, s.search_credits
+     FROM lead_discovery_runs s
+     LEFT JOIN lead_discovery_rules r ON r.id = s.rule_id
+     ORDER BY s.run_at DESC, s.id DESC
+     LIMIT 10`,
+  ).all<DiscoveryRunBatchRow>();
+  return { rules, totals, recent_runs: runRows.results ?? [] };
 }
