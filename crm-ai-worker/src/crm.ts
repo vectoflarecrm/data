@@ -1464,16 +1464,18 @@ export function parseCsv(text: string): string[][] {
 interface ImportCompanyCache {
   byName: Map<string, string>; // lowercased name → id
   byDomain: Map<string, string>; // lowercased domain → id
+  domainById: Map<string, string | null>; // id → domain（域名回填需知公司自身是否已有域名）
 }
 
 async function loadCompanyCache(env: AdminEnv): Promise<ImportCompanyCache> {
   const rows = await env.DB.prepare(
     "SELECT id, name, domain FROM crm_companies LIMIT 20000",
   ).all<{ id: string; name: string; domain: string | null }>();
-  const cache: ImportCompanyCache = { byName: new Map(), byDomain: new Map() };
+  const cache: ImportCompanyCache = { byName: new Map(), byDomain: new Map(), domainById: new Map() };
   for (const r of rows.results) {
     cache.byName.set(r.name.toLowerCase(), r.id);
     if (r.domain) cache.byDomain.set(r.domain.toLowerCase(), r.id);
+    cache.domainById.set(r.id, r.domain);
   }
   return cache;
 }
@@ -1581,9 +1583,9 @@ async function runImportRows(
   let companiesCreated = 0;
   const companies = await loadCompanyCache(env);
 
-  // 已有公司回填 0041 扩展列（地址/外部编号/经销代理品牌）：只补空值
-  // （NULLIF+COALESCE），不覆盖人工修改。按「公司 × 字段」去重——多行同公司
-  // 时，第一行可能只带编号没带品牌，不能因此拦掉后续行对该字段的回填。
+  // 已有公司回填 0041 扩展列（地址/外部编号/经销代理品牌）与空缺域名：只补
+  // 空值（NULLIF+COALESCE），不覆盖人工修改。按「公司 × 字段」去重——多行同
+  // 公司时，第一行可能只带编号没带品牌，不能因此拦掉后续行对该字段的回填。
   const enrichedFields = new Set<string>();
   const backfillCompany = (id: string, companyRec: Record<string, string>): void => {
     const fields: Array<[string, string]> = [
@@ -1598,6 +1600,22 @@ async function runImportRows(
       enrichedFields.add(`${id}|${field}`);
       sets.push(`${field} = COALESCE(NULLIF(${field}, ''), ?${binds.length + 1}, ${field})`);
       binds.push(value);
+    }
+    // 域名回填：官网在后续行才出现（首行是 Facebook 主页/空）时补绑；仅当
+    // 公司自身无域名、且域名未被其他公司占用（含本次导入内的认领）——
+    // domain 唯一约束 + 经销商共用品牌官网不可抢绑。
+    const domain = (companyRec.domain ?? "").trim().toLowerCase();
+    if (
+      domain &&
+      !companies.domainById.get(id) &&
+      !companies.byDomain.has(domain) &&
+      !enrichedFields.has(`${id}|domain`)
+    ) {
+      enrichedFields.add(`${id}|domain`);
+      companies.byDomain.set(domain, id);
+      companies.domainById.set(id, domain);
+      sets.push(`domain = COALESCE(NULLIF(domain, ''), ?${binds.length + 1}, domain)`);
+      binds.push(domain);
     }
     if (!sets.length) return;
     statements.push(
@@ -1636,6 +1654,7 @@ async function runImportRows(
     const companyName = name || domain;
     if (name) companies.byName.set(name.toLowerCase(), id);
     if (bindDomain) companies.byDomain.set(bindDomain, id);
+    companies.domainById.set(id, bindDomain);
     statements.push(
       env.DB.prepare(
         `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status,
@@ -1681,6 +1700,7 @@ async function runImportRows(
       const id = crypto.randomUUID();
       companies.byName.set(name.toLowerCase(), id);
       if (domain) companies.byDomain.set(domain, id);
+      companies.domainById.set(id, domain || null);
       statements.push(
         env.DB.prepare(
           `INSERT INTO crm_companies (id, name, domain, industry, country, tier, lead_status,

@@ -654,6 +654,40 @@ describe("POST /admin/api/crm/import — Excel 智能导入", () => {
     });
   });
 
+  it("首行是 Facebook 主页、后续行才有真官网 → 域名回填不丢（Kanoa Kayaks 场景）", async () => {
+    const { env, db } = makeEnv();
+    const xlsx = await buildZip([
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([
+        ["company name", "First Name", "Last Name", "Website"],
+        ["Kanoa Kayaks", "A", "B", "facebook.com/kanoakayaks"], // 社交主页 → 清洗为空
+        ["KANOA Kayaks", "C", "D", "https://kanoapr.com/"], // 大小写变体 + 真官网
+      ])) },
+    ]);
+    const r = await call(env, "POST", "/admin/api/crm/import", { xlsx_base64: b64(xlsx) });
+    expect(r.status).toBe(200);
+    expect(r.body.created).toBe(2); // 大小写归并成一家公司，两个联系人都入库
+    expect(r.body.companies_created).toBe(1);
+    const co = db.prepare("SELECT * FROM crm_companies").get() as any;
+    expect(co.domain).toBe("kanoapr.com"); // 后续行的真官网回填成功
+  });
+
+  it("域名已被其他公司占用 → 不抢绑（经销商共用品牌官网场景）", async () => {
+    const { env, db } = makeEnv();
+    const xlsx = await buildZip([
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([
+        ["company name", "First Name", "Last Name", "Website"],
+        ["West Marine (Fajardo)", "A", "B", "westmarine.com"],
+        ["West Marine San Juan", "C", "D", "westmarine.com"], // 同域名不同公司
+      ])) },
+    ]);
+    const r = await call(env, "POST", "/admin/api/crm/import", { xlsx_base64: b64(xlsx) });
+    expect(r.status).toBe(200);
+    expect(r.body.companies_created).toBe(2); // 两家独立公司
+    const rows = (db.prepare("SELECT name, domain FROM crm_companies ORDER BY name").all() as any[]);
+    expect(rows[0]).toMatchObject({ name: "West Marine (Fajardo)", domain: "westmarine.com" });
+    expect(rows[1]).toMatchObject({ name: "West Marine San Juan", domain: null }); // 不抢
+  });
+
   it("deals 导入：表内公司级列（国家/官网）同样补全到自动创建的公司", async () => {
     const { env } = makeEnv();
     const xlsx = await buildZip([
