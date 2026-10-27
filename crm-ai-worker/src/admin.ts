@@ -6528,7 +6528,7 @@ function openCompare(aId,bId){
 $('cmpBody').addEventListener('click',function(e){
   var b=e.target.closest('[data-act="cmpMerge"]');if(!b)return;
   var tn=b.getAttribute('data-tname'),sn=b.getAttribute('data-sname');
-  if(!confirm('将把「'+sn+'」的联系人、商机、动态全部并入「'+tn+'」并删除「'+sn+'」。\n缺失字段自动补齐，来源中文备注以 [并入备注] 保留。\n确定继续？'))return;
+  if(!confirm('将把「'+sn+'」的联系人、商机、动态全部并入「'+tn+'」并删除「'+sn+'」。\\n缺失字段自动补齐，来源中文备注以 [并入备注] 保留。\\n确定继续？'))return;
   api('/admin/api/crm/companies/merge',{method:'POST',body:{target_company_id:b.getAttribute('data-tgt'),source_company_id:b.getAttribute('data-src')}}).then(function(){toast('合并完成：已保留「'+tn+'」');closeModal('mCompare');loadAll();}).catch(function(err){toast(err.message,true);});
 });
 function moveDeal(dealId,stage,pos){
