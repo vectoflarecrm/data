@@ -6323,8 +6323,13 @@ function loadAll(){
 function openDetail(id){
   api('/admin/api/crm/companies/'+encodeURIComponent(id)).then(function(b){
     var c=b.company,contacts=b.contacts||[],deals=b.deals||[],acts=b.activities||[],csg=b.signals||[];
+    STATE.detail=c;
     var h='<h3>'+esc(c.name)+' '+tierBadge(c.tier)+' '+statusBadge(c.lead_status)+(c.customer_since?' <span class="badge b-cust">正式客户 · '+esc(c.customer_since)+' 起</span>':'')+(Number(c.do_not_contact)?' <span class="badge b-dnc">禁止联系</span>':'')+'</h3>';
-    h+='<p class="hint" style="margin:0 0 10px">ID '+esc(c.id)+' · '+esc(c.domain||'无域名')+' '+(c.domain?domailBadge(c.domain_email_status):'')+' · '+esc(c.country||'国家未知')+' · '+esc(c.industry||'行业未知')+(c.address?' · 📍 '+esc(c.address):'')+(c.external_id?' · 编号 '+esc(c.external_id):'')+(c.dealer_brands?' · 经销/代理品牌: '+esc(c.dealer_brands):'')+(c.merged_from_ids?' · 已并入来源: '+esc(c.merged_from_ids):'')+'</p>';
+    h+='<p class="hint" style="margin:0 0 10px">ID '+esc(c.id)+(c.merged_from_ids?' · 已并入来源: '+esc(c.merged_from_ids):'')+'</p>';
+    h+='<h2 style="font-size:15px;margin:0 0 8px">🏢 公司资料（Excel 导入的内容可直接修改）</h2>';
+    h+='<div class="grid2 f"><div><label>公司名称 *</label><input id="dName" value="'+esc(c.name)+'" maxlength="200"></div><div><label>域名'+(c.domain?' '+domailBadge(c.domain_email_status):'')+'</label><input id="dDomain" value="'+esc(c.domain||'')+'" maxlength="200" placeholder="example.com"></div><div><label>行业</label><input id="dIndustry" value="'+esc(c.industry||'')+'" maxlength="100"></div><div><label>国家/地区</label><input id="dCountry" value="'+esc(c.country||'')+'" maxlength="100"></div></div>';
+    h+='<div class="grid2 f"><div><label>📍 地址</label><input id="dAddress" value="'+esc(c.address||'')+'" maxlength="500"></div><div><label>编号（外部系统 ID）</label><input id="dExternalId" value="'+esc(c.external_id||'')+'" maxlength="100"></div></div>';
+    h+='<div class="f"><label>经销/代理品牌（多个用逗号分隔）</label><input id="dDealerBrands" value="'+esc(c.dealer_brands||'')+'" maxlength="500"></div>';
     h+='<div class="grid2 f"><div><label>分级</label><select id="dTier">';
     ['A','B','C','VIP','unqualified'].forEach(function(t){h+='<option value="'+t+'"'+(t===c.tier?' selected':'')+'>'+TIER_L[t]+'</option>';});
     h+='</select></div><div><label>销售状态</label><select id="dStatus">';
@@ -6724,7 +6729,16 @@ $('dBody').addEventListener('click',function(e){
   var b=e.target.closest('[data-act]');if(!b)return;
   var act=b.getAttribute('data-act'),id=b.getAttribute('data-id');
   if(act==='saveCo'){
-    api('/admin/api/crm/companies/'+encodeURIComponent(id),{method:'PATCH',body:{tier:$('dTier').value,lead_status:$('dStatus').value,source:$('dSource').value,chinese_remarks:$('dRemarks').value}}).then(function(){toast('公司信息已保存');loadAll();}).catch(function(err){toast(err.message,true);});
+    if(!$('dName').value.trim()){toast('公司名称不能为空',true);return;}
+    var o=STATE.detail||{},bd={tier:$('dTier').value,lead_status:$('dStatus').value,source:$('dSource').value,chinese_remarks:$('dRemarks').value};
+    var f1=$('dName').value.trim();if(f1!==o.name)bd.name=f1;
+    var f2=$('dDomain').value.trim();if(f2!==(o.domain||''))bd.domain=f2;
+    var f3=$('dIndustry').value.trim();if(f3!==(o.industry||''))bd.industry=f3;
+    var f4=$('dCountry').value.trim();if(f4!==(o.country||''))bd.country=f4;
+    var f5=$('dAddress').value.trim();if(f5!==(o.address||''))bd.address=f5;
+    var f6=$('dExternalId').value.trim();if(f6!==(o.external_id||''))bd.external_id=f6;
+    var f7=$('dDealerBrands').value.trim();if(f7!==(o.dealer_brands||''))bd.dealer_brands=f7;
+    api('/admin/api/crm/companies/'+encodeURIComponent(id),{method:'PATCH',body:bd}).then(function(){toast('公司信息已保存');loadAll();openDetail(id);}).catch(function(err){toast(err.message,true);});
   }else if(act==='blockCo'||act==='unblockCo'){
     if(act==='blockCo'&&!confirm('标记后该公司的所有对外发送（含域名匹配）都会在发送前被拦截。确定？'))return;
     api('/admin/api/crm/companies/'+encodeURIComponent(id),{method:'PATCH',body:{do_not_contact:act==='blockCo'}}).then(function(){toast(act==='blockCo'?'已标记公司禁止联系，后续发送将被拦截':'已解除公司禁联');openDetail(id);loadCompanies().then(renderStats);}).catch(function(err){toast(err.message,true);});

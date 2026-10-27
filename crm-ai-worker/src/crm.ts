@@ -416,6 +416,19 @@ async function updateCompany(
     sets.push(`country = ?${sets.length + 2}`);
     binds.push(optString(body.country, "country", 100));
   }
+  // 0041 Excel 导入的公司扩展属性：详情页可直接修改导入内容。
+  if ("address" in body) {
+    sets.push(`address = ?${sets.length + 2}`);
+    binds.push(optString(body.address, "address", 500));
+  }
+  if ("external_id" in body) {
+    sets.push(`external_id = ?${sets.length + 2}`);
+    binds.push(optString(body.external_id, "external_id", 100));
+  }
+  if ("dealer_brands" in body) {
+    sets.push(`dealer_brands = ?${sets.length + 2}`);
+    binds.push(optString(body.dealer_brands, "dealer_brands", 500));
+  }
   if ("tier" in body) {
     sets.push(`tier = ?${sets.length + 2}`);
     binds.push(oneOf(body.tier, TIERS, "tier"));

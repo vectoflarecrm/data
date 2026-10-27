@@ -601,6 +601,37 @@ describe("公司 CRUD", () => {
     expect(r.body.company.chinese_remarks).toContain("重点客户");
   });
 
+  it("edits imported 0041 fields (address/external_id/dealer_brands) via PATCH", async () => {
+    const { db, env } = await makeDb();
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, address, external_id, dealer_brands, source)
+       VALUES ('imp_1', 'Imported Co', 'Carr 3, Aguadilla', 'PR-001', 'cressi, Garmin', 'csv_import')`,
+    ).run();
+    const r = await call(env, "PATCH", "/admin/api/crm/companies/imp_1", {
+      name: "Imported Co PR",
+      address: "Carr 2 Km 12, Rincón",
+      dealer_brands: "garmin, starboard",
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.company.name).toBe("Imported Co PR");
+    expect(r.body.company.address).toBe("Carr 2 Km 12, Rincón");
+    expect(r.body.company.dealer_brands).toBe("garmin, starboard");
+    // 未提交的字段不动
+    expect(r.body.company.external_id).toBe("PR-001");
+
+    // 清空导入字段：空串 → NULL
+    const cleared = await call(env, "PATCH", "/admin/api/crm/companies/imp_1", {
+      external_id: "",
+      address: "",
+    });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.company.external_id).toBeNull();
+    expect(cleared.body.company.address).toBeNull();
+
+    const row = db.prepare("SELECT * FROM crm_companies WHERE id = 'imp_1'").get() as any;
+    expect(row.name).toBe("Imported Co PR");
+  });
+
   it("deletes a company and cascades to contacts/deals/activities", async () => {
     const { db, env } = await makeDb();
     await call(env, "POST", "/admin/api/crm/companies", { name: "Del Co" });
