@@ -5832,6 +5832,7 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 <p class="hint" id="impRepairHint" style="display:none">修复模式：不新建任何公司/联系人/商机，只用表内数据回填<b>已有</b>记录的空缺字段（0042 电话三列 tel/cellphone/whatsapp、公司新列），并归位旧导入错放的数据（产品与服务从 industry 移到 products_services）。适合同一张表在数据库规则升级后重新上传修正存量；表里数据库不存在的行会被跳过。</p>
 <div class="f"><textarea id="impCsv" placeholder="选择 .csv 文件后内容会显示在这里（可编辑），或直接粘贴 CSV；.xlsx 文件则整包上传，无需粘贴。"></textarea></div>
 <div class="hint" id="impMsg"></div>
+<div id="impNewList"></div>
 </div>
 </main>
 
@@ -6724,6 +6725,7 @@ $('impBtn').onclick=function(){
   if(!impXlsx&&!csv.trim()){toast('请先选择文件或粘贴内容',true);return;}
   if($('impRepair').checked&&$('impEntity').value==='deals'){toast('修复模式仅支持公司 / 联系人表',true);return;}
   $('impMsg').textContent='导入中…';
+  $('impNewList').innerHTML='';
   var repair=$('impRepair').checked;
   var body=impXlsx?{entity:$('impEntity').value,mode:repair?'repair':'',xlsx_base64:impXlsx}:{entity:$('impEntity').value,mode:repair?'repair':'',csv:csv};
   api('/admin/api/crm/import',{method:'POST',body:body}).then(function(b){
@@ -6741,12 +6743,65 @@ $('impBtn').onclick=function(){
     }
     if(b.unmapped&&b.unmapped.length)msg+='；未识别列(忽略): '+b.unmapped.join('，');
     $('impMsg').textContent=msg+((b.errors&&b.errors.length)?' —— '+b.errors.join('；'):'');
+    renderImportedCompanies(b.created_companies||[]);
     toast('导入完成');
     impXlsx='';
     $('impFile').value='';
     loadAll();
   }).catch(function(err){$('impMsg').textContent='';toast(err.message,true);});
 };
+/* 导入完成后的「本次新建公司」清单：每家一键加入待办任务（type=task），
+ * 也可全部加入 —— 任务出现在上方「✅ 待办任务」面板与公司时间线里。 */
+function renderImportedCompanies(list){
+  var box=$('impNewList');
+  if(!list||!list.length){box.innerHTML='';return;}
+  var h='<div style="margin-top:10px;border-top:1px dashed #d1d5db;padding-top:10px">'
+    +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><strong>🆕 本次新建公司 '+list.length+' 家</strong>'
+    +'<button class="btn btn-p btn-xs" id="impTaskAll">➕ 全部加入待办</button>'
+    +'<span class="hint" style="margin:0">为新公司各建一条待办任务（「待办任务」面板可见），便于逐一跟进</span></div>'
+    +'<div style="margin-top:6px;max-height:260px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;padding:4px 10px">';
+  for(var i=0;i<list.length;i++){
+    h+='<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px dashed #f3f4f6">'
+      +'<span>'+esc(list[i].name)+'</span>'
+      +'<button class="btn btn-s btn-xs" data-imp-task="'+esc(list[i].id)+'" data-imp-name="'+esc(list[i].name)+'">➕ 加入待办</button></div>';
+  }
+  h+='</div></div>';
+  box.innerHTML=h;
+}
+$('impNewList').addEventListener('click',function(e){
+  var addOne=function(id,name,btn){
+    if(btn)btn.disabled=true;
+    return api('/admin/api/crm/activities',{method:'POST',body:{company_id:id,type:'task',summary:'跟进新导入公司「'+name+'」'}}).then(function(){
+      if(btn){btn.textContent='✓ 已加入';btn.disabled=true;}
+    });
+  };
+  var all=e.target.closest?e.target.closest('#impTaskAll'):null;
+  if(all){
+    var btns=this.querySelectorAll('button[data-imp-task]:not(:disabled)');
+    if(!btns.length){toast('列表中的公司都已加入待办');return;}
+    all.disabled=true;
+    var n=btns.length,done=0,chain=Promise.resolve();
+    for(var j=0;j<n;j++){
+      (function(btn){
+        chain=chain.then(function(){
+          return addOne(btn.getAttribute('data-imp-task'),btn.getAttribute('data-imp-name'),btn).then(function(){done++;}).catch(function(err){toast(err.message,true);});
+        });
+      })(btns[j]);
+    }
+    chain.then(function(){
+      toast('已加入待办 '+done+' / '+n+'（待办任务面板可见）');
+      loadTasks();
+      all.disabled=false;
+    });
+    return;
+  }
+  var b=e.target.closest?e.target.closest('[data-imp-task]'):null;
+  if(!b)return;
+  addOne(b.getAttribute('data-imp-task'),b.getAttribute('data-imp-name'),b).then(function(){
+    toast('已加入待办任务');
+    loadTasks();
+  }).catch(function(err){b.disabled=false;toast(err.message,true);});
+});
 $('coNew').onclick=function(){['ncName','ncDomain','ncCountry','ncIndustry'].forEach(function(id){$(id).value='';});openModal('mNewCo');};
 $('ncSave').onclick=function(){
   if(!$('ncName').value.trim()){toast('公司名称不能为空',true);return;}

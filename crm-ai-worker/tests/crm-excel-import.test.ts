@@ -634,6 +634,35 @@ describe("POST /admin/api/crm/import — Excel 智能导入", () => {
     });
   });
 
+  it("导入响应带 created_companies 清单（面板据此渲染「加入待办」入口）", async () => {
+    const { env } = makeEnv();
+    const xlsx = await buildZip([
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([
+        ["公司名称", "联系人姓名", "Email"],
+        ["Acme", "张三", "zhang@acme.com"],
+        ["Beta", "李四", "li@beta.com"],
+      ])) },
+    ]);
+    const r = await call(env, "POST", "/admin/api/crm/import", { xlsx_base64: b64(xlsx) });
+    expect(r.status).toBe(200);
+    expect(r.body.entity_used).toBe("contacts");
+    const created = r.body.created_companies as Array<{ id: string; name: string }>;
+    expect(created.map((c) => c.name).sort()).toEqual(["Acme", "Beta"]);
+    // id 与库中实际公司一致（按钮要按 id 建待办）
+    const list = await call(env, "GET", "/admin/api/crm/companies?limit=200");
+    const ids = new Set<string>(list.body.companies.map((c: { id: string }) => c.id));
+    for (const c of created) expect(ids.has(c.id)).toBe(true);
+    // 重复导入（全部跳过）与修复模式都不新建 → 清单为空数组
+    const again = await call(env, "POST", "/admin/api/crm/import", { xlsx_base64: b64(xlsx) });
+    expect(again.body.created).toBe(0);
+    expect(again.body.created_companies).toEqual([]);
+    const repair = await call(env, "POST", "/admin/api/crm/import", {
+      entity: "contacts", mode: "repair", xlsx_base64: b64(xlsx),
+    });
+    expect(repair.body.mode).toBe("repair");
+    expect(repair.body.created_companies).toEqual([]);
+  });
+
   it("重复导入同一张联系人表：邮箱行与无邮箱行都去重，不重复建联系人", async () => {
     const { env } = makeEnv();
     const sheet = sheetXml(inline([

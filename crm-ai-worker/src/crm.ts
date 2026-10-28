@@ -2040,6 +2040,8 @@ interface ImportOutcome {
   /** 修复模式（mode=repair）：回填了空缺字段的公司/联系人数。 */
   repairedCompanies?: number;
   repairedContacts?: number;
+  /** 本次新建的公司清单（id + 名称）—— 面板据此渲染「加入待办」入口。 */
+  createdCompanies?: Array<{ id: string; name: string }>;
 }
 
 /** 把已解析的行列矩阵导入 DB（CSV 与 Excel 共用核心）。
@@ -2118,6 +2120,7 @@ async function runImportRows(
   type CrmStatement = ReturnType<AdminEnv["DB"]["prepare"]>;
   const statements: CrmStatement[] = [];
   let companiesCreated = 0;
+  const createdCompanies: Array<{ id: string; name: string }> = [];
   const companies = await loadCompanyCache(env);
 
   // 已有公司回填 0041 扩展列（地址/外部编号/经销代理品牌）与空缺域名：只补
@@ -2255,6 +2258,7 @@ async function runImportRows(
       ),
     );
     companiesCreated++;
+    createdCompanies.push({ id, name: companyName });
     return { id };
   };
 
@@ -2466,6 +2470,7 @@ async function runImportRows(
         ),
       );
       result.created++;
+      createdCompanies.push({ id, name });
     }
   } else if (entity === "contacts") {
     // Dedupe key: same company + same email (when present)；无邮箱行按
@@ -2613,6 +2618,7 @@ async function runImportRows(
     errors: result.errors,
     columns,
     unmapped,
+    createdCompanies: createdCompanies.slice(0, 500),
   };
 }
 
@@ -2621,6 +2627,7 @@ function importResponse(outcome: ImportOutcome, entity: ImportEntity): Response 
   const payload: Record<string, unknown> = {
     created: outcome.created,
     companies_created: outcome.companiesCreated,
+    created_companies: outcome.createdCompanies ?? [],
     skipped: outcome.skipped,
     error_total: outcome.errors.length,
     errors: outcome.errors.slice(0, 20),
