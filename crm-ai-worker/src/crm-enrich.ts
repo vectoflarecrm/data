@@ -234,15 +234,20 @@ export async function enqueueForEnrichment(
       for (const row of rows.results) existing.add(row.id);
     }
     if (!existing.size) return 0;
-    const queued = new Set(
-      (
-        await env.DB.prepare(
-          `SELECT company_id FROM crm_enrich_queue WHERE company_id IN (${[...existing].map((_, k) => `?${k + 1}`).join(", ")})`,
-        )
-          .bind(...existing)
-          .all<{ company_id: string }>()
-      ).results.map((r) => r.company_id),
-    );
+    // D1 caps bound parameters at 100 per statement — chunk the IN list so a
+    // 200-company auto-enqueue (or a large import) doesn't blow the limit.
+    const queued = new Set<string>();
+    const existingIds = [...existing];
+    for (let i = 0; i < existingIds.length; i += 50) {
+      const slice = existingIds.slice(i, i + 50);
+      const placeholders = slice.map((_, k) => `?${k + 1}`).join(", ");
+      const rows = await env.DB.prepare(
+        `SELECT company_id FROM crm_enrich_queue WHERE company_id IN (${placeholders})`,
+      )
+        .bind(...slice)
+        .all<{ company_id: string }>();
+      for (const r of rows.results) queued.add(r.company_id);
+    }
     const toInsert = [...existing].filter((id) => !queued.has(id));
     if (!toInsert.length) return 0;
     const now = new Date().toISOString();

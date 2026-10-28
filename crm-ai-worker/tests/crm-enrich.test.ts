@@ -394,4 +394,25 @@ describe("autoEnqueueMissing", () => {
     const pending = db.prepare("SELECT company_id FROM crm_enrich_queue WHERE status = 'pending'").all() as any[];
     expect(pending.map((r) => r.company_id)).toEqual(["c-new"]);
   });
+
+  it("超过 D1 每语句 100 绑定参数上限也全部入队（回归：批量导入后队列一直为空）", async () => {
+    const db = makeDb();
+    const insert = db.prepare("INSERT INTO crm_companies (id, name) VALUES (?, ?)");
+    for (let i = 0; i < 150; i++) insert.run(`c${i}`, `Co ${i}`);
+    // 模拟 D1 硬上限：单条语句绑定参数 > 100 直接抛错。node:sqlite 默认上限
+    // 999，不模拟的话旧的「已入队」单条 IN 查询在本测试里照样能跑通——
+    // 生产（D1 上限 100）却会炸并被 fail-open 吞掉，队列永远为空。
+    const limited = {
+      prepare(sql: string) {
+        if ((sql.match(/\?/g) ?? []).length > 100) {
+          throw new Error("too many SQL variables");
+        }
+        return db.prepare(sql);
+      },
+    };
+    const env = makeEnv(limited as unknown as DatabaseSync);
+    expect(await autoEnqueueMissing(env)).toBe(150);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_enrich_queue").get() as any).n).toBe(150);
+    expect(await autoEnqueueMissing(env)).toBe(0); // 幂等
+  });
 });
