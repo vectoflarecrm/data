@@ -108,6 +108,13 @@ export interface CrmCompanyRow {
   product_categories: string | null;
   company_size: string | null;
   geographic_coverage: string | null;
+  /** 0044 公司社交媒体链接（与 /admin 研究管线 SOCIAL_PLATFORMS 平台一致）。 */
+  facebook_url: string | null;
+  instagram_url: string | null;
+  linkedin_url: string | null;
+  youtube_url: string | null;
+  tiktok_url: string | null;
+  twitter_url: string | null;
   /** 0042 业务角色布尔标签（制造商/进口商/分销商/批发商/零售商/电商/租赁/OEM）。 */
   is_manufacturer: number;
   is_importer: number;
@@ -250,6 +257,13 @@ const COMPANY_TEXT_FIELDS: ReadonlyArray<readonly [string, number]> = [
   ["product_categories", 500],
   ["company_size", 100],
   ["geographic_coverage", 500],
+  // 0044 公司社交媒体链接（导入/PATCH/合并共用；URL 通常 <200 字符）。
+  ["facebook_url", 300],
+  ["instagram_url", 300],
+  ["linkedin_url", 300],
+  ["youtube_url", 300],
+  ["tiktok_url", 300],
+  ["twitter_url", 300],
 ];
 
 /** 0042 业务角色布尔标签（业务类型勾选框，0/1）。 */
@@ -609,7 +623,19 @@ interface PromoteCustomerRow {
   country: string | null;
   lead_score: number | null;
   email: string | null;
+  /** 0044：研究管线验证社媒 JSON（[{platform,url,verified}]），提升时拆列。 */
+  social_accounts_verified: string | null;
 }
+
+/** 0044 promoteLead：研究管线验证社媒的平台名（小写比较）→ 公司社媒列。 */
+const PROMOTE_SOCIAL_COLUMNS: Record<string, string> = {
+  linkedin: "linkedin_url",
+  facebook: "facebook_url",
+  instagram: "instagram_url",
+  twitter: "twitter_url",
+  youtube: "youtube_url",
+  tiktok: "tiktok_url",
+};
 
 function tierFromScore(score: number | null): string {
   if (score === null) return "unqualified";
@@ -630,7 +656,7 @@ async function promoteLead(
     throw new HttpError(400, "customer_id 需要正整数");
   }
   const cust = await env.DB.prepare(
-    "SELECT id, company_id, company_name, domain, industry, country, lead_score, email FROM customers WHERE id = ?1",
+    "SELECT id, company_id, company_name, domain, industry, country, lead_score, email, social_accounts_verified FROM customers WHERE id = ?1",
   )
     .bind(customerId)
     .first<PromoteCustomerRow>();
@@ -702,6 +728,41 @@ async function promoteLead(
     )
       .bind(`${crmId}-e`, crmId, cust.email.split("@")[0] || cust.email, cust.email)
       .run();
+  }
+
+  // 0044 社交媒体：研究管线验证过的社媒（social_accounts_verified JSON）
+  // 按平台拆到公司社媒列；解析失败静默跳过（fail-open，绝不拦提升）。
+  if (cust.social_accounts_verified) {
+    let list: unknown = null;
+    try {
+      list = JSON.parse(cust.social_accounts_verified);
+    } catch {
+      list = null;
+    }
+    if (Array.isArray(list)) {
+      const byColumn = new Map<string, string>();
+      for (const item of list) {
+        if (typeof item !== "object" || item === null) continue;
+        const rec = item as { platform?: unknown; url?: unknown };
+        const platform = typeof rec.platform === "string" ? rec.platform.trim().toLowerCase() : "";
+        const url = typeof rec.url === "string" ? rec.url.trim() : "";
+        const column = PROMOTE_SOCIAL_COLUMNS[platform];
+        if (column && url && !byColumn.has(column)) byColumn.set(column, url.slice(0, 300));
+      }
+      if (byColumn.size) {
+        const sets: string[] = [];
+        const binds: unknown[] = [];
+        for (const [column, url] of byColumn) {
+          sets.push(`${column} = ?${binds.length + 1}`);
+          binds.push(url);
+        }
+        await env.DB.prepare(
+          `UPDATE crm_companies SET ${sets.join(", ")} WHERE id = ?${binds.length + 1}`,
+        )
+          .bind(...binds, crmId)
+          .run();
+      }
+    }
   }
 
   await env.DB.prepare(
@@ -781,6 +842,13 @@ async function mergeCompanies(
     ["product_categories", source.product_categories, target.product_categories],
     ["company_size", source.company_size, target.company_size],
     ["geographic_coverage", source.geographic_coverage, target.geographic_coverage],
+    // 0044 社交媒体链接：目标为空才回填（同其他字符串列机制）。
+    ["facebook_url", source.facebook_url, target.facebook_url],
+    ["instagram_url", source.instagram_url, target.instagram_url],
+    ["linkedin_url", source.linkedin_url, target.linkedin_url],
+    ["youtube_url", source.youtube_url, target.youtube_url],
+    ["tiktok_url", source.tiktok_url, target.tiktok_url],
+    ["twitter_url", source.twitter_url, target.twitter_url],
   ];
   for (const [field, rawSource, rawTarget] of carryFields) {
     const sv = String(rawSource ?? "").trim();

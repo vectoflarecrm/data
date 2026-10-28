@@ -70,6 +70,8 @@ async function makeDb() {
       founded_year TEXT, employee_range TEXT, description TEXT, target_markets TEXT,
       customer_segment TEXT, product_categories TEXT, company_size TEXT,
       geographic_coverage TEXT,
+      facebook_url TEXT, instagram_url TEXT, linkedin_url TEXT,
+      youtube_url TEXT, tiktok_url TEXT, twitter_url TEXT,
       is_manufacturer INTEGER DEFAULT 0, is_importer INTEGER DEFAULT 0,
       is_distributor INTEGER DEFAULT 0, is_wholesaler INTEGER DEFAULT 0,
       is_retailer INTEGER DEFAULT 0, is_ecommerce INTEGER DEFAULT 0,

@@ -283,6 +283,28 @@ export const IMPORT_HEADERS: Record<ImportEntity, Record<string, string>> = {
     company_size: "company_size", companysize: "company_size", 公司规模: "company_size",
     geographic_coverage: "geographic_coverage", geographiccoverage: "geographic_coverage",
     地理覆盖: "geographic_coverage", 覆盖区域: "geographic_coverage",
+    // 0044 公司社交媒体链接（Facebook/Instagram/LinkedIn/YouTube/TikTok/Twitter）。
+    // 注意 matchHeader 后缀优先：「Facebook 主页」归一化后以「主页」结尾会命中
+    // domain 的后缀匹配（抢走包含匹配的 facebook）——「平台+主页/页面/链接/
+    // 账号/频道」组合必须显式列出别名，不能依赖包含匹配兜底。
+    facebook_url: "facebook_url", facebook: "facebook_url", facebook主页: "facebook_url",
+    facebook页面: "facebook_url", facebook专页: "facebook_url", facebook链接: "facebook_url",
+    facebook账号: "facebook_url", fb: "facebook_url", fb主页: "facebook_url",
+    脸书: "facebook_url", 脸书主页: "facebook_url",
+    instagram_url: "instagram_url", instagram: "instagram_url", ins: "instagram_url",
+    instagram主页: "instagram_url", instagram账号: "instagram_url", ins主页: "instagram_url",
+    ins账号: "instagram_url",
+    linkedin_url: "linkedin_url", linkedin: "linkedin_url", linkedin主页: "linkedin_url",
+    linkedin公司主页: "linkedin_url", linkedin专页: "linkedin_url",
+    linkedin页面: "linkedin_url", linkedin链接: "linkedin_url",
+    领英: "linkedin_url", 领英主页: "linkedin_url", 领英公司主页: "linkedin_url",
+    youtube_url: "youtube_url", youtube: "youtube_url", youtube频道: "youtube_url",
+    youtube主页: "youtube_url", youtube账号: "youtube_url", youtube链接: "youtube_url",
+    tiktok_url: "tiktok_url", tiktok: "tiktok_url", tiktok主页: "tiktok_url",
+    tiktok账号: "tiktok_url", tiktok链接: "tiktok_url",
+    twitter_url: "twitter_url", twitter: "twitter_url", twitter主页: "twitter_url",
+    twitter账号: "twitter_url", twitter链接: "twitter_url",
+    推特: "twitter_url", 推特主页: "twitter_url",
     is_manufacturer: "is_manufacturer", ismanufacturer: "is_manufacturer",
     manufacturer: "is_manufacturer", 制造商: "is_manufacturer",
     is_importer: "is_importer", isimporter: "is_importer", importer: "is_importer",

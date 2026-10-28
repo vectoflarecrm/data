@@ -187,6 +187,8 @@ function makeDb() {
       founded_year TEXT, employee_range TEXT, description TEXT, target_markets TEXT,
       customer_segment TEXT, product_categories TEXT, company_size TEXT,
       geographic_coverage TEXT,
+      facebook_url TEXT, instagram_url TEXT, linkedin_url TEXT,
+      youtube_url TEXT, tiktok_url TEXT, twitter_url TEXT,
       is_manufacturer INTEGER DEFAULT 0, is_importer INTEGER DEFAULT 0,
       is_distributor INTEGER DEFAULT 0, is_wholesaler INTEGER DEFAULT 0,
       is_retailer INTEGER DEFAULT 0, is_ecommerce INTEGER DEFAULT 0,
@@ -757,6 +759,63 @@ describe("POST /admin/api/crm/import — Excel 智能导入", () => {
     expect(row.is_manufacturer).toBe(1);
     expect(row.is_retailer).toBe(1);
     expect(row.is_oem).toBe(0);
+  });
+
+  it("companies 表 0044 社媒表头（Facebook主页/ins/领英主页/YouTube频道/TikTok/推特）落社媒列，不误入域名", async () => {
+    const { env, db } = makeEnv();
+    const xlsx = await buildZip([
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([
+        ["公司名称", "Facebook主页", "ins", "领英主页", "YouTube频道", "TikTok", "推特", "域名"],
+        ["Social Boats", "https://facebook.com/socialboats", "https://instagram.com/socialboats",
+         "https://linkedin.com/company/socialboats", "https://youtube.com/@socialboats",
+         "https://tiktok.com/@socialboats", "https://x.com/socialboats", "socialboats.com"],
+      ])) },
+    ]);
+    const r = await call(env, "POST", "/admin/api/crm/import", { xlsx_base64: b64(xlsx) });
+    expect(r.status).toBe(200);
+    expect(r.body.entity_used).toBe("companies");
+    expect(r.body.created).toBe(1);
+    // matchHeader 后缀优先回归：「Facebook主页」以「主页」结尾，绝不能
+    // 被域名（domain）的后缀匹配抢走；所有社媒表头都必须映射到 _url 列。
+    expect(r.body.columns).toMatchObject({
+      "Facebook主页": "facebook_url",
+      ins: "instagram_url",
+      "领英主页": "linkedin_url",
+      "YouTube频道": "youtube_url",
+      TikTok: "tiktok_url",
+      推特: "twitter_url",
+      域名: "domain",
+    });
+    expect(JSON.stringify(r.body.columns)).not.toMatch(/"(Facebook主页|ins|领英主页|YouTube频道|TikTok|推特)":"domain"/);
+    const row = db.prepare("SELECT * FROM crm_companies").get() as any;
+    expect(row.domain).toBe("socialboats.com");
+    expect(row.facebook_url).toBe("https://facebook.com/socialboats");
+    expect(row.instagram_url).toBe("https://instagram.com/socialboats");
+    expect(row.linkedin_url).toBe("https://linkedin.com/company/socialboats");
+    expect(row.youtube_url).toBe("https://youtube.com/@socialboats");
+    expect(row.tiktok_url).toBe("https://tiktok.com/@socialboats");
+    expect(row.twitter_url).toBe("https://x.com/socialboats");
+  });
+
+  it("重复导入回填已有公司的空社媒列，已有社媒不被覆盖", async () => {
+    const { env, db } = makeEnv();
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, facebook_url, source)
+       VALUES ('c_sb', 'Social Boats', 'https://facebook.com/keepme', 'csv_import')`,
+    ).run();
+    const xlsx = await buildZip([
+      { name: "xl/worksheets/sheet1.xml", content: sheetXml(inline([
+        ["公司名称", "Facebook主页", "ins"],
+        ["Social Boats", "https://facebook.com/newvalue", "https://instagram.com/socialboats"],
+      ])) },
+    ]);
+    const r = await call(env, "POST", "/admin/api/crm/import", { xlsx_base64: b64(xlsx) });
+    expect(r.status).toBe(200);
+    expect(r.body.companies_created).toBe(0); // 按名称匹配，不重建
+    const row = db.prepare("SELECT * FROM crm_companies WHERE id = 'c_sb'").get() as any;
+    // 已有 Facebook 不被覆盖；空 Instagram 被回填
+    expect(row.facebook_url).toBe("https://facebook.com/keepme");
+    expect(row.instagram_url).toBe("https://instagram.com/socialboats");
   });
 
   it("重复导入回填已有公司的 0042 空列与 is_* 勾选（TRUE/是 → 只升不降）", async () => {

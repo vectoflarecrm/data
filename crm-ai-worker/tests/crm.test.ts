@@ -67,7 +67,8 @@ async function makeDb() {
   db.exec(`
     CREATE TABLE customers (
       id INTEGER PRIMARY KEY, company_id TEXT, company_name TEXT, domain TEXT,
-      industry TEXT, country TEXT, lead_score INTEGER, email TEXT
+      industry TEXT, country TEXT, lead_score INTEGER, email TEXT,
+      social_accounts_verified TEXT
     );
     CREATE TABLE contacts (
       id INTEGER PRIMARY KEY, contact_id TEXT, company_id TEXT, seq INTEGER,
@@ -85,6 +86,8 @@ async function makeDb() {
       founded_year TEXT, employee_range TEXT, description TEXT, target_markets TEXT,
       customer_segment TEXT, product_categories TEXT, company_size TEXT,
       geographic_coverage TEXT,
+      facebook_url TEXT, instagram_url TEXT, linkedin_url TEXT,
+      youtube_url TEXT, tiktok_url TEXT, twitter_url TEXT,
       is_manufacturer INTEGER DEFAULT 0, is_importer INTEGER DEFAULT 0,
       is_distributor INTEGER DEFAULT 0, is_wholesaler INTEGER DEFAULT 0,
       is_retailer INTEGER DEFAULT 0, is_ecommerce INTEGER DEFAULT 0,
@@ -250,6 +253,43 @@ describe("线索提升 (promote)", () => {
     const { env } = await makeDb();
     const r = await call(env, "POST", "/admin/api/crm/companies/promote", { customer_id: 999 });
     expect(r.status).toBe(404);
+  });
+
+  it("splits verified social accounts into company columns on promote (0044 社媒拆列)", async () => {
+    const { db, env } = await makeDb();
+    db.prepare(
+      `INSERT INTO customers (id, company_id, company_name, domain, lead_score, email, social_accounts_verified)
+       VALUES (31, 'co31', 'Social Co', 'social.com', 70, 'x@social.com', ?)`,
+    ).run(
+      JSON.stringify([
+        { platform: "Facebook", url: "https://facebook.com/socialco", verified: true },
+        { platform: "linkedin", url: "https://linkedin.com/company/social-co", verified: true },
+        { platform: "pinterest", url: "https://pinterest.com/socialco", verified: true },
+      ]),
+    );
+    const r = await call(env, "POST", "/admin/api/crm/companies/promote", { customer_id: 31 });
+    expect(r.status).toBe(201);
+    const row = db.prepare("SELECT * FROM crm_companies WHERE id = 'c_31'").get() as any;
+    // 已知平台按列拆入（平台名大小写不敏感）
+    expect(row.facebook_url).toBe("https://facebook.com/socialco");
+    expect(row.linkedin_url).toBe("https://linkedin.com/company/social-co");
+    // 未知平台（pinterest 无对应列）静默忽略，其余社媒列保持 NULL
+    expect(row.twitter_url).toBeNull();
+    expect(row.instagram_url).toBeNull();
+    expect(row.tiktok_url).toBeNull();
+    expect(row.youtube_url).toBeNull();
+  });
+
+  it("promotes successfully even when social_accounts_verified is malformed JSON (fail-open)", async () => {
+    const { db, env } = await makeDb();
+    db.prepare(
+      `INSERT INTO customers (id, company_id, company_name, domain, lead_score, email, social_accounts_verified)
+       VALUES (32, 'co32', 'Bad Json Co', 'badjson.com', 70, 'x@badjson.com', '{"platform":')`,
+    ).run();
+    const r = await call(env, "POST", "/admin/api/crm/companies/promote", { customer_id: 32 });
+    expect(r.status).toBe(201);
+    const row = db.prepare("SELECT * FROM crm_companies WHERE id = 'c_32'").get() as any;
+    expect(row.facebook_url).toBeNull();
   });
 
   it("blocks promotion when another company already owns the domain (409)", async () => {
@@ -443,6 +483,29 @@ describe("公司合并 (merge)", () => {
     expect(row.is_manufacturer).toBe(1);
     // 目标已有 1 不被来源 0 覆盖（只升不降）
     expect(row.is_retailer).toBe(1);
+  });
+
+  it("preserves social links when merging (0044 社媒保全)", async () => {
+    const { db, env } = await makeDb();
+    // 目标：已有 Facebook；来源：有 Instagram + 另一个 Facebook
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, facebook_url, source)
+       VALUES ('tgt_s', 'Keep Social Co', 'https://facebook.com/keep', 'csv_import')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, facebook_url, instagram_url, source)
+       VALUES ('src_s', 'Dupe Social Co', 'https://facebook.com/dupe', 'https://instagram.com/dupe', 'csv_import')`,
+    ).run();
+    const merged = await call(env, "POST", "/admin/api/crm/companies/merge", {
+      target_company_id: "tgt_s",
+      source_company_id: "src_s",
+    });
+    expect(merged.status).toBe(200);
+    const row = db.prepare("SELECT * FROM crm_companies WHERE id = 'tgt_s'").get() as any;
+    // 目标已有社媒不被来源覆盖
+    expect(row.facebook_url).toBe("https://facebook.com/keep");
+    // 来源独有社媒回填保全
+    expect(row.instagram_url).toBe("https://instagram.com/dupe");
   });
 
   it("404s when the source company does not exist", async () => {
