@@ -4337,6 +4337,10 @@ const ADMIN_PANEL_HTML = `<!doctype html>
   $('requeueBtn').onclick=function(){if(state.selected===null)return;api('/admin/api/customers/'+state.selected,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'pending'})}).then(function(){showMsg('modalMsg','已设为 pending',true);load()}).catch(function(e){showMsg('modalMsg',e.message,false)})};
   $('load').onclick=function(){state.offset=0;load()};$('search').onkeydown=function(e){if(e.key==='Enter'){state.offset=0;load()}};$('status').onchange=function(){state.offset=0;load()};$('prev').onclick=function(){if(state.offset>0){state.offset=Math.max(0,state.offset-state.limit);load()}};$('next').onclick=function(){if(state.offset+state.limit<state.total){state.offset+=state.limit;load()}};
   load();
+  // 深链：/admin?open=<id> 直接打开该客户的研究详情（CRM 面板「客户列表
+  // （研究管线）」的详情按钮跳转用）。只接受纯数字，防注入。
+  var openParam=new URLSearchParams(location.search).get('open');
+  if(openParam&&/^\d+$/.test(openParam))window.openDetail(parseInt(openParam,10));
   loadFilterOptions();
 })();
 </script></body></html>`;
@@ -5797,11 +5801,20 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 </div>
 
 <div class="panel">
+<div class="sec-head"><h2>📋 客户列表（研究管线）</h2>
+<div class="toolbar"><input id="rsSearch" placeholder="公司 ID、网址、细分或备注" style="width:230px"><select id="rsStatus"><option value="">全部状态</option><option value="pending">pending（排队研究）</option><option value="processing">processing（研究中）</option><option value="completed">completed（已完成）</option><option value="failed">failed（失败）</option></select><button class="btn btn-p" id="rsReload">刷新</button></div></div>
+<p class="hint">研究管线（customers 表）的客户与下方 CRM 销售公司同页显示：客户管理页 CSV 导入 / 自动寻找新客户入库的新公司在这里以 pending 进入研究队列，cron 逐家抓取分析，<b>状态就是进度</b>（pending → processing → completed，失败为 failed 可在详情里重置）；研究完成后在下方「⬆️ 线索提升」转为销售公司跟进。「详情」打开客户管理页的完整研究画像（新标签页）。</p>
+<div class="hint" id="rsSummary" style="margin:0 0 6px"></div>
+<table><thead><tr><th>客户ID</th><th>公司名称</th><th>网址</th><th>状态</th><th>评分</th><th>客户细分</th><th>国家</th><th>联系方式</th><th>操作</th></tr></thead><tbody id="rsRows"></tbody></table>
+<div class="toolbar" style="margin-top:8px"><button class="btn btn-s btn-xs" id="rsPrev">‹ 上一页</button><span id="rsPage" class="hint" style="margin:0"></span><button class="btn btn-s btn-xs" id="rsNext">下一页 ›</button></div>
+</div>
+
+<div class="panel">
 <div class="sec-head"><h2>🏢 客户公司</h2>
 <div class="toolbar"><input id="coSearch" placeholder="搜索名称/域名/备注"><select id="coTier"><option value="">全部分级</option><option value="A">A</option><option value="B">B</option><option value="C">C</option><option value="VIP">VIP</option><option value="unqualified">未分级</option></select><select id="coStatus"><option value="">全部状态</option><option value="new">新线索</option><option value="enriched">已富化</option><option value="contacted">已联系</option><option value="qualified">已验证</option><option value="disqualified">已淘汰</option></select><button class="btn btn-p" id="coReload">刷新</button><button class="btn" id="coNew">➕ 新建公司</button></div></div>
 <p class="hint">⬆️ 线索提升：把研究管线（customers 表）里已调研完的线索一键转为销售公司 —— ID 填客户管理面板「客户ID」列的数字。提升过的线索会自动跳过（幂等），联系人、国家、行业、评分分级一并带入。</p>
 <div class="toolbar"><input id="promoteId" placeholder="customers 表 ID（数字）" style="width:190px"><button class="btn" id="promoteBtn">⬆️ 提升为销售公司</button><span id="promoteMsg" class="hint" style="margin:0"></span></div>
-<table><thead><tr><th>公司</th><th>国家</th><th>分级</th><th>状态</th><th>域名</th><th>商机</th><th>待办</th><th>操作</th></tr></thead><tbody id="coRows"></tbody></table>
+<table><thead><tr><th>公司</th><th>国家</th><th>分级</th><th>状态</th><th>域名</th><th>资料补全</th><th>商机</th><th>待办</th><th>操作</th></tr></thead><tbody id="coRows"></tbody></table>
 <div class="hint" id="coHint"></div>
 </div>
 
@@ -5883,7 +5896,7 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 <script>
 (function(){
 'use strict';
-  var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[],funnel:null,sequences:[],domainChecks:[],signalWatch:[],signalList:[],attribution:null,attrDim:'sources',calendar:null,calMonth:new Date().toISOString().slice(0,7),dupPairs:[],dupMap:{}};
+  var STATE={companies:[],total:0,deals:[],tasks:[],stats:null,won:[],funnel:null,sequences:[],domainChecks:[],signalWatch:[],signalList:[],attribution:null,attrDim:'sources',calendar:null,calMonth:new Date().toISOString().slice(0,7),dupPairs:[],dupMap:{},enrich:{},enrichPendingTotal:0};
 var STAGES=['inquiry','sample_quoted','pi_sent','deposit_paid','won','lost'];
 var STAGE_L={inquiry:'询盘',sample_quoted:'样品报价',pi_sent:'PI 已发',deposit_paid:'定金到账',won:'赢单',lost:'输单'};
 var TIER_L={A:'A级',B:'B级',C:'C级',VIP:'VIP',unqualified:'未分级'};
@@ -5929,16 +5942,40 @@ function loadDuplicates(){
     renderCompanies();
   });
 }
+/* 0043 补全进度徽章：pending 显示排队位置（cron 每 5 分钟处理 2 家），
+ * done/failed 终态。未入队的公司显示 —。 */
+function enrichCell(id){
+  var st=STATE.enrich[id];
+  if(!st)return '<span class="hint">—</span>';
+  if(st.status==='pending')return '<span class="badge b-c" title="后台每 5 分钟处理 2 家：抓官网+搜索，AI 只回填空缺字段">⏳ 排队'+(st.position?(' 第 '+Number(st.position)+' 位'):'中')+'</span>';
+  if(st.status==='done')return '<span class="badge b-enriched" title="'+esc(st.note||'补全完成')+'">✅ 已补全</span>';
+  if(st.status==='failed')return '<span class="badge b-disq" title="'+esc(st.note||'')+'">❌ 补全失败</span>';
+  return '<span class="hint">—</span>';
+}
+/* 拉取当前列表公司的补全状态（独立小请求，listCompanies 不动，0043 未应用时
+ * 静默降级为 — 徽章）。 */
+function loadEnrich(){
+  var ids=[],seen={},i;
+  for(i=0;i<STATE.companies.length;i++){var k=STATE.companies[i].id;if(!seen[k]){seen[k]=1;ids.push(k);}}
+  if(!ids.length){STATE.enrich={};STATE.enrichPendingTotal=0;renderCompanies();return Promise.resolve();}
+  return api('/admin/api/crm/enrich?ids='+encodeURIComponent(ids.join(','))).then(function(b){
+    var m={};
+    for(i=0;i<(b.items||[]).length;i++)m[b.items[i].company_id]=b.items[i];
+    STATE.enrich=m;
+    STATE.enrichPendingTotal=Number(b.pending_total||0);
+    renderCompanies();
+  }).catch(function(){});
+}
 function renderCompanies(){
   var rows='';
   for(var i=0;i<STATE.companies.length;i++){
     var c=STATE.companies[i];
     var dup=STATE.dupMap[c.id];
     var dupBadge=dup?'<button class="btn btn-xs" style="background:#b45309;margin-top:3px" data-act="cmpDup" data-id="'+esc(c.id)+'" data-oid="'+esc(dup)+'" title="名称/地址/电话/网址/邮箱后缀/联系人中至少 2 项近似（或名称强匹配），点击打开全字段比对">🔀 疑似重复 · 点击比对</button> ':'';
-    rows+='<tr><td><strong>'+esc(c.name)+'</strong><div class="hint" style="margin:0">'+esc(c.id)+'</div>'+dupBadge+'</td><td>'+esc(c.country||'—')+'</td><td>'+tierBadge(c.tier)+'</td><td>'+statusBadge(c.lead_status)+(c.customer_since?' <span class="badge b-cust" title="自 '+esc(c.customer_since)+' 起成交">客户</span>':'')+'</td><td>'+esc(c.domain||'—')+'</td><td>'+Number(c.open_deals||0)+'</td><td>'+Number(c.open_tasks||0)+'</td><td><button class="btn btn-p btn-xs" data-act="detail" data-id="'+esc(c.id)+'">详情</button> <button class="btn btn-d btn-xs" data-act="delCo" data-id="'+esc(c.id)+'">删除</button></td></tr>';
+    rows+='<tr><td><strong>'+esc(c.name)+'</strong><div class="hint" style="margin:0">'+esc(c.id)+'</div>'+dupBadge+'</td><td>'+esc(c.country||'—')+'</td><td>'+tierBadge(c.tier)+'</td><td>'+statusBadge(c.lead_status)+(c.customer_since?' <span class="badge b-cust" title="自 '+esc(c.customer_since)+' 起成交">客户</span>':'')+'</td><td>'+esc(c.domain||'—')+'</td><td>'+enrichCell(c.id)+'</td><td>'+Number(c.open_deals||0)+'</td><td>'+Number(c.open_tasks||0)+'</td><td><button class="btn btn-p btn-xs" data-act="detail" data-id="'+esc(c.id)+'">详情</button> <button class="btn btn-d btn-xs" data-act="delCo" data-id="'+esc(c.id)+'">删除</button></td></tr>';
   }
-  $('coRows').innerHTML=rows||'<tr><td colspan="8" class="hint">暂无公司 — 先从下面的「提升线索」开始，或点右上角「新建公司」。</td></tr>';
-  $('coHint').textContent='共 '+STATE.total+' 家公司'+(STATE.total>STATE.companies.length?'（当前显示前 '+STATE.companies.length+' 家）':'')+(STATE.dupPairs.length?' · 🔀 '+STATE.dupPairs.length+' 对疑似重复（≥2 项近似或名称强匹配）待人工比对':'');
+  $('coRows').innerHTML=rows||'<tr><td colspan="9" class="hint">暂无公司 — 先从下面的「提升线索」开始，或点右上角「新建公司」。</td></tr>';
+  $('coHint').textContent='共 '+STATE.total+' 家公司'+(STATE.total>STATE.companies.length?'（当前显示前 '+STATE.companies.length+' 家）':'')+(STATE.dupPairs.length?' · 🔀 '+STATE.dupPairs.length+' 对疑似重复（≥2 项近似或名称强匹配）待人工比对':'')+(STATE.enrichPendingTotal?' · ⏳ 资料补全队列待处理 '+STATE.enrichPendingTotal+' 家（每 5 分钟自动补 2 家）':'');
 }
 function loadDeals(){
   return api('/admin/api/crm/deals').then(function(b){STATE.deals=b.deals||[];renderKanban();});
@@ -6324,7 +6361,7 @@ $('calIcs').onclick=function(){window.open('/admin/api/crm/calendar.ics');};
 $('calOverdue').addEventListener('click',calAct);
 $('calToday').addEventListener('click',calAct);
 function loadAll(){
-  return Promise.all([loadCompanies(),loadDeals(),loadTasks(),loadStats(),loadSequences(),loadDomains(),loadSignals(),loadAttribution(),loadCalendar(),loadDuplicates()]).catch(function(e){toast(e.message,true);});
+  return Promise.all([loadCompanies().then(loadEnrich),loadDeals(),loadTasks(),loadStats(),loadSequences(),loadDomains(),loadSignals(),loadAttribution(),loadCalendar(),loadDuplicates()]).catch(function(e){toast(e.message,true);});
 }
 
 /* ── 公司详情 ───────────────────────────────────────────── */
@@ -6784,15 +6821,49 @@ function renderImportedCompanies(created,matched){
   var h='<div style="margin-top:10px;border-top:1px dashed #d1d5db;padding-top:10px">'
     +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><strong>'+head+'</strong>'
     +'<button class="btn btn-p btn-xs" id="impTaskAll">➕ 全部加入待办</button>'
-    +'<span class="hint" style="margin:0">为列表中的公司各建一条待办任务（「待办任务」面板可见），便于逐一跟进；同时自动排队资料补全：后台抓官网+搜索，AI 只回填空缺字段（域名/邮箱也会自动做 DNS 检测）</span></div>'
+    +'<span class="hint" style="margin:0">为列表中的公司各建一条待办任务（「待办任务」面板可见），便于逐一跟进；同时自动排队资料补全：后台抓官网+搜索，AI 只回填空缺字段（域名/邮箱也会自动做 DNS 检测），每家的补全进度显示在名称右侧</span></div>'
     +'<div style="margin-top:6px;max-height:260px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;padding:4px 10px">';
   for(i=0;i<rows.length;i++){
     h+='<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px dashed #f3f4f6">'
-      +'<span>'+(rows[i].isNew?'🆕 ':'')+esc(rows[i].name)+'</span>'
-      +'<button class="btn btn-s btn-xs" data-imp-task="'+esc(rows[i].id)+'" data-imp-name="'+esc(rows[i].name)+'">➕ 加入待办</button></div>';
+      +'<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(rows[i].name)+'">'+(rows[i].isNew?'🆕 ':'')+esc(rows[i].name)+'</span>'
+      +'<span class="hint" style="margin:0;flex:none" data-imp-st="'+esc(rows[i].id)+'"></span>'
+      +'<button class="btn btn-s btn-xs" style="flex:none" data-imp-task="'+esc(rows[i].id)+'" data-imp-name="'+esc(rows[i].name)+'">➕ 加入待办</button></div>';
   }
   h+='</div></div>';
   box.innerHTML=h;
+  impLoadStatus();
+}
+/* 0043 补全进度：导入清单每家右侧显示队列状态（⏳ 排队第 N 位 → ✅ 补全完成 /
+ * ❌ 失败），还有 pending 项时每 60 秒自动刷新一次（cron 每 5 分钟补 2 家，
+ * 几分钟后回来就能看到位置前移/转完成）。 */
+var impStTimer=null;
+function impStatusText(rec,total){
+  if(!rec)return '未排队补全';
+  if(rec.status==='pending'){
+    var pos=rec.position?('第 '+Number(rec.position)+' 位'):'排队中';
+    return '⏳ 补全'+pos+(total?('（全队列共 '+total+' 家待处理）'):'');
+  }
+  if(rec.status==='done')return '✅ 补全完成'+(rec.filled_fields?(' · 已回填 '+String(rec.filled_fields).split(',').length+' 项'):'');
+  if(rec.status==='failed')return '❌ 补全失败（已重试 '+Number(rec.run_count||0)+' 次）';
+  return '';
+}
+function impLoadStatus(){
+  var spans=document.querySelectorAll('[data-imp-st]');
+  if(!spans.length)return;
+  var ids=[],seen={},i;
+  for(i=0;i<spans.length;i++){var k=spans[i].getAttribute('data-imp-st');if(!seen[k]){seen[k]=1;ids.push(k);}}
+  api('/admin/api/crm/enrich?ids='+encodeURIComponent(ids.join(','))).then(function(b){
+    var m={},total=Number(b.pending_total||0);
+    for(i=0;i<(b.items||[]).length;i++)m[b.items[i].company_id]=b.items[i];
+    var anyPending=false;
+    for(i=0;i<spans.length;i++){
+      var rec=m[spans[i].getAttribute('data-imp-st')];
+      spans[i].textContent=impStatusText(rec,total);
+      if(rec&&rec.status==='pending')anyPending=true;
+    }
+    if(impStTimer){clearTimeout(impStTimer);impStTimer=null;}
+    if(anyPending)impStTimer=setTimeout(impLoadStatus,60000);
+  }).catch(function(){});
 }
 $('impNewList').addEventListener('click',function(e){
   /* 单次批量请求建全部待办（服务端幂等去重）：不再浏览器端逐条 POST ——
@@ -6819,6 +6890,7 @@ $('impNewList').addEventListener('click',function(e){
       if(Number(r.enrich_enqueued||0))msg+='；已排队资料补全 '+Number(r.enrich_enqueued)+' 家（后台自动抓官网+搜索补全空缺字段）';
       if(bad)msg+='，无效 '+bad+' 家';
       toast(msg);
+      impLoadStatus();
       loadTasks();
     }).catch(function(err){all.disabled=false;toast(err.message,true);});
     return;
@@ -6830,6 +6902,7 @@ $('impNewList').addEventListener('click',function(e){
     var rec=(r.companies&&r.companies[0])||null;
     b.textContent=rec&&rec.created?'✓ 已加入':'✓ 已在待办';
     toast(rec&&rec.created?'已加入待办任务':'该公司已有同类未完成任务，已跳过');
+    impLoadStatus();
     loadTasks();
   }).catch(function(err){b.disabled=false;toast(err.message,true);});
 });
@@ -6981,7 +7054,42 @@ document.querySelectorAll('[data-close]').forEach(function(b){
   b.addEventListener('click',function(){closeModal(b.getAttribute('data-close'));});
 });
 
+/* ── 客户列表（研究管线）——与 /admin 客户列表同一 API，同页展示研究进度 ──
+ * 只读视图：状态即进度（pending/processing/completed/failed）；「详情」经
+ * /admin?open=<id> 深链在新标签页打开客户管理面板的完整研究画像。 */
+var RS={offset:0,limit:50,total:0};
+var RS_ST={pending:['b-un','pending'],processing:['b-c','processing'],completed:['b-enriched','completed'],failed:['b-disq','failed']};
+function rsBadge(s){var v=RS_ST[s];return v?'<span class="badge '+v[0]+'">'+v[1]+'</span>':esc(s||'—');}
+function rsLoad(){
+  var p='/admin/api/customers?q='+encodeURIComponent($('rsSearch').value)+'&status='+encodeURIComponent($('rsStatus').value)+'&limit='+RS.limit+'&offset='+RS.offset;
+  return api(p).then(function(d){
+    RS.total=Number(d.total||0);
+    var h='',i;
+    for(i=0;i<(d.items||[]).length;i++){
+      var c=d.items[i];
+      var sc=(c.lead_score===null||c.lead_score===undefined)?'—':c.lead_score;
+      h+='<tr><td>'+esc(c.display_id||'N/A')+'</td><td>'+esc(c.company_name||'-')+'</td><td>'+esc((c.domain||'-').slice(0,35))+'</td><td>'+rsBadge(c.status)+'</td><td>'+sc+'</td><td>'+esc((c.customer_segment||'-').slice(0,35))+'</td><td>'+esc(c.country||'-')+'</td><td>'+esc((c.email||c.cellphone||'-').slice(0,25))+'</td><td><button class="btn btn-s btn-xs" data-rs-open="'+esc(c.id)+'">详情</button></td></tr>';
+    }
+    $('rsRows').innerHTML=h||'<tr><td colspan="9" class="hint">暂无客户 — 在客户管理页用「📥 客户数据导入」或「🔍 自动寻找新客户」入库后，这里可见研究进度。</td></tr>';
+    $('rsSummary').textContent='共 '+RS.total+' 家（每页 '+RS.limit+' 家）';
+    $('rsPage').textContent=(RS.total?(RS.offset+1):0)+'-'+Math.min(RS.offset+RS.limit,RS.total)+' / '+RS.total;
+    $('rsPrev').disabled=RS.offset===0;
+    $('rsNext').disabled=RS.offset+RS.limit>=RS.total;
+  }).catch(function(e){toast(e.message,true);});
+}
+$('rsReload').onclick=function(){RS.offset=0;rsLoad();};
+$('rsSearch').onkeydown=function(e){if(e.key==='Enter'){RS.offset=0;rsLoad();}};
+$('rsStatus').onchange=function(){RS.offset=0;rsLoad();};
+$('rsPrev').onclick=function(){if(RS.offset>0){RS.offset=Math.max(0,RS.offset-RS.limit);rsLoad();}};
+$('rsNext').onclick=function(){if(RS.offset+RS.limit<RS.total){RS.offset+=RS.limit;rsLoad();}};
+$('rsRows').addEventListener('click',function(e){
+  var b=e.target.closest?e.target.closest('[data-rs-open]'):null;
+  if(!b)return;
+  window.open('/admin?open='+encodeURIComponent(b.getAttribute('data-rs-open')),'_blank');
+});
+
 loadAll();
+rsLoad();
 })();
 </script></body></html>`;
 

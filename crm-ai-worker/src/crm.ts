@@ -1817,6 +1817,69 @@ async function createActivity(
  * 未完成任务时跳过，重复点击 / 重传表格 / 重试都安全。 */
 const IMPORT_TASK_BULK_MAX = 1000;
 
+/* 0043 补全进度查询：面板展示每家公司的 crm_enrich_queue 状态（pending 排队
+ * 位置 / done / failed），让「加入待办 → 后台补全」像研究管线一样看得见进度。
+ * 只读，不改 listCompanies（避免 0043 未应用时整个公司列表 500）。 */
+const ENRICH_STATUS_MAX = 500;
+
+interface EnrichStatusRow {
+  company_id: string;
+  status: string;
+  filled_fields: string | null;
+  note: string | null;
+  run_count: number;
+  finished_at: string | null;
+}
+
+async function getEnrichStatus(url: URL, env: AdminEnv): Promise<Response> {
+  const raw = url.searchParams.get("ids") ?? "";
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const part of raw.split(",")) {
+    const v = part.trim();
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    ids.push(v);
+    if (ids.length >= ENRICH_STATUS_MAX) break;
+  }
+  if (!ids.length) return jsonResponse({ items: [], pending_total: 0 });
+  const CHUNK = 50;
+  const byId = new Map<string, EnrichStatusRow>();
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const slice = ids.slice(i, i + CHUNK);
+    const placeholders = slice.map((_, k) => `?${k + 1}`).join(", ");
+    const rows = await env.DB.prepare(
+      `SELECT company_id, status, filled_fields, note, run_count, finished_at
+       FROM crm_enrich_queue WHERE company_id IN (${placeholders})`,
+    )
+      .bind(...slice)
+      .all<EnrichStatusRow>();
+    for (const row of rows.results) byId.set(row.company_id, row);
+  }
+  // pending 项按入队顺序编号（第 N 位）：cron 每 5 分钟处理 2 家，位置就是可见进度。
+  const pendingRows = await env.DB.prepare(
+    `SELECT company_id, ROW_NUMBER() OVER (ORDER BY enqueued_at, company_id) AS position
+     FROM crm_enrich_queue WHERE status = 'pending'`,
+  ).all<{ company_id: string; position: number }>();
+  const positions = new Map<string, number>();
+  for (const row of pendingRows.results) positions.set(row.company_id, row.position);
+  const items = ids
+    .filter((id) => byId.has(id))
+    .map((id) => {
+      const row = byId.get(id)!;
+      return {
+        company_id: id,
+        status: row.status,
+        position: row.status === "pending" ? positions.get(id) ?? null : null,
+        filled_fields: row.filled_fields,
+        note: row.note,
+        run_count: row.run_count,
+        finished_at: row.finished_at,
+      };
+    });
+  return jsonResponse({ items, pending_total: pendingRows.results.length });
+}
+
 /** 导入待办的统一摘要文案（去重依据，前后端必须一致）。 */
 export function buildImportTaskSummary(name: string): string {
   return `跟进新导入公司「${name}」`;
@@ -3018,6 +3081,9 @@ export async function handleCrmApi(
       if (id && method === "DELETE") return await deleteContact(env, id);
     } else if (resource === "domains") {
       if (!id && method === "GET") return await listDomainChecks(env);
+    } else if (resource === "enrich") {
+      // 0043 补全进度：导入清单/公司列表展示队列状态与排队位置（只读）。
+      if (!id && method === "GET") return await getEnrichStatus(url, env);
     } else if (resource === "deals") {
       const sub = parts[5] ?? "";
       if (!id && method === "GET") return await listDeals(env, url);

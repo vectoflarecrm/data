@@ -1163,3 +1163,61 @@ describe("POST /admin/api/crm/activities/import-tasks — 批量加入待办", (
     expect(bad3.status).toBe(400);
   });
 });
+
+/* ── GET /admin/api/crm/enrich — 0043 补全进度 ───────────────────────────── */
+
+describe("GET /admin/api/crm/enrich — 补全进度", () => {
+  it("加入待办后：每家 pending 且带排队位置；终态后位置/总数相应变化", async () => {
+    const { env, db } = makeEnv();
+    for (let i = 0; i < 3; i++) {
+      db.prepare("INSERT INTO crm_companies (id, name) VALUES (?, ?)").run(`ec_${i}`, `Co ${i}`);
+    }
+    await call(env, "POST", "/admin/api/crm/activities/import-tasks", {
+      company_ids: ["ec_0", "ec_1", "ec_2"],
+    });
+    const r = await call(env, "GET", "/admin/api/crm/enrich?ids=ec_0,ec_1,ec_2,ec_ghost");
+    expect(r.status).toBe(200);
+    expect(r.body.pending_total).toBe(3);
+    const items = r.body.items as any[];
+    expect(items).toHaveLength(3); // ghost 静默忽略
+    const positions = items.map((it) => it.position).sort((a: number, b: number) => a - b);
+    expect(positions).toEqual([1, 2, 3]); // pending 全部有位置，从 1 连续编号
+    for (const it of items) {
+      expect(it.status).toBe("pending");
+      expect(it.filled_fields).toBeNull();
+      expect(it.run_count).toBe(0);
+    }
+    // 一家完成、一家失败后：终态项不再占位置，剩余 pending 位置前移
+    db.prepare(
+      "UPDATE crm_enrich_queue SET status='done', filled_fields='country,city', finished_at='2026-01-01 00:00:00' WHERE company_id='ec_0'",
+    ).run();
+    db.prepare(
+      "UPDATE crm_enrich_queue SET status='failed', run_count=3, note='AI 输出无法解析' WHERE company_id='ec_1'",
+    ).run();
+    const r2 = await call(env, "GET", "/admin/api/crm/enrich?ids=ec_0,ec_1,ec_2");
+    expect(r2.status).toBe(200);
+    expect(r2.body.pending_total).toBe(1);
+    const m: Record<string, any> = {};
+    for (const it of r2.body.items as any[]) m[it.company_id] = it;
+    expect(m.ec_0.status).toBe("done");
+    expect(m.ec_0.position).toBeNull();
+    expect(m.ec_0.filled_fields).toBe("country,city");
+    expect(m.ec_0.finished_at).toContain("2026-01-01");
+    expect(m.ec_1.status).toBe("failed");
+    expect(m.ec_1.run_count).toBe(3);
+    expect(m.ec_1.note).toBe("AI 输出无法解析");
+    expect(m.ec_2.status).toBe("pending");
+    expect(m.ec_2.position).toBe(1); // 前两家终态 → 它排第 1
+  });
+
+  it("空 / 全未知 ids → 空列表不报错", async () => {
+    const { env } = makeEnv();
+    const r1 = await call(env, "GET", "/admin/api/crm/enrich?ids=");
+    expect(r1.status).toBe(200);
+    expect(r1.body.items).toEqual([]);
+    expect(r1.body.pending_total).toBe(0);
+    const r2 = await call(env, "GET", "/admin/api/crm/enrich?ids=ghost_1,ghost_2");
+    expect(r2.status).toBe(200);
+    expect(r2.body.items).toEqual([]);
+  });
+});
