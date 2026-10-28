@@ -5821,7 +5821,7 @@ tr.grp-od td{background:#fef2f2;font-weight:700;color:#dc2626;font-size:12px;pad
 
 <div class="panel">
 <h2>✅ 待办任务</h2>
-<p class="hint">公司时间线里 type=task 的未完成事项。按到期日分组：逾期 / 今天 / 明天 / 未来 7 天 / 更晚 / 无期限。可用「→明天」一键顺延，逾期任务红色高亮。</p>
+<p class="hint">公司时间线里 type=task 的未完成事项。按到期日分组：逾期 / 今天 / 明天 / 未来 7 天 / 更晚 / 无期限。可用「→明天」一键顺延，逾期任务红色高亮；点击公司名可打开客户详情直接处理数据。</p>
 <table><thead><tr><th>到期日</th><th>公司</th><th>任务</th><th>操作</th></tr></thead><tbody id="taskRows"></tbody></table>
 </div>
 
@@ -6004,7 +6004,8 @@ function renderTasks(){
       var isOd=a2.due_date&&a2.due_date<tstr;
       var days=isOd?Math.round((new Date(tstr)-new Date(a2.due_date))/86400000):0;
       var dueCell=isOd?'<span class="od">'+esc(a2.due_date)+'</span> <span class="od">逾期'+days+'天</span>':esc(a2.due_date||'—');
-      rows+='<tr><td>'+dueCell+'</td><td>'+esc(a2.company_name)+'</td><td>'+esc(a2.summary)+'</td><td><button class="btn btn-p btn-xs" data-act="doneTask" data-id="'+esc(a2.id)+'">✓ 完成</button> <button class="btn btn-s btn-xs" data-act="snoozeTask" data-id="'+esc(a2.id)+'">→明天</button> <button class="btn btn-s btn-xs" data-act="delTask" data-id="'+esc(a2.id)+'">删</button></td></tr>';
+      var coCell=a2.company_id?'<a href="javascript:void(0)" data-act="taskCo" data-id="'+esc(a2.company_id)+'" title="打开公司详情处理客户数据" style="color:#1d4ed8;text-decoration:underline;cursor:pointer">'+esc(a2.company_name)+'</a>':esc(a2.company_name);
+      rows+='<tr><td>'+dueCell+'</td><td>'+coCell+'</td><td>'+esc(a2.summary)+'</td><td><button class="btn btn-p btn-xs" data-act="doneTask" data-id="'+esc(a2.id)+'">✓ 完成</button> <button class="btn btn-s btn-xs" data-act="snoozeTask" data-id="'+esc(a2.id)+'">→明天</button> <button class="btn btn-s btn-xs" data-act="delTask" data-id="'+esc(a2.id)+'">删</button></td></tr>';
     }
   }
   $('taskRows').innerHTML=rows||'<tr><td colspan="4" class="hint">暂无待办任务 🎉</td></tr>';
@@ -6263,7 +6264,8 @@ function loadCalendar(){
 }
 function calTaskRow(t,od){
   var dueCell=od?'<span class="od">逾期 '+Number(t.overdue_days||0)+' 天</span>（'+esc(t.due_date)+'）':'（'+esc(t.due_date)+'）';
-  return '<tr><td>'+dueCell+' '+esc(t.summary)+'</td><td>'+esc(t.company_name)+' '+tierBadge(t.tier)+'</td><td>'+esc(t.owner||'—')+'</td><td><button class="btn btn-p btn-xs" data-calact="done" data-id="'+esc(t.id)+'">✓ 完成</button> <button class="btn btn-s btn-xs" data-calact="snooze" data-id="'+esc(t.id)+'">→明天</button></td></tr>';
+  var coCell=t.company_id?'<a href="javascript:void(0)" data-calact="open" data-id="'+esc(t.company_id)+'" title="打开公司详情处理客户数据" style="color:#1d4ed8;text-decoration:underline;cursor:pointer">'+esc(t.company_name)+'</a>':esc(t.company_name);
+  return '<tr><td>'+dueCell+' '+esc(t.summary)+'</td><td>'+coCell+' '+tierBadge(t.tier)+'</td><td>'+esc(t.owner||'—')+'</td><td><button class="btn btn-p btn-xs" data-calact="done" data-id="'+esc(t.id)+'">✓ 完成</button> <button class="btn btn-s btn-xs" data-calact="snooze" data-id="'+esc(t.id)+'">→明天</button></td></tr>';
 }
 function renderCalendar(){
   var b=STATE.calendar||{};
@@ -6303,9 +6305,13 @@ function renderCalendar(){
 function calAct(e){
   var b=e.target.closest('[data-calact]');if(!b)return;
   var id=b.getAttribute('data-id');
-  if(b.getAttribute('data-calact')==='done'){
+  var act=b.getAttribute('data-calact');
+  if(act==='open'){
+    openDetail(id);return;
+  }
+  if(act==='done'){
     api('/admin/api/crm/activities/'+encodeURIComponent(id),{method:'PATCH',body:{is_completed:true}}).then(function(){toast('已完成 ✓');loadCalendar();loadStats();loadTasks().then(renderStats);}).catch(function(err){toast(err.message,true);});
-  }else{
+  }else if(act==='snooze'){
     var tm=new Date(Date.now()+86400000).toISOString().slice(0,10);
     api('/admin/api/crm/activities/'+encodeURIComponent(id),{method:'PATCH',body:{due_date:tm}}).then(function(){toast('已顺延到明天');loadCalendar();loadTasks().then(renderStats);}).catch(function(err){toast(err.message,true);});
   }
@@ -6683,6 +6689,8 @@ $('taskRows').addEventListener('click',function(e){
   }else if(b.getAttribute('data-act')==='delTask'){
     if(!confirm('确定删除该任务？'))return;
     api('/admin/api/crm/activities/'+encodeURIComponent(id),{method:'DELETE'}).then(function(){loadAll();}).catch(function(err){toast(err.message,true);});
+  }else if(b.getAttribute('data-act')==='taskCo'){
+    openDetail(id);
   }
 });
 $('promoteBtn').onclick=function(){
