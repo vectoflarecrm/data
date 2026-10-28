@@ -44,6 +44,7 @@ import { syncInboundGmail } from "./crm-gmail-sync";
 import { runSequenceTick } from "./sequences";
 import { runEmailScreeningTick } from "./email-verify";
 import { runSignalMonitorTick } from "./signal-monitor";
+import { runCrmEnrichTick } from "./crm-enrich";
 import { runDueDiscoveryRule } from "./lead-discovery";
 import { backfillUnknownRoles } from "./contact-roles";
   import { startResearchRun, completeResearchRun, appendFieldEvidence, appendResearchSources, appendResearchFacts, appendResearchSignals, appendResearchPersonas, appendResearchProfile, linkResearchFactsToContacts, hasCurrentResearchFacts, capResearchSourcesToBudget, readSavedResearchText, newProvenance, type AnalysisProvenance, type ResearchSourceEntry, type ResearchFactEntry, type ResearchPersonaEntry, type ResearchSolutionEntry, FACTS_PER_RUN_CAP } from "./research-run";
@@ -2539,6 +2540,14 @@ export default {
         await runSignalMonitorTick(env as unknown as import("./admin").AdminEnv);
       } catch (e) {
         safeLog("warn", "[signal-monitor] tick failed (fail-open)", e instanceof Error ? e.message : String(e));
+      }
+      // CRM 自动资料补全（0043，crm_enrich_queue）：空闲 tick 逐家处理 pending
+      // 的公司 —— 抓官网 + 搜公司名 + Workers AI 提取，只回填空缺字段。
+      // fail-open：无 AI 绑定/表缺失/网络失败不影响本 tick 的其他任务。
+      try {
+        await runCrmEnrichTick(env as unknown as import("./crm-enrich").EnrichEnv);
+      } catch (e) {
+        safeLog("warn", "[crm-enrich] tick failed (fail-open)", e instanceof Error ? e.message : String(e));
       }
       try {
         await backfillUnknownRoles(env as unknown as import("./admin").AdminEnv);

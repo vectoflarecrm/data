@@ -6784,7 +6784,7 @@ function renderImportedCompanies(created,matched){
   var h='<div style="margin-top:10px;border-top:1px dashed #d1d5db;padding-top:10px">'
     +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><strong>'+head+'</strong>'
     +'<button class="btn btn-p btn-xs" id="impTaskAll">➕ 全部加入待办</button>'
-    +'<span class="hint" style="margin:0">为列表中的公司各建一条待办任务（「待办任务」面板可见），便于逐一跟进</span></div>'
+    +'<span class="hint" style="margin:0">为列表中的公司各建一条待办任务（「待办任务」面板可见），便于逐一跟进；同时自动排队资料补全：后台抓官网+搜索，AI 只回填空缺字段（域名/邮箱也会自动做 DNS 检测）</span></div>'
     +'<div style="margin-top:6px;max-height:260px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;padding:4px 10px">';
   for(i=0;i<rows.length;i++){
     h+='<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px dashed #f3f4f6">'
@@ -6816,6 +6816,7 @@ $('impNewList').addEventListener('click',function(e){
       }
       var msg='已加入待办 '+Number(r.created||0)+' 家';
       if(Number(r.skipped||0))msg+='，已有同类任务跳过 '+Number(r.skipped)+' 家';
+      if(Number(r.enrich_enqueued||0))msg+='；已排队资料补全 '+Number(r.enrich_enqueued)+' 家（后台自动抓官网+搜索补全空缺字段）';
       if(bad)msg+='，无效 '+bad+' 家';
       toast(msg);
       loadTasks();

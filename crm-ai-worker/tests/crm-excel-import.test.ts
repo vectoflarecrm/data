@@ -242,6 +242,15 @@ function makeDb() {
       request_id TEXT, metadata_json TEXT, ip_hash TEXT, user_agent_hash TEXT,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE crm_enrich_queue (
+      company_id TEXT PRIMARY KEY REFERENCES crm_companies(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'pending',
+      enqueued_at TEXT NOT NULL,
+      finished_at TEXT,
+      filled_fields TEXT,
+      note TEXT,
+      run_count INTEGER NOT NULL DEFAULT 0
+    );
   `);
   return db;
 }
@@ -1078,13 +1087,15 @@ describe("POST /admin/api/crm/activities/import-tasks — 批量加入待办", (
     expect(r.body.skipped).toBe(0);
     expect(r.body.invalid).toBe(1);
     expect(r.body.total).toBe(4);
+    expect(r.body.enrich_enqueued).toBe(3); // 0043：同时排入资料补全队列
     expect(r.body.companies).toHaveLength(3);
     expect((r.body.companies as any[]).every((c) => c.created === true)).toBe(true);
     expect((db.prepare("SELECT COUNT(*) AS n FROM crm_activities WHERE type='task'").get() as any).n).toBe(3);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_enrich_queue WHERE status='pending'").get() as any).n).toBe(3);
     const row = db.prepare("SELECT * FROM crm_activities WHERE company_id = 'ac_0'").get() as any;
     expect(row.summary).toBe("跟进新导入公司「Company 0」");
     expect(row.is_completed).toBe(0);
-    // 幂等：再次调用（哪怕包含已建任务的公司）不再新建
+    // 幂等：再次调用（哪怕包含已建任务的公司）不再新建，补全队列也不重复入队
     const r2 = await call(env, "POST", "/admin/api/crm/activities/import-tasks", {
       company_ids: [...ids, "ac_0"], // 含重复元素
     });
@@ -1092,7 +1103,9 @@ describe("POST /admin/api/crm/activities/import-tasks — 批量加入待办", (
     expect(r2.body.created).toBe(0);
     expect(r2.body.skipped).toBe(3);
     expect(r2.body.invalid).toBe(0);
+    expect(r2.body.enrich_enqueued).toBe(0); // 已在队列 → 不重复
     expect((db.prepare("SELECT COUNT(*) AS n FROM crm_activities WHERE type='task'").get() as any).n).toBe(3);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_enrich_queue").get() as any).n).toBe(3);
     // 审计日志：两次调用各一条
     const audits = db.prepare(
       "SELECT metadata_json FROM audit_logs WHERE action = 'BULK_CREATE_IMPORT_TASKS'",

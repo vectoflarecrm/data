@@ -49,6 +49,7 @@ import {
 } from "./signal-monitor";
 import { COMPANY_SOURCES, getAttribution } from "./crm-attribution";
 import { buildIcsFeed, getTaskCalendar } from "./crm-calendar";
+import { enqueueForEnrichment } from "./crm-enrich";
 import {
   IMPORT_ENTITIES,
   REQUIRED_KEYS,
@@ -1890,11 +1891,16 @@ async function bulkCreateImportTasks(
     await env.DB.batch(statements.slice(i, i + 50));
   }
   const createdCount = companiesOut.filter((c) => c.created).length;
+  // 0043 自动资料补全：加入待办的公司同时排入补全队列（幂等；cron 空闲
+  // tick 逐家抓官网+搜索 → AI 提取 → 只回填空缺字段）。fail-open：表缺失
+  // /入队失败只影响补全，不影响待办创建结果。
+  const enrichEnqueued = await enqueueForEnrichment(env, ids);
   await auditAdminAction(env, request, auth, "BULK_CREATE_IMPORT_TASKS", "crm_activity", null, {
     requested: ids.length,
     created: createdCount,
     skipped_existing: companiesOut.length - createdCount,
     invalid,
+    enrich_enqueued: enrichEnqueued,
   });
   return jsonResponse(
     {
@@ -1902,6 +1908,7 @@ async function bulkCreateImportTasks(
       skipped: companiesOut.length - createdCount,
       invalid,
       total: ids.length,
+      enrich_enqueued: enrichEnqueued,
       companies: companiesOut,
     },
     201,
