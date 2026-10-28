@@ -4355,7 +4355,7 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 .btn{padding:10px 20px;border:0;border-radius:8px;cursor:pointer;font:inherit;font-weight:600;transition:.2s}.btn-primary{background:#0f766e;color:#fff}.btn-primary:hover{background:#115e59}.btn-secondary{background:#6b7280;color:#fff}.btn-secondary:hover{background:#4b5563}.btn-danger{background:#dc2626;color:#fff}.btn-danger:hover{background:#b91c1c}.btn-sm{padding:6px 14px;font-size:13px}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:18px}.stat-card{background:#f0fdfa;border:1px solid #99f6e4;border-radius:10px;padding:16px;text-align:center}.stat-value{font-size:28px;font-weight:700;color:#0f766e}.stat-label{font-size:13px;color:#6b7280;margin-top:4px}
 .email-card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin-bottom:12px}.email-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.email-subject{font-weight:700;font-size:15px;color:#111827}.email-meta{font-size:12px;color:#6b7280;margin-bottom:8px}.email-body{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px;white-space:pre-wrap;font-size:13px;line-height:1.6;color:#374151}
-.badge{display:inline-block;border-radius:20px;padding:3px 10px;font-size:12px;font-weight:600}.badge-draft{background:#fef3c7;color:#92400e}.badge-sent{background:#d1fae5;color:#065f46}
+.badge{display:inline-block;border-radius:20px;padding:3px 10px;font-size:12px;font-weight:600}.badge-draft{background:#fef3c7;color:#92400e}.badge-sent{background:#d1fae5;color:#065f46}.badge-failed{background:#fee2e2;color:#991b1b}.badge-uncertain{background:#ffedd5;color:#c2410c;border:1px dashed #fb923c}
 .toast{position:fixed;top:20px;right:20px;padding:14px 20px;border-radius:10px;color:#fff;font-weight:600;z-index:9999;display:none}.toast.success{background:#059669}.toast.error{background:#dc2626}
 .cp-bar{height:8px;border-radius:4px;background:#e2e8f0;overflow:hidden;display:flex;margin:6px 0}.cp-seg{height:100%}.cp-sent{background:#059669}.cp-generated{background:#0ea5e9}.cp-pending{background:#cbd5e1}.cp-failed{background:#dc2626}.cp-legend{font-size:12px;color:#6b7280;display:flex;gap:12px;flex-wrap:wrap}.cp-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px}
 .cp-card{border:1px solid #d1d5db;border-radius:10px;padding:14px;margin-bottom:12px;background:#fff}.cp-card.done{border-color:#99f6e4;background:#f0fdfa}
@@ -4560,7 +4560,7 @@ const OUTREACH_PANEL_HTML = `<!doctype html>
 <div class="stats" id="statsArea"></div>
 <div class="panel"><div class="s-dfx-g10-aic-fxww-mb14">
 <select id="filterBrand" class="s-input-lg"><option value="">全部品牌</option><option value="iSupfactory">iSupfactory (SUPs)</option><option value="Aquafarer">Aquafarer (Inflatable)</option><option value="Neptunor">Neptunor (RIB)</option></select>
-<select id="filterStatus" class="s-input-lg"><option value="">全部状态</option><option value="draft">草稿</option><option value="sent">已发送</option></select>
+<select id="filterStatus" class="s-input-lg"><option value="">全部状态</option><option value="draft">草稿</option><option value="sent">已发送</option><option value="failed">发送失败</option><option value="uncertain">送达未知</option></select>
 <button class="btn btn-secondary btn-sm" id="refreshEmails">刷新</button>
 <span id="quotaInfo" class="s-fs13-c475569-mla">📧 Gmail 配额加载中…</span>
 <button class="btn btn-primary btn-sm" id="sendBatchBtn">📤 批量发送草稿</button>
@@ -4735,7 +4735,9 @@ function showMsg(id,t,g){var e=document.getElementById(id);if(!e)return;e.textCo
 
 // Email list
 var emailState={offset:0,limit:20,total:0};
-function loadStats(){api('/admin/api/outreach/stats').then(function(s){var h='<div class="stat-card"><div class="stat-value">'+s.total+'</div><div class="stat-label">总计</div></div><div class="stat-card"><div class="stat-value">'+s.draft+'</div><div class="stat-label">草稿</div></div><div class="stat-card"><div class="stat-value">'+s.sent+'</div><div class="stat-label">已发送</div></div>';s.by_brand.forEach(function(b){h+='<div class="stat-card"><div class="stat-value">'+b.count+'</div><div class="stat-label">'+esc(b.brand_name)+'</div></div>'});document.getElementById('statsArea').innerHTML=h}).catch(function(){})}
+// 状态徽章文案：真实映射全部状态（此前非 sent 一律显示「草稿」，uncertain 行会被误读）
+function stLabel(s){return s==='sent'?'已发送':s==='uncertain'?'送达未知':s==='failed'?'发送失败':s==='cancelled'?'已取消':(s==='sending'||s==='reserved')?'发送中':'草稿'}
+function loadStats(){api('/admin/api/outreach/stats').then(function(s){var h='<div class="stat-card"><div class="stat-value">'+s.total+'</div><div class="stat-label">总计</div></div><div class="stat-card"><div class="stat-value">'+s.draft+'</div><div class="stat-label">草稿</div></div><div class="stat-card"><div class="stat-value">'+s.sent+'</div><div class="stat-label">已发送</div></div><div class="stat-card"><div class="stat-value">'+s.uncertain+'</div><div class="stat-label">送达未知</div></div>';s.by_brand.forEach(function(b){h+='<div class="stat-card"><div class="stat-value">'+b.count+'</div><div class="stat-label">'+esc(b.brand_name)+'</div></div>'});document.getElementById('statsArea').innerHTML=h}).catch(function(){})}
 function loadEmails(){
   var brand=document.getElementById('filterBrand').value;
   var status=document.getElementById('filterStatus').value;
@@ -4746,7 +4748,7 @@ function loadEmails(){
     emailState.total=d.total;
     var h='';
     d.items.forEach(function(e){
-      h+='<div class="email-card"><div class="email-header"><span class="email-subject">'+esc(e.subject||'(无主题)')+'</span><div><span class="badge badge-'+esc(e.status)+'">'+(e.status==='sent'?'已发送':'草稿')+'</span> <button class="btn btn-sm btn-danger del-email" data-id="'+e.id+'">删除</button>'+(e.status==='draft'?' <button class="btn btn-sm btn-primary send-one" data-id="'+e.id+'">📧 发送</button>':'')+'</div></div><div class="email-meta">'+esc(e.brand_name||'')+' → '+esc(e.company_name||'')+' ('+esc(e.display_id||'')+') | 收件人: '+esc(e.email_to||'未知')+' | '+esc(e.created_at||'')+'</div><div class="email-body">'+esc(e.body||'')+'</div></div>';
+      h+='<div class="email-card"><div class="email-header"><span class="email-subject">'+esc(e.subject||'(无主题)')+'</span><div><span class="badge badge-'+esc(e.status)+'">'+stLabel(e.status)+'</span> <button class="btn btn-sm btn-danger del-email" data-id="'+e.id+'">删除</button>'+(e.status==='draft'?' <button class="btn btn-sm btn-primary send-one" data-id="'+e.id+'">📧 发送</button>':'')+(e.status==='uncertain'?' <button class="btn btn-sm btn-secondary reset-draft" data-id="'+e.id+'">↩️ 改回草稿</button>':'')+'</div></div><div class="email-meta">'+esc(e.brand_name||'')+' → '+esc(e.company_name||'')+' ('+esc(e.display_id||'')+') | 收件人: '+esc(e.email_to||'未知')+' | '+esc(e.created_at||'')+(e.last_error?' | ⚠️ '+esc(e.last_error):'')+'</div><div class="email-body">'+esc(e.body||'')+'</div></div>';
     });
     if(!d.items.length)h='<p class="s-c6b7280-tac-p20">暂无开发信</p>';
     emailState.total=d.total;
@@ -4773,6 +4775,16 @@ function loadEmails(){
             loadQuota();loadStats();loadEmails();
           })
           .catch(function(e){showToast(e.message,false);b.disabled=false;b.textContent='📧 发送'});
+      };
+    });
+    // uncertain → draft 重置：调已有 PATCH 端点（status 仅允许 'draft'）。
+    // 上次发送结果未知（可能已送达），必须人工核实后才能重发，故双重确认。
+    document.querySelectorAll('.reset-draft').forEach(function(b){
+      b.onclick=function(){
+        if(!confirm('该邮件上次发送结果未知（可能已送达）。请先到发件 Gmail「已发送」文件夹确认对方未收到，再改回草稿重发，避免重复发送。确定继续？'))return;
+        api('/admin/api/outreach/emails/'+b.dataset.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'draft'})})
+          .then(function(){showToast('已改回草稿，可重新发送',true);loadStats();loadEmails()})
+          .catch(function(e){showToast(e.message,false)});
       };
     });
   }).catch(function(e){

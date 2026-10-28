@@ -536,3 +536,75 @@ describe("stage 10: admin endpoints enforce the machine", () => {
     expect(emailRow(db, failedId).status).toBe("failed");
   });
 });
+
+/* ── Uncertain → draft: the panel's manual reset path (§11.4 follow-up) ───
+ * Automatic resend of 'uncertain' is forbidden forever; the ONLY way back is
+ * a verified operator reset through PATCH status:'draft'. These tests pin
+ * that path plus the panel surfaces that make the 18-mail gap visible. */
+
+describe("stage 10: uncertain → draft manual reset (panel surfaces)", () => {
+  function adminEnv(db: any): AdminEnv {
+    return { DB: new FakeD1(db), ADMIN_PANEL_TOKEN: TOKEN } as unknown as AdminEnv;
+  }
+  const call = (env: AdminEnv, path: string, init: RequestInit = {}) =>
+    handleAdminRequest(new Request(`${BASE}${path}`, {
+      ...init,
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}`, ...(init.headers ?? {}) },
+    }), env) as Promise<Response>;
+
+  it("PATCH status:'draft' reverts an uncertain row for a verified manual resend", async () => {
+    const db = makeDb();
+    const id = insertEmail(db, { status: "uncertain", last_error: "发送中途中断（送达状态未知）" });
+    const res = await call(adminEnv(db), `/admin/api/outreach/emails/${id}`, {
+      method: "PATCH", body: JSON.stringify({ status: "draft" }),
+    });
+    expect(res.status).toBe(200);
+    expect(emailRow(db, id).status).toBe("draft");
+    // After the operator reset, the state machine can claim and send it again.
+    const calls: string[] = [];
+    const sent = await sendWithStateMachine(
+      makeEnv(db), { id, email_to: "buyer@acme.com", subject: "Offer", body: "Hello" },
+      undefined, { transport: fakeTransport({ ok: true, gmail_message_id: "gm-reset-1" }, calls), now: fixedNow },
+    );
+    expect(sent.outcome).toBe("sent");
+    expect(calls).toHaveLength(1);
+    expect(emailRow(db, id).last_error).toBeNull(); // claim clears the stale reason
+  });
+
+  it("PATCH cannot forge any other status (only 'draft' is accepted)", async () => {
+    const db = makeDb();
+    const id = insertEmail(db, { status: "draft" });
+    const res = await call(adminEnv(db), `/admin/api/outreach/emails/${id}`, {
+      method: "PATCH", body: JSON.stringify({ status: "sent" }),
+    });
+    expect(res.status).toBe(200);
+    const row = emailRow(db, id);
+    expect(row.status).toBe("draft"); // unchanged: status:'sent' is not an accepted input
+    expect(row.sent_at).toBeNull();
+  });
+
+  it("GET stats surfaces the uncertain count (the total ≠ sent gap)", async () => {
+    const db = makeDb();
+    insertEmail(db, { status: "sent" });
+    insertEmail(db, { status: "uncertain" });
+    insertEmail(db, { status: "uncertain" });
+    const res = await call(adminEnv(db), "/admin/api/outreach/stats");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { total: number; sent: number; uncertain: number };
+    expect(body.total).toBe(3);
+    expect(body.sent).toBe(1);
+    expect(body.uncertain).toBe(2);
+  });
+
+  it("GET list filters by status=uncertain so the panel can isolate them", async () => {
+    const db = makeDb();
+    const uncertainId = insertEmail(db, { status: "uncertain" });
+    insertEmail(db, { status: "draft" });
+    const res = await call(adminEnv(db), "/admin/api/outreach/emails?status=uncertain");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { items: Array<{ id: number; status: string }>; total: number };
+    expect(body.total).toBe(1);
+    expect(body.items[0].id).toBe(uncertainId);
+    expect(body.items[0].status).toBe("uncertain");
+  });
+});

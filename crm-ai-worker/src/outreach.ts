@@ -1169,12 +1169,14 @@ export async function getOutreachStats(env: AdminEnv): Promise<{
   total: number;
   draft: number;
   sent: number;
+  uncertain: number;
   by_brand: Array<{ brand_name: string; count: number }>;
 }> {
-  const [total, draft, sent, byBrand] = await Promise.all([
+  const [total, draft, sent, uncertain, byBrand] = await Promise.all([
     env.DB.prepare("SELECT COUNT(*) as cnt FROM outreach_emails").first<{ cnt: number }>(),
     env.DB.prepare("SELECT COUNT(*) as cnt FROM outreach_emails WHERE status = 'draft'").first<{ cnt: number }>(),
     env.DB.prepare("SELECT COUNT(*) as cnt FROM outreach_emails WHERE status = 'sent'").first<{ cnt: number }>(),
+    env.DB.prepare("SELECT COUNT(*) as cnt FROM outreach_emails WHERE status = 'uncertain'").first<{ cnt: number }>(),
     env.DB.prepare(
       "SELECT brand_name, COUNT(*) as count FROM outreach_emails GROUP BY brand_name"
     ).all<{ brand_name: string; count: number }>(),
@@ -1184,6 +1186,7 @@ export async function getOutreachStats(env: AdminEnv): Promise<{
     total: total?.cnt ?? 0,
     draft: draft?.cnt ?? 0,
     sent: sent?.cnt ?? 0,
+    uncertain: uncertain?.cnt ?? 0,
     by_brand: byBrand.results,
   };
 }
