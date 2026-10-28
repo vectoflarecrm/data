@@ -1856,10 +1856,12 @@ async function getEnrichStatus(url: URL, env: AdminEnv): Promise<Response> {
       .all<EnrichStatusRow>();
     for (const row of rows.results) byId.set(row.company_id, row);
   }
-  // pending 项按入队顺序编号（第 N 位）：cron 每 5 分钟处理 2 家，位置就是可见进度。
+  // pending 项按处理顺序编号（第 N 位）：cron 每 5 分钟处理 2 家，位置就是
+  // 可见进度。排序与 runCrmEnrichTick 的取行顺序一致（同批入队按创建时间）。
   const pendingRows = await env.DB.prepare(
-    `SELECT company_id, ROW_NUMBER() OVER (ORDER BY enqueued_at, company_id) AS position
-     FROM crm_enrich_queue WHERE status = 'pending'`,
+    `SELECT q.company_id, ROW_NUMBER() OVER (ORDER BY q.enqueued_at, c.created_at, q.company_id) AS position
+     FROM crm_enrich_queue q JOIN crm_companies c ON c.id = q.company_id
+     WHERE q.status = 'pending'`,
   ).all<{ company_id: string; position: number }>();
   const positions = new Map<string, number>();
   for (const row of pendingRows.results) positions.set(row.company_id, row.position);

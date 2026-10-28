@@ -3,6 +3,11 @@
  * 触发：导入面板「加入待办」（单家/全部）→ bulkCreateImportTasks 同时把
  * 公司排入本队列（幂等，已在队列/已完成的不再重复入队）。
  *
+ * 自动发现（0043 后续补充）：cron tick 每次先把「有资料空缺且不在队列」
+ * 的存量 CRM 公司自动排入队列（按创建顺序）。这覆盖 0043 部署之前已导入
+ * 并加入待办的公司 —— 它们加入待办时还没有入队逻辑，队列里没有它们的
+ * 行，tick 永远不会处理。幂等 + fail-open，资料齐全的公司不入队。
+ *
  * 处理：cron 空闲 tick 逐家补全 ——
  *   ① 抓官网首页（有域名时，HTML → 纯文本节选）；
  *   ② DuckDuckGo 搜公司名（标题/摘要节选）；
@@ -257,6 +262,31 @@ export async function enqueueForEnrichment(
   }
 }
 
+/** 自动发现入队（0043 后续补充）：把「有资料空缺且不在队列」的 CRM 公司
+ *  自动排入补全队列，按创建顺序（导入先后）处理。见模块头注释。 */
+export async function autoEnqueueMissing(env: EnrichEnv): Promise<number> {
+  const missingPredicate = ENRICH_FIELD_NAMES
+    .map((f) => `(c.${f} IS NULL OR c.${f} = '')`)
+    .join(" OR ");
+  let ids: string[] = [];
+  try {
+    ids = (
+      await env.DB.prepare(
+        `SELECT c.id FROM crm_companies c
+         WHERE NOT EXISTS (SELECT 1 FROM crm_enrich_queue q WHERE q.company_id = c.id)
+           AND (${missingPredicate})
+         ORDER BY c.created_at, c.id
+         LIMIT 200`,
+      ).all<{ id: string }>()
+    ).results.map((r) => r.id);
+  } catch (error) {
+    safeLog("warn", "[crm-enrich] 自动入队扫描失败（fail-open）", error);
+    return 0;
+  }
+  if (!ids.length) return 0;
+  return enqueueForEnrichment(env, ids);
+}
+
 /* ── Tick ────────────────────────────────────────────────────────────────── */
 
 interface QueueRow {
@@ -357,12 +387,16 @@ async function enrichOne(env: EnrichEnv, row: QueueRow): Promise<void> {
   await finishQueueRow(env, row.company_id, "done", fillable.join(","), null);
 }
 
-/** cron 空闲 tick：处理至多 ENRICH_TICK_BATCH 家 pending 公司。
+/** cron 空闲 tick：先自动把缺资料的存量公司排入队列（幂等），再处理至多
+ *  ENRICH_TICK_BATCH 家 pending 公司（同批入队的按创建时间保持导入顺序）。
  *  无 Workers AI 绑定 → 不处理（保留 pending，等绑定可用）。 */
 export async function runCrmEnrichTick(
   env: EnrichEnv,
 ): Promise<{ processed: number; filled: number; failed: number }> {
   const report = { processed: 0, filled: 0, failed: 0 };
+  // 0043 部署前已加入待办的存量公司没有队列行 —— 每次扫描自动补入，
+  // 用户无需任何手动操作（幂等：已在队列的不重复入队）。
+  await autoEnqueueMissing(env);
   if (!env.AI) return report;
   let rows: QueueRow[] = [];
   try {
@@ -371,7 +405,7 @@ export async function runCrmEnrichTick(
         `SELECT q.company_id, q.run_count, c.name, c.domain
          FROM crm_enrich_queue q JOIN crm_companies c ON c.id = q.company_id
          WHERE q.status = 'pending'
-         ORDER BY q.enqueued_at LIMIT ${ENRICH_TICK_BATCH}`,
+         ORDER BY q.enqueued_at, c.created_at, q.company_id LIMIT ${ENRICH_TICK_BATCH}`,
       ).all<QueueRow>()
     ).results;
   } catch (error) {

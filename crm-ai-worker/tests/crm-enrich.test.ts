@@ -9,6 +9,7 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import type { AdminAuthContext, AdminEnv } from "../src/admin";
 import {
+  autoEnqueueMissing,
   ENRICH_FIELDS,
   enqueueForEnrichment,
   missingFields,
@@ -66,7 +67,8 @@ function makeDb() {
   db.exec(`
     CREATE TABLE crm_companies (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, domain TEXT,
-      ${ENRICH_FIELDS.map(([f]) => `${f} TEXT`).join(", ")}
+      ${ENRICH_FIELDS.map(([f]) => `${f} TEXT`).join(", ")},
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE crm_activities (
       id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES crm_companies(id) ON DELETE CASCADE,
@@ -325,5 +327,71 @@ describe("runCrmEnrichTick", () => {
     expect(report.processed).toBe(2);
     expect((db.prepare("SELECT COUNT(*) AS n FROM crm_enrich_queue WHERE status='done'").get() as any).n).toBe(2);
     expect((db.prepare("SELECT COUNT(*) AS n FROM crm_enrich_queue WHERE status='pending'").get() as any).n).toBe(3);
+  });
+});
+
+/* ── 自动发现入队（0043 后续：存量待办公司从未入队的修复） ──────────────── */
+
+describe("autoEnqueueMissing", () => {
+  it("把缺资料且不在队列的公司自动入队；资料齐全/已入队的不动", async () => {
+    const db = makeDb();
+    // c1 早创建、c2 晚创建（都缺资料、都未入队）→ 应入队；
+    db.prepare("INSERT INTO crm_companies (id, name, created_at) VALUES ('c1', 'Early', '2026-10-01 10:00:00')").run();
+    db.prepare("INSERT INTO crm_companies (id, name, created_at) VALUES ('c2', 'Late', '2026-10-02 10:00:00')").run();
+    // c3 资料齐全 → 不入队；
+    const full: Record<string, string> = {};
+    for (const [f] of ENRICH_FIELDS) full[f] = "已有值";
+    db.prepare(
+      `INSERT INTO crm_companies (id, name, ${FIELD_COLUMNS}, created_at) VALUES ('c3', 'Complete', ${ENRICH_FIELDS.map(() => "?").join(", ")}, '2026-10-03 10:00:00')`,
+    ).run(...Object.values(full));
+    // c4 已入队 → 不重复。
+    db.prepare("INSERT INTO crm_companies (id, name, created_at) VALUES ('c4', 'Queued', '2026-10-04 10:00:00')").run();
+    await enqueueForEnrichment(makeEnv(db), ["c4"]);
+    expect(await autoEnqueueMissing(makeEnv(db))).toBe(2);
+    expect(await autoEnqueueMissing(makeEnv(db))).toBe(0); // 幂等
+    const rows = db.prepare("SELECT company_id, status FROM crm_enrich_queue ORDER BY enqueued_at, rowid").all() as any[];
+    expect(rows.map((r) => r.company_id)).toEqual(["c4", "c1", "c2"]);
+    expect(rows.every((r) => r.status === "pending")).toBe(true);
+  });
+
+  it("缺表（0043 未应用）→ fail-open 返回 0", async () => {
+    const db = makeDb();
+    db.exec("DROP TABLE crm_enrich_queue");
+    db.prepare("INSERT INTO crm_companies (id, name) VALUES ('c1', 'Acme')").run();
+    expect(await autoEnqueueMissing(makeEnv(db))).toBe(0);
+  });
+
+  it("tick 自动发现并处理从未入队的存量公司（端到端）", async () => {
+    const db = makeDb();
+    db.prepare(
+      "INSERT INTO crm_companies (id, name, domain, created_at) VALUES ('c1', 'Acme Marine', 'acme.example.com', '2026-10-01 10:00:00')",
+    ).run();
+    vi.stubGlobal("fetch", stubFetch([
+      { match: "html.duckduckgo.com", body: ddgHtml([{ title: "Acme Marine - Home", snippet: "SUP rentals in San Juan" }]) },
+      { match: "acme.example.com", body: "<p>Acme Marine sells paddle boards in San Juan, Puerto Rico.</p>" },
+    ]));
+    const env = makeEnv(db, aiOk({ country: "Puerto Rico", city: "San Juan" }));
+    const report = await runCrmEnrichTick(env);
+    expect(report).toEqual({ processed: 1, filled: 1, failed: 0 });
+    expect((db.prepare("SELECT country FROM crm_companies WHERE id='c1'").get() as any).country).toBe("Puerto Rico");
+    expect((db.prepare("SELECT status FROM crm_enrich_queue WHERE company_id='c1'").get() as any).status).toBe("done");
+  });
+
+  it("同一批入队的按创建时间处理（保持导入顺序）", async () => {
+    const db = makeDb();
+    // 三个 id 顺序与创建时间故意相反，验证处理顺序跟随 created_at。
+    db.prepare("INSERT INTO crm_companies (id, name, created_at) VALUES ('c-new', 'New', '2026-10-05 10:00:00')").run();
+    db.prepare("INSERT INTO crm_companies (id, name, created_at) VALUES ('c-old', 'Old', '2026-10-01 10:00:00')").run();
+    db.prepare("INSERT INTO crm_companies (id, name, created_at) VALUES ('c-mid', 'Mid', '2026-10-03 10:00:00')").run();
+    vi.stubGlobal("fetch", stubFetch([])); // 全部走「无可提取资料」终态，便于观察处理了谁
+    const env = makeEnv(db, aiOk({}));
+    const report = await runCrmEnrichTick(env); // batch=2：应处理 c-old、c-mid
+    expect(report.processed).toBe(2);
+    const done = db.prepare(
+      "SELECT q.company_id FROM crm_enrich_queue q JOIN crm_companies c ON c.id = q.company_id WHERE q.status = 'done' ORDER BY c.created_at",
+    ).all() as any[];
+    expect(done.map((r) => r.company_id)).toEqual(["c-old", "c-mid"]);
+    const pending = db.prepare("SELECT company_id FROM crm_enrich_queue WHERE status = 'pending'").all() as any[];
+    expect(pending.map((r) => r.company_id)).toEqual(["c-new"]);
   });
 });
