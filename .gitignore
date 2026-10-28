@@ -14,3 +14,22 @@ db_export/
 
 # Local office documents
 *.wps
+
+# Secrets / tokens — never commit
+token.txt
+*.token
+
+# DevEco Code session data
+.deveco/
+
+# Vitest cache
+.vitest/
+
+# Scratch space for one-off probe scripts
+crm-ai-worker/tmp/
+
+# Scratch CI status dumps
+ci_check.json
+
+# User's local CRM documents
+CRM/
