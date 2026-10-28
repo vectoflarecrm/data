@@ -1809,6 +1809,105 @@ async function createActivity(
   return jsonResponse({ activity }, 201);
 }
 
+/* 导入面板「全部加入待办」的批量接口：一次请求为多家公司各建一条 type='task'。
+ * 旧实现是浏览器端逐条串行 POST（200 家公司 = 200+ 个请求），中途离开页面
+ * 剩余请求全部丢失，且导入清单不持久化，重新打开页面后无法补发 → 待办只加了一部分。
+ * 收敛到服务端单次批处理后不再有半途而废问题；同时幂等：公司已有同摘要的
+ * 未完成任务时跳过，重复点击 / 重传表格 / 重试都安全。 */
+const IMPORT_TASK_BULK_MAX = 1000;
+
+/** 导入待办的统一摘要文案（去重依据，前后端必须一致）。 */
+export function buildImportTaskSummary(name: string): string {
+  return `跟进新导入公司「${name}」`;
+}
+
+async function bulkCreateImportTasks(
+  request: Request,
+  env: AdminEnv,
+  auth: AdminAuthContext,
+): Promise<Response> {
+  const body = await readJsonBody(request);
+  if (!Array.isArray(body.company_ids)) {
+    throw new HttpError(400, "company_ids 必须是数组");
+  }
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const raw of body.company_ids) {
+    if (typeof raw !== "string") throw new HttpError(400, "company_ids 元素必须是字符串");
+    const v = raw.trim();
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    ids.push(v);
+  }
+  if (!ids.length) throw new HttpError(400, "company_ids 不能为空");
+  if (ids.length > IMPORT_TASK_BULK_MAX) {
+    throw new HttpError(400, `单次最多 ${IMPORT_TASK_BULK_MAX} 家公司`);
+  }
+  // ① 分块取公司名（50/块，D1 绑定参数上限内）；不存在的 id 计入 invalid。
+  const CHUNK = 50;
+  const companies = new Map<string, string>();
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const slice = ids.slice(i, i + CHUNK);
+    const placeholders = slice.map((_, k) => `?${k + 1}`).join(", ");
+    const rows = await env.DB.prepare(
+      `SELECT id, name FROM crm_companies WHERE id IN (${placeholders})`,
+    )
+      .bind(...slice)
+      .all<{ id: string; name: string }>();
+    for (const row of rows.results) companies.set(row.id, row.name);
+  }
+  let invalid = 0;
+  for (const id of ids) if (!companies.has(id)) invalid++;
+  // ② 已有同摘要未完成任务的公司跳过（幂等键 = company_id + summary）。
+  const summaries = [...companies.values()].map(buildImportTaskSummary);
+  const existing = new Set<string>();
+  for (let i = 0; i < summaries.length; i += CHUNK) {
+    const slice = summaries.slice(i, i + CHUNK);
+    const placeholders = slice.map((_, k) => `?${k + 1}`).join(", ");
+    const rows = await env.DB.prepare(
+      `SELECT company_id, summary FROM crm_activities
+       WHERE type = 'task' AND is_completed = 0 AND summary IN (${placeholders})`,
+    )
+      .bind(...slice)
+      .all<{ company_id: string; summary: string }>();
+    for (const row of rows.results) existing.add(`${row.company_id}\n${row.summary}`);
+  }
+  const statements: D1PreparedStatement[] = [];
+  const companiesOut: Array<{ id: string; name: string; created: boolean }> = [];
+  for (const [companyId, name] of companies) {
+    const summary = buildImportTaskSummary(name);
+    const created = !existing.has(`${companyId}\n${summary}`);
+    if (created) {
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO crm_activities (id, company_id, type, summary) VALUES (?1, ?2, 'task', ?3)`,
+        ).bind(crypto.randomUUID(), companyId, summary),
+      );
+    }
+    companiesOut.push({ id: companyId, name, created });
+  }
+  for (let i = 0; i < statements.length; i += 50) {
+    await env.DB.batch(statements.slice(i, i + 50));
+  }
+  const createdCount = companiesOut.filter((c) => c.created).length;
+  await auditAdminAction(env, request, auth, "BULK_CREATE_IMPORT_TASKS", "crm_activity", null, {
+    requested: ids.length,
+    created: createdCount,
+    skipped_existing: companiesOut.length - createdCount,
+    invalid,
+  });
+  return jsonResponse(
+    {
+      created: createdCount,
+      skipped: companiesOut.length - createdCount,
+      invalid,
+      total: ids.length,
+      companies: companiesOut,
+    },
+    201,
+  );
+}
+
 async function updateActivity(request: Request, env: AdminEnv, id: string): Promise<Response> {
   const existing = await env.DB.prepare("SELECT * FROM crm_activities WHERE id = ?1")
     .bind(id)
@@ -2934,6 +3033,9 @@ export async function handleCrmApi(
       // ⑧ 任务日历（0038）：RFC 5545 日历订阅源（日历同步）。
       if (method === "GET") return await buildIcsFeed(env);
     } else if (resource === "activities") {
+      if (id === "import-tasks" && method === "POST") {
+        return await bulkCreateImportTasks(request, env, auth);
+      }
       if (!id && method === "GET") return await listOpenTasks(env, url);
       if (!id && method === "POST") return await createActivity(request, env, auth);
       if (id && method === "PATCH") return await updateActivity(request, env, id);

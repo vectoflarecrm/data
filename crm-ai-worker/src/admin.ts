@@ -6795,36 +6795,40 @@ function renderImportedCompanies(created,matched){
   box.innerHTML=h;
 }
 $('impNewList').addEventListener('click',function(e){
-  var addOne=function(id,name,btn){
-    if(btn)btn.disabled=true;
-    return api('/admin/api/crm/activities',{method:'POST',body:{company_id:id,type:'task',summary:'跟进新导入公司「'+name+'」'}}).then(function(){
-      if(btn){btn.textContent='✓ 已加入';btn.disabled=true;}
-    });
-  };
+  /* 单次批量请求建全部待办（服务端幂等去重）：不再浏览器端逐条 POST ——
+   * 200+ 家公司串行发 200+ 个请求时，中途离开页面剩余请求全部丢失。 */
   var all=e.target.closest?e.target.closest('#impTaskAll'):null;
   if(all){
-    var btns=this.querySelectorAll('button[data-imp-task]:not(:disabled)');
-    if(!btns.length){toast('列表中的公司都已加入待办');return;}
+    var btns=this.querySelectorAll('button[data-imp-task]');
+    if(!btns.length)return;
+    var ids=[],i;
+    for(i=0;i<btns.length;i++)ids.push(btns[i].getAttribute('data-imp-task'));
     all.disabled=true;
-    var n=btns.length,done=0,chain=Promise.resolve();
-    for(var j=0;j<n;j++){
-      (function(btn){
-        chain=chain.then(function(){
-          return addOne(btn.getAttribute('data-imp-task'),btn.getAttribute('data-imp-name'),btn).then(function(){done++;}).catch(function(err){toast(err.message,true);});
-        });
-      })(btns[j]);
-    }
-    chain.then(function(){
-      toast('已加入待办 '+done+' / '+n+'（待办任务面板可见）');
+    api('/admin/api/crm/activities/import-tasks',{method:'POST',body:{company_ids:ids}}).then(function(r){
+      var map={},j;
+      for(j=0;j<(r.companies||[]).length;j++)map[r.companies[j].id]=r.companies[j];
+      var bad=0;
+      for(j=0;j<btns.length;j++){
+        var rec=map[btns[j].getAttribute('data-imp-task')];
+        if(!rec){bad++;continue;}
+        btns[j].disabled=true;
+        btns[j].textContent=rec.created?'✓ 已加入':'✓ 已在待办';
+      }
+      var msg='已加入待办 '+Number(r.created||0)+' 家';
+      if(Number(r.skipped||0))msg+='，已有同类任务跳过 '+Number(r.skipped)+' 家';
+      if(bad)msg+='，无效 '+bad+' 家';
+      toast(msg);
       loadTasks();
-      all.disabled=false;
-    });
+    }).catch(function(err){all.disabled=false;toast(err.message,true);});
     return;
   }
   var b=e.target.closest?e.target.closest('[data-imp-task]'):null;
   if(!b)return;
-  addOne(b.getAttribute('data-imp-task'),b.getAttribute('data-imp-name'),b).then(function(){
-    toast('已加入待办任务');
+  b.disabled=true;
+  api('/admin/api/crm/activities/import-tasks',{method:'POST',body:{company_ids:[b.getAttribute('data-imp-task')]}}).then(function(r){
+    var rec=(r.companies&&r.companies[0])||null;
+    b.textContent=rec&&rec.created?'✓ 已加入':'✓ 已在待办';
+    toast(rec&&rec.created?'已加入待办任务':'该公司已有同类未完成任务，已跳过');
     loadTasks();
   }).catch(function(err){b.disabled=false;toast(err.message,true);});
 });

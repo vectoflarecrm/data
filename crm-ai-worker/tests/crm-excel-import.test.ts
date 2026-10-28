@@ -1053,3 +1053,100 @@ describe("POST /admin/api/crm/import — 修复模式 (mode=repair)", () => {
     expect(String(r.body.detail)).toContain("修复模式");
   });
 });
+
+/* ── POST /admin/api/crm/activities/import-tasks — 批量加入待办 ───────────── */
+
+describe("POST /admin/api/crm/activities/import-tasks — 批量加入待办", () => {
+  function seedCompanies(db: ReturnType<typeof makeDb>, n: number, prefix = "c") {
+    const ids: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const id = `${prefix}_${i}`;
+      db.prepare(`INSERT INTO crm_companies (id, name) VALUES (?, ?)`).run(id, `Company ${i}`);
+      ids.push(id);
+    }
+    return ids;
+  }
+
+  it("一次请求批量建任务；未知 id 计入 invalid；重复调用幂等跳过", async () => {
+    const { env, db } = makeEnv();
+    const ids = seedCompanies(db, 3, "ac");
+    const r = await call(env, "POST", "/admin/api/crm/activities/import-tasks", {
+      company_ids: [...ids, "nope_unknown"],
+    });
+    expect(r.status).toBe(201);
+    expect(r.body.created).toBe(3);
+    expect(r.body.skipped).toBe(0);
+    expect(r.body.invalid).toBe(1);
+    expect(r.body.total).toBe(4);
+    expect(r.body.companies).toHaveLength(3);
+    expect((r.body.companies as any[]).every((c) => c.created === true)).toBe(true);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_activities WHERE type='task'").get() as any).n).toBe(3);
+    const row = db.prepare("SELECT * FROM crm_activities WHERE company_id = 'ac_0'").get() as any;
+    expect(row.summary).toBe("跟进新导入公司「Company 0」");
+    expect(row.is_completed).toBe(0);
+    // 幂等：再次调用（哪怕包含已建任务的公司）不再新建
+    const r2 = await call(env, "POST", "/admin/api/crm/activities/import-tasks", {
+      company_ids: [...ids, "ac_0"], // 含重复元素
+    });
+    expect(r2.status).toBe(201);
+    expect(r2.body.created).toBe(0);
+    expect(r2.body.skipped).toBe(3);
+    expect(r2.body.invalid).toBe(0);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_activities WHERE type='task'").get() as any).n).toBe(3);
+    // 审计日志：两次调用各一条
+    const audits = db.prepare(
+      "SELECT metadata_json FROM audit_logs WHERE action = 'BULK_CREATE_IMPORT_TASKS'",
+    ).all() as any[];
+    expect(audits).toHaveLength(2);
+    expect(JSON.parse(audits[0].metadata_json).created).toBe(3);
+    expect(JSON.parse(audits[1].metadata_json).created).toBe(0);
+  });
+
+  it("已完成的同类任务不拦截新建；未完成的才跳过", async () => {
+    const { env, db } = makeEnv();
+    seedCompanies(db, 2, "bc");
+    db.prepare(
+      `INSERT INTO crm_activities (id, company_id, type, summary, is_completed)
+       VALUES ('t_done', 'bc_0', 'task', '跟进新导入公司「Company 0」', 1)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO crm_activities (id, company_id, type, summary, is_completed)
+       VALUES ('t_open', 'bc_1', 'task', '跟进新导入公司「Company 1」', 0)`,
+    ).run();
+    const r = await call(env, "POST", "/admin/api/crm/activities/import-tasks", {
+      company_ids: ["bc_0", "bc_1"],
+    });
+    expect(r.status).toBe(201);
+    expect(r.body.created).toBe(1);
+    expect(r.body.skipped).toBe(1);
+    const done = (r.body.companies as any[]).find((c) => c.id === "bc_0");
+    const open = (r.body.companies as any[]).find((c) => c.id === "bc_1");
+    expect(done.created).toBe(true);
+    expect(open.created).toBe(false);
+    // bc_0 现在有 2 条同摘要任务（1 完成 + 1 未完成），bc_1 仍只有 1 条
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_activities WHERE company_id='bc_0'").get() as any).n).toBe(2);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_activities WHERE company_id='bc_1'").get() as any).n).toBe(1);
+  });
+
+  it("超过 50 家时分块处理，全部建成", async () => {
+    const { env, db } = makeEnv();
+    const ids = seedCompanies(db, 55, "cc");
+    const r = await call(env, "POST", "/admin/api/crm/activities/import-tasks", {
+      company_ids: ids,
+    });
+    expect(r.status).toBe(201);
+    expect(r.body.created).toBe(55);
+    expect(r.body.invalid).toBe(0);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM crm_activities WHERE type='task'").get() as any).n).toBe(55);
+  });
+
+  it("参数校验：非数组 / 空数组 / 全空串 → 400", async () => {
+    const { env } = makeEnv();
+    const bad1 = await call(env, "POST", "/admin/api/crm/activities/import-tasks", { company_ids: "c_1" });
+    expect(bad1.status).toBe(400);
+    const bad2 = await call(env, "POST", "/admin/api/crm/activities/import-tasks", { company_ids: [] });
+    expect(bad2.status).toBe(400);
+    const bad3 = await call(env, "POST", "/admin/api/crm/activities/import-tasks", { company_ids: ["", "  "] });
+    expect(bad3.status).toBe(400);
+  });
+});
