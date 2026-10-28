@@ -6743,27 +6743,45 @@ $('impBtn').onclick=function(){
     }
     if(b.unmapped&&b.unmapped.length)msg+='；未识别列(忽略): '+b.unmapped.join('，');
     $('impMsg').textContent=msg+((b.errors&&b.errors.length)?' —— '+b.errors.join('；'):'');
-    renderImportedCompanies(b.created_companies||[]);
+    renderImportedCompanies(b.created_companies||[],b.matched_companies||[]);
     toast('导入完成');
     impXlsx='';
     $('impFile').value='';
     loadAll();
   }).catch(function(err){$('impMsg').textContent='';toast(err.message,true);});
 };
-/* 导入完成后的「本次新建公司」清单：每家一键加入待办任务（type=task），
- * 也可全部加入 —— 任务出现在上方「✅ 待办任务」面板与公司时间线里。 */
-function renderImportedCompanies(list){
+/* 导入完成后的「本次导入涉及公司」清单：新建 + 表内匹配到的已有公司合并展示，
+ * 每家一键加入待办任务（type=task），也可全部加入 —— 重传已导入过的表同样可用。 */
+function renderImportedCompanies(created,matched){
   var box=$('impNewList');
-  if(!list||!list.length){box.innerHTML='';return;}
+  var seen={},rows=[],i;
+  for(i=0;i<(created||[]).length;i++){
+    if(seen[created[i].id])continue;
+    seen[created[i].id]=1;
+    rows.push({id:created[i].id,name:created[i].name,isNew:1});
+  }
+  for(i=0;i<(matched||[]).length;i++){
+    if(seen[matched[i].id])continue;
+    seen[matched[i].id]=1;
+    rows.push({id:matched[i].id,name:matched[i].name,isNew:0});
+  }
+  if(!rows.length){box.innerHTML='';return;}
+  var nNew=0;
+  for(i=0;i<rows.length;i++){if(rows[i].isNew)nNew++;}
+  var nOld=rows.length-nNew;
+  var head='📋 本次导入涉及公司 '+rows.length+' 家';
+  if(nNew&&nOld)head+='（🆕 新建 '+nNew+' · 已有 '+nOld+'）';
+  else if(nNew)head+='（全部新建）';
+  else head+='（均为已有公司）';
   var h='<div style="margin-top:10px;border-top:1px dashed #d1d5db;padding-top:10px">'
-    +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><strong>🆕 本次新建公司 '+list.length+' 家</strong>'
+    +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><strong>'+head+'</strong>'
     +'<button class="btn btn-p btn-xs" id="impTaskAll">➕ 全部加入待办</button>'
-    +'<span class="hint" style="margin:0">为新公司各建一条待办任务（「待办任务」面板可见），便于逐一跟进</span></div>'
+    +'<span class="hint" style="margin:0">为列表中的公司各建一条待办任务（「待办任务」面板可见），便于逐一跟进</span></div>'
     +'<div style="margin-top:6px;max-height:260px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;padding:4px 10px">';
-  for(var i=0;i<list.length;i++){
+  for(i=0;i<rows.length;i++){
     h+='<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px dashed #f3f4f6">'
-      +'<span>'+esc(list[i].name)+'</span>'
-      +'<button class="btn btn-s btn-xs" data-imp-task="'+esc(list[i].id)+'" data-imp-name="'+esc(list[i].name)+'">➕ 加入待办</button></div>';
+      +'<span>'+(rows[i].isNew?'🆕 ':'')+esc(rows[i].name)+'</span>'
+      +'<button class="btn btn-s btn-xs" data-imp-task="'+esc(rows[i].id)+'" data-imp-name="'+esc(rows[i].name)+'">➕ 加入待办</button></div>';
   }
   h+='</div></div>';
   box.innerHTML=h;

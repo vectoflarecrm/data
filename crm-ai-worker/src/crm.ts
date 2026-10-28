@@ -1979,17 +1979,19 @@ interface ImportCompanyCache {
   byName: Map<string, string>; // lowercased name → id
   byDomain: Map<string, string>; // lowercased domain → id
   domainById: Map<string, string | null>; // id → domain（域名回填需知公司自身是否已有域名）
+  nameById: Map<string, string>; // id → name（响应里报告匹配到的已有公司）
 }
 
 async function loadCompanyCache(env: AdminEnv): Promise<ImportCompanyCache> {
   const rows = await env.DB.prepare(
     "SELECT id, name, domain FROM crm_companies LIMIT 20000",
   ).all<{ id: string; name: string; domain: string | null }>();
-  const cache: ImportCompanyCache = { byName: new Map(), byDomain: new Map(), domainById: new Map() };
+  const cache: ImportCompanyCache = { byName: new Map(), byDomain: new Map(), domainById: new Map(), nameById: new Map() };
   for (const r of rows.results) {
     cache.byName.set(r.name.toLowerCase(), r.id);
     if (r.domain) cache.byDomain.set(r.domain.toLowerCase(), r.id);
     cache.domainById.set(r.id, r.domain);
+    cache.nameById.set(r.id, r.name);
   }
   return cache;
 }
@@ -2042,6 +2044,8 @@ interface ImportOutcome {
   repairedContacts?: number;
   /** 本次新建的公司清单（id + 名称）—— 面板据此渲染「加入待办」入口。 */
   createdCompanies?: Array<{ id: string; name: string }>;
+  /** 表内匹配到的已有公司（未新建）—— 重传已导入的表也要能批量加入待办。 */
+  matchedCompanies?: Array<{ id: string; name: string }>;
 }
 
 /** 把已解析的行列矩阵导入 DB（CSV 与 Excel 共用核心）。
@@ -2121,6 +2125,12 @@ async function runImportRows(
   const statements: CrmStatement[] = [];
   let companiesCreated = 0;
   const createdCompanies: Array<{ id: string; name: string }> = [];
+  const createdCompanyIds = new Set<string>();
+  const matchedCompanyIds = new Set<string>();
+  /* 记录表内匹配到的已有公司（本次新建的除外，避免两个清单重复）。 */
+  const noteMatched = (id: string): void => {
+    if (!createdCompanyIds.has(id)) matchedCompanyIds.add(id);
+  };
   const companies = await loadCompanyCache(env);
 
   // 已有公司回填 0041 扩展列（地址/外部编号/经销代理品牌）与空缺域名：只补
@@ -2201,6 +2211,7 @@ async function runImportRows(
     // 名称优先匹配：真实表格中同一公司名写法一致，是更强的身份键。
     if (name && companies.byName.has(name.toLowerCase())) {
       const id = companies.byName.get(name.toLowerCase())!;
+      noteMatched(id);
       backfillCompany(id, companyRec);
       return { id };
     }
@@ -2208,6 +2219,7 @@ async function runImportRows(
     // 不可凭域名把后到的公司并到先到的公司上。
     if (!name && domain && companies.byDomain.has(domain)) {
       const id = companies.byDomain.get(domain)!;
+      noteMatched(id);
       backfillCompany(id, companyRec);
       return { id };
     }
@@ -2258,6 +2270,7 @@ async function runImportRows(
       ),
     );
     companiesCreated++;
+    createdCompanyIds.add(id);
     createdCompanies.push({ id, name: companyName });
     return { id };
   };
@@ -2282,6 +2295,7 @@ async function runImportRows(
           result.skipped++; // 不存在的公司：跳过，不新建
           continue;
         }
+        noteMatched(existingId);
         if (backfillCompany(existingId, rec)) repairedCompanies.add(existingId);
       }
     } else {
@@ -2331,6 +2345,7 @@ async function runImportRows(
           (name ? companies.byName.get(name.toLowerCase()) : undefined) ??
           (domain ? companies.byDomain.get(domain) : undefined) ??
           null;
+        if (companyId) noteMatched(companyId);
         const emailRaw = (rec.email ?? "").trim();
         const email = emailRaw.toLowerCase();
         let matched: RepairContactRow | undefined;
@@ -2403,6 +2418,9 @@ async function runImportRows(
       unmapped,
       repairedCompanies: repairedCompanies.size,
       repairedContacts: repairedContacts.size,
+      matchedCompanies: Array.from(matchedCompanyIds)
+        .map((id) => ({ id, name: companies.nameById.get(id) ?? id }))
+        .slice(0, 500),
     };
   }
 
@@ -2421,7 +2439,10 @@ async function runImportRows(
         const existingId =
           companies.byName.get(name.toLowerCase()) ??
           (domain ? companies.byDomain.get(domain) : undefined);
-        if (existingId) backfillCompany(existingId, rec);
+        if (existingId) {
+          noteMatched(existingId);
+          backfillCompany(existingId, rec);
+        }
         result.skipped++;
         continue;
       }
@@ -2470,6 +2491,7 @@ async function runImportRows(
         ),
       );
       result.created++;
+      createdCompanyIds.add(id);
       createdCompanies.push({ id, name });
     }
   } else if (entity === "contacts") {
@@ -2619,6 +2641,9 @@ async function runImportRows(
     columns,
     unmapped,
     createdCompanies: createdCompanies.slice(0, 500),
+    matchedCompanies: Array.from(matchedCompanyIds)
+      .map((id) => ({ id, name: companies.nameById.get(id) ?? id }))
+      .slice(0, 500),
   };
 }
 
@@ -2628,6 +2653,7 @@ function importResponse(outcome: ImportOutcome, entity: ImportEntity): Response 
     created: outcome.created,
     companies_created: outcome.companiesCreated,
     created_companies: outcome.createdCompanies ?? [],
+    matched_companies: outcome.matchedCompanies ?? [],
     skipped: outcome.skipped,
     error_total: outcome.errors.length,
     errors: outcome.errors.slice(0, 20),

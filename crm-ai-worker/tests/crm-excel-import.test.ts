@@ -652,15 +652,23 @@ describe("POST /admin/api/crm/import — Excel 智能导入", () => {
     const list = await call(env, "GET", "/admin/api/crm/companies?limit=200");
     const ids = new Set<string>(list.body.companies.map((c: { id: string }) => c.id));
     for (const c of created) expect(ids.has(c.id)).toBe(true);
-    // 重复导入（全部跳过）与修复模式都不新建 → 清单为空数组
+    // 重复导入（全部跳过）不新建，但匹配到的已有公司进 matched_companies
+    //（面板据此为重传的表也提供批量加入待办）
     const again = await call(env, "POST", "/admin/api/crm/import", { xlsx_base64: b64(xlsx) });
     expect(again.body.created).toBe(0);
     expect(again.body.created_companies).toEqual([]);
+    const matched = again.body.matched_companies as Array<{ id: string; name: string }>;
+    expect(matched.map((c) => c.name).sort()).toEqual(["Acme", "Beta"]);
+    expect(new Set(matched.map((c) => c.id)).size).toBe(2);
+    // 修复模式：不新建，但表内匹配到的公司同样列出
     const repair = await call(env, "POST", "/admin/api/crm/import", {
       entity: "contacts", mode: "repair", xlsx_base64: b64(xlsx),
     });
     expect(repair.body.mode).toBe("repair");
     expect(repair.body.created_companies).toEqual([]);
+    expect(
+      (repair.body.matched_companies as Array<{ name: string }>).map((c) => c.name).sort(),
+    ).toEqual(["Acme", "Beta"]);
   });
 
   it("重复导入同一张联系人表：邮箱行与无邮箱行都去重，不重复建联系人", async () => {
