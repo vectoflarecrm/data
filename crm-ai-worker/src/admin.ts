@@ -6327,6 +6327,16 @@ function openDetail(id){
     STATE.detail=c;
     var h='<h3>'+esc(c.name)+' '+tierBadge(c.tier)+' '+statusBadge(c.lead_status)+(c.customer_since?' <span class="badge b-cust">正式客户 · '+esc(c.customer_since)+' 起</span>':'')+(Number(c.do_not_contact)?' <span class="badge b-dnc">禁止联系</span>':'')+'</h3>';
     h+='<p class="hint" style="margin:0 0 10px">ID '+esc(c.id)+(c.merged_from_ids?' · 已并入来源: '+esc(c.merged_from_ids):'')+'</p>';
+    /* 疑似重复提示条：详情页直接给比对入口，不必回列表找 🔀 按钮。 */
+    if(STATE.dupMap&&STATE.dupMap[c.id]){
+      var dpid=STATE.dupMap[c.id],dpname='';
+      for(var dpi=0;dpi<STATE.dupPairs.length;dpi++){
+        var dpp=STATE.dupPairs[dpi];
+        if(dpp.a_id===c.id){dpname=dpp.b_name;break;}
+        if(dpp.b_id===c.id){dpname=dpp.a_name;break;}
+      }
+      h+='<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:10px 12px;margin:0 0 12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center"><span>🔀 <strong>疑似重复</strong>：与「'+esc(dpname||dpid)+'」疑似同一家公司。</span><button class="btn btn-p" data-act="cmpDup" data-id="'+esc(c.id)+'" data-oid="'+esc(dpid)+'">🔎 打开比对并处理（合并 / 非重复）</button></div>';
+    }
     h+='<h2 style="font-size:15px;margin:0 0 8px">🏢 公司资料（对齐客户信息格式，可直接修改）</h2>';
     h+='<div class="grid2 f"><div><label>公司名称 *</label><input id="dName" value="'+esc(c.name)+'" maxlength="200"></div><div><label>法定名称</label><input id="dLegalName" value="'+esc(c.legal_name||'')+'" maxlength="200"></div><div><label>交易名称</label><input id="dTradingName" value="'+esc(c.trading_name||'')+'" maxlength="200"></div><div><label>域名'+(c.domain?' '+domailBadge(c.domain_email_status):'')+'</label><input id="dDomain" value="'+esc(c.domain||'')+'" maxlength="200" placeholder="example.com"></div><div><label>行业</label><input id="dIndustry" value="'+esc(c.industry||'')+'" maxlength="100"></div><div><label>产品与服务</label><input id="dProductsServices" value="'+esc(c.products_services||'')+'" maxlength="2000"></div><div><label>国家/地区</label><input id="dCountry" value="'+esc(c.country||'')+'" maxlength="100"></div><div><label>国家代码</label><input id="dCountryCode" value="'+esc(c.country_code||'')+'" maxlength="100"></div><div><label>地区/州</label><input id="dRegion" value="'+esc(c.region||'')+'" maxlength="100"></div><div><label>城市</label><input id="dCity" value="'+esc(c.city||'')+'" maxlength="100"></div><div><label>邮编城市</label><input id="dZipCity" value="'+esc(c.zip_city||'')+'" maxlength="100"></div><div><label>邮编</label><input id="dPostalCode" value="'+esc(c.postal_code||'')+'" maxlength="100"></div><div><label>📍 街道地址</label><input id="dAddress" value="'+esc(c.address||'')+'" maxlength="500"></div></div>';
     h+='<h2 style="font-size:15px;margin:14px 0 8px">📞 公司联系</h2>';
@@ -6525,6 +6535,13 @@ function openCompare(aId,bId){
     var a=A.company,b=B.company;
     var h='<h3>🔀 疑似重复公司比对 '+(reasons?'<span class="badge b-warn" style="font-size:12px">'+esc(reasons)+'</span>':'')+'</h3>';
     h+='<p class="hint">'+(reasons?'判定依据：'+esc(reasons)+'。':'')+'黄色高亮行 = 两侧不一致的字段，请重点核对。选择保留方后合并：另一方的联系人/商机/动态全部并入，缺失字段自动补齐，来源中文备注以 [并入备注] 保留，对方被删除（单事务、可溯源）。连锁分店等非重复情况请点「非重复，暂不处理」。</p>';
+    /* 处理按钮同时放表格上方与底部：打开即见操作区，长表不必滚到底。 */
+    var acts='<div class="mrow" style="margin:10px 0;flex-wrap:wrap">';
+    acts+='<button class="btn btn-p" data-act="cmpMerge" data-tgt="'+esc(a.id)+'" data-src="'+esc(b.id)+'" data-tname="'+esc(a.name)+'" data-sname="'+esc(b.name)+'">⬅ 保留 A「'+esc(a.name)+'」，并入 B</button>';
+    acts+='<button class="btn btn-p" data-act="cmpMerge" data-tgt="'+esc(b.id)+'" data-src="'+esc(a.id)+'" data-tname="'+esc(b.name)+'" data-sname="'+esc(a.name)+'">保留 B「'+esc(b.name)+'」，并入 A ➡</button>';
+    acts+='<button class="btn btn-s" data-close="mCompare">非重复，暂不处理</button>';
+    acts+='</div>';
+    h+=acts;
     h+='<table><thead><tr><th style="width:110px">字段</th><th>公司 A</th><th>公司 B</th></tr></thead><tbody>';
     h+=cmpRow('名称','<strong>'+esc(a.name)+'</strong>','<strong>'+esc(b.name)+'</strong>');
     h+=cmpRow('ID',cmpV(a,'id'),cmpV(b,'id'));
@@ -6552,15 +6569,13 @@ function openCompare(aId,bId){
     h+=cmpRow('中文备注',cmpV(a,'chinese_remarks'),cmpV(b,'chinese_remarks'));
     h+=cmpRow('已并入来源',cmpV(a,'merged_from_ids'),cmpV(b,'merged_from_ids'));
     h+='</tbody></table>';
-    h+='<div class="mrow" style="margin-top:14px;flex-wrap:wrap">';
-    h+='<button class="btn btn-p" data-act="cmpMerge" data-tgt="'+esc(a.id)+'" data-src="'+esc(b.id)+'" data-tname="'+esc(a.name)+'" data-sname="'+esc(b.name)+'">⬅ 保留 A「'+esc(a.name)+'」，并入 B</button>';
-    h+='<button class="btn btn-p" data-act="cmpMerge" data-tgt="'+esc(b.id)+'" data-src="'+esc(a.id)+'" data-tname="'+esc(b.name)+'" data-sname="'+esc(a.name)+'">保留 B「'+esc(b.name)+'」，并入 A ➡</button>';
-    h+='<button class="btn btn-s" data-close="mCompare">非重复，暂不处理</button>';
-    h+='</div>';
+    h+=acts;
     $('cmpBody').innerHTML=h;
   }).catch(function(e){toast(e.message,true);});
 }
 $('cmpBody').addEventListener('click',function(e){
+  var cs=e.target.closest('[data-close]');
+  if(cs){closeModal(cs.getAttribute('data-close'));return;}
   var b=e.target.closest('[data-act="cmpMerge"]');if(!b)return;
   var tn=b.getAttribute('data-tname'),sn=b.getAttribute('data-sname');
   if(!confirm('将把「'+sn+'」的联系人、商机、动态全部并入「'+tn+'」并删除「'+sn+'」。\\n缺失字段自动补齐，来源中文备注以 [并入备注] 保留。\\n确定继续？'))return;
@@ -6860,6 +6875,10 @@ $('dBody').addEventListener('click',function(e){
     if(!src){toast('请先选择要并入的公司',true);return;}
     if(!confirm('将把所选公司的联系人、商机、动态全部并入本公司并删除所选公司（单事务、可溯源）。确定继续？'))return;
     api('/admin/api/crm/companies/merge',{method:'POST',body:{target_company_id:id,source_company_id:src}}).then(function(){toast('合并完成');loadAll();openDetail(id);}).catch(function(err){toast(err.message,true);});
+  }else if(act==='cmpDup'){
+    /* 详情页疑似重复提示条 → 打开比对页（先关详情，避免两层叠加）。 */
+    closeModal('mDetail');
+    openCompare(id,b.getAttribute('data-oid'));
   }
 });
 /* 角色下拉（⑦ 图谱）：切换即 PATCH 联系人 procurement_role。 */
