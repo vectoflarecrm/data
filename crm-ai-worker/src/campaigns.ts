@@ -793,8 +793,11 @@ export async function createCampaign(
     const rank = contactRankSql(input.filters.rolePriority);
     const rankPrefix = rank.sql ? `${rank.sql}, ` : "";
     const n = Math.min(Math.max(input.filters.contactsPerCompany, 1), MAX_CONTACTS_PER_COMPANY);
-    for (let i = 0; i < memberIds.length; i += 100) {
-      const chunk = memberIds.slice(i, i + 100);
+    // D1 每语句最多 100 个绑定参数：块 90 + rank binds（≤5）+ N（1）≤ 96。
+    // 曾经用 100 —— 100 id + 1 N = 101，per-person 群发 ≥100 家时直接超限报错。
+    const CHUNK = 90;
+    for (let i = 0; i < memberIds.length; i += CHUNK) {
+      const chunk = memberIds.slice(i, i + CHUNK);
       const rows = await env.DB.prepare(
         `SELECT customer_id, contact_id FROM (
            SELECT c.id AS customer_id, ct.id AS contact_id,

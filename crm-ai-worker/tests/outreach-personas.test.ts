@@ -342,3 +342,59 @@ describe("generateOutreachForContactIds — contact-grain dedup (Stage 49)", () 
     db.close();
   });
 });
+
+describe("D1 每语句 100 绑定参数上限下的批量生成（回归：块 100+brand/N 超限、todo IN 未分块）", () => {
+  /** 模拟 D1 硬上限：单条语句绑定参数 > 100 直接抛错（node:sqlite 默认 999）。 */
+  function limit100(db: any) {
+    return {
+      prepare(sql: string) {
+        if ((sql.match(/\?/g) ?? []).length > 100) {
+          throw new Error("too many SQL variables");
+        }
+        return db.prepare(sql);
+      },
+    };
+  }
+
+  function seedBulkDb(): any {
+    const db = makeDb();
+    db.exec(`INSERT INTO outreach_settings (brand_name, product_category, company_intro, enabled)
+             VALUES ('Afarer', 'Inflatable Boats', 'We manufacture inflatable boats.', 1)`);
+    db.exec(`INSERT INTO customers (id, company_id, display_id, domain, status, company_name, email, country, products_services)
+             VALUES (1, 'acme', 'C-0001', 'acme.example', 'completed', 'Acme Marine', 'sales@acme.example', 'ES', 'Inflatable boats')`);
+    db.exec(`INSERT INTO contacts (id, contact_id, company_id, seq, first_name, last_name, title, email)
+             VALUES (11, 'ACME_001', 'acme', 1, 'Diego', 'Torres', 'Head of Procurement', 'diego@acme.example')`);
+    return db;
+  }
+
+  it("150 个客户 id 的公司粒度生成不再超限：already/todo 查询都按块绑定", async () => {
+    const db = seedBulkDb();
+    const env = { DB: new FakeD1(limit100(db)) } as unknown as AdminEnv;
+    const ids = Array.from({ length: 150 }, (_, i) => i + 1);
+    // 修复前：already 查询块 100 + brand_name(1) = 101 绑定直接炸；
+    // 客户行加载更是单条 IN(150) 未分块。
+    const out = await generateOutreachForCustomerIds(env, "Afarer", ids);
+    // 只有 customer 1 存在 → 其余 149 个 id 查不到客户行，静默跳过；
+    // customer 1 走到生成（无 provider key → "AI returned empty"）。
+    expect(out.generated).toBe(0);
+    expect(out.errors).toEqual([{ customer_id: 1, message: "AI returned empty" }]);
+    db.close();
+  });
+
+  it("150 对联系人的 per-person 生成不再超限：existing/customers 查询都按块绑定", async () => {
+    const db = seedBulkDb();
+    const env = { DB: new FakeD1(limit100(db)) } as unknown as AdminEnv;
+    const pairs = Array.from({ length: 150 }, (_, i) => ({ customer_id: i + 1, contact_id: 11 }));
+    // 修复前：existing 查询块 100 + brand_name(1) = 101 炸；客户行单条
+    // IN(150) 未分块也炸。
+    const out = await generateOutreachForContactIds(env, "Afarer", pairs);
+    // customer 1 + contact 11 走到生成（无 key → AI empty）；其余 149 对
+    // 的客户不存在 → terminal "可能已被删除"。
+    expect(out.errors).toHaveLength(150);
+    expect(out.errors.filter((e) => e.message === "AI returned empty")).toEqual([
+      { customer_id: 1, contact_id: 11, message: "AI returned empty" },
+    ]);
+    expect(out.errors.filter((e) => e.message === "客户或联系人记录可能已被删除")).toHaveLength(149);
+    db.close();
+  });
+});

@@ -750,10 +750,11 @@ export async function generateOutreachForCustomerIds(
   // D1 caps a bound IN list; chunk so a large campaign member set still works.
   // contact_id IS NULL (Stage 49): company grain only — a per-person draft
   // must not suppress the company draft, and vice versa.
+  // D1 每语句最多 100 个绑定参数：块 90 + brand_name(1) = 91，留出余量。
   const placeholders = (n: number) => Array(n).fill("?").join(",");
   const existing: Array<{ customer_id: number; email_id: number; status: string }> = [];
-  for (let i = 0; i < unique.length; i += 100) {
-    const chunk = unique.slice(i, i + 100);
+  for (let i = 0; i < unique.length; i += 90) {
+    const chunk = unique.slice(i, i + 90);
     const rows = await env.DB.prepare(
       `SELECT customer_id, id AS email_id, status FROM outreach_emails
        WHERE brand_name = ? AND contact_id IS NULL AND customer_id IN (${placeholders(chunk.length)})
@@ -770,15 +771,21 @@ export async function generateOutreachForCustomerIds(
   }
 
   const todo = unique.filter((id) => !existingByCustomer.has(id));
-  const customers = await env.DB.prepare(
-    `SELECT ${OUTREACH_CUSTOMER_COLUMNS} FROM customers WHERE id IN (${placeholders(todo.length)}) ORDER BY id`,
-  )
-    .bind(...todo)
-    .all<OutreachCustomer>();
+  // 客户行加载同样分块（曾未分块：todo > 100 时单条 IN 超 D1 绑定上限）。
+  const customers: OutreachCustomer[] = [];
+  for (let i = 0; i < todo.length; i += 90) {
+    const chunk = todo.slice(i, i + 90);
+    const rows = await env.DB.prepare(
+      `SELECT ${OUTREACH_CUSTOMER_COLUMNS} FROM customers WHERE id IN (${placeholders(chunk.length)}) ORDER BY id`,
+    )
+      .bind(...chunk)
+      .all<OutreachCustomer>();
+    customers.push(...rows.results);
+  }
 
   const drafts: Array<{ customer_id: number; email_id: number }> = [];
   const errors: Array<{ customer_id: number; message: string }> = [];
-  for (const customer of customers.results) {
+  for (const customer of customers) {
     try {
       const emailId = await generateDraftForCustomer(env, brand, customer, requestId);
       drafts.push({ customer_id: customer.id, email_id: emailId });
@@ -847,8 +854,9 @@ export async function generateOutreachForContactIds(
   const placeholders = (n: number) => Array(n).fill("?").join(",");
   const customerIds = [...new Set(unique.map((p) => p.customer_id))];
   const existing: Array<{ customer_id: number; contact_id: number; email_id: number; status: string }> = [];
-  for (let i = 0; i < customerIds.length; i += 100) {
-    const chunk = customerIds.slice(i, i + 100);
+  // D1 每语句最多 100 绑定：块 90 + brand_name(1) = 91。
+  for (let i = 0; i < customerIds.length; i += 90) {
+    const chunk = customerIds.slice(i, i + 90);
     const rows = await env.DB.prepare(
       `SELECT customer_id, contact_id, id AS email_id, status FROM outreach_emails
        WHERE brand_name = ? AND contact_id IS NOT NULL AND customer_id IN (${placeholders(chunk.length)})
@@ -880,11 +888,13 @@ export async function generateOutreachForContactIds(
   }
   const customers = new Map<number, OutreachCustomer>();
   const neededCustomerIds = [...new Set(todo.map((p) => p.customer_id))];
-  if (neededCustomerIds.length > 0) {
+  // D1 每语句最多 100 绑定：块 100 恰好合规（无其他绑定），分块防超。
+  for (let i = 0; i < neededCustomerIds.length; i += 90) {
+    const chunk = neededCustomerIds.slice(i, i + 90);
     const rows = await env.DB.prepare(
-      `SELECT ${OUTREACH_CUSTOMER_COLUMNS} FROM customers WHERE id IN (${placeholders(neededCustomerIds.length)}) ORDER BY id`,
+      `SELECT ${OUTREACH_CUSTOMER_COLUMNS} FROM customers WHERE id IN (${placeholders(chunk.length)}) ORDER BY id`,
     )
-      .bind(...neededCustomerIds)
+      .bind(...chunk)
       .all<OutreachCustomer>();
     for (const row of rows.results) customers.set(row.id, row);
   }

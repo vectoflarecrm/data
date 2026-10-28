@@ -261,6 +261,38 @@ describe("createCampaign: multi-contact snapshot", () => {
     const created = await createCampaign(env, { brandName: "Afarer", filters });
     expect(membersOf(db, created.id).filter((m) => m.customer_id === 3)).toHaveLength(3);
   });
+
+  it("150 家公司的 per-person 群发在 D1 每语句 100 绑定上限内完成（回归：块 100 + N = 101 超限）", async () => {
+    const { db } = await makeDb();
+    // 150 家公司各 1 个带邮箱联系人 —— 曾用块 100：100 id + 1 个 N 绑定 = 101，
+    // 生产 D1（上限 100）直接 "too many SQL variables"，per-person 群发创建失败。
+    const parts: string[] = [];
+    for (let i = 1; i <= 150; i++) {
+      parts.push(seedCustomer(i, null));
+      parts.push(seedContact(1000 + i, `c${i}`, 1, `bulk${i}@x.com`));
+    }
+    db.exec(parts.join("; "));
+    // 模拟 D1 硬上限：单条语句绑定参数 > 100 直接抛错（node:sqlite 默认 999，
+    // 不模拟则旧代码在本测试照样跑通）。
+    const limited = {
+      prepare(sql: string) {
+        if ((sql.match(/\?/g) ?? []).length > 100) {
+          throw new Error("too many SQL variables");
+        }
+        return db.prepare(sql);
+      },
+    };
+    const fake = new FakeD1(limited as any);
+    const env = { DB: fake, GMAIL_SEND_DELAY_MS: "0" } as unknown as AdminEnv;
+    const created = await createCampaign(env, {
+      brandName: "Afarer",
+      filters: parseSegmentFilters({ per_person: true, contacts_per_company: 1 }),
+    });
+    expect(created.total).toBe(150);
+    expect(created.companies).toBe(150);
+    const n = db.prepare("SELECT COUNT(*) AS n FROM outreach_campaign_members").get() as { n: number };
+    expect(n.n).toBe(150);
+  });
 });
 
 /* ── generate: per-pair independence (§5, the load-bearing property) ───── */
